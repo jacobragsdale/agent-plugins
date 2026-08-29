@@ -1,0 +1,39 @@
+# Local development stack: the API in Development mode (DevHeader auth enabled)
+# with its own PostgreSQL. Point ArtifactKeeper__* at a reachable Artifact Keeper,
+# or leave the defaults to exercise everything except publishing.
+#
+#   docker compose -f server/compose.yaml up --build
+#   curl -H 'X-Dev-User: CORP\jacob' http://localhost:8080/api/me
+
+name: marketplace-dev
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Marketplace: Host=db;Port=5432;Database=marketplace;Username=marketplace;Password=marketplace
+      Server__PublicBaseUrl: http://localhost:8080
+      ArtifactKeeper__BaseUrl: ${ARTIFACT_KEEPER_URL:-http://host.docker.internal:8080}
+      ArtifactKeeper__Username: ${ARTIFACT_KEEPER_USERNAME:-}
+      ArtifactKeeper__Password: ${ARTIFACT_KEEPER_PASSWORD:-}
+      Auth__AdminAccounts__0: jacob
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: marketplace
+      POSTGRES_PASSWORD: marketplace
+      POSTGRES_DB: marketplace
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marketplace -d marketplace"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

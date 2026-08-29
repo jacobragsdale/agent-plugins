@@ -1,0 +1,285 @@
+using System.Text.Json;
+using Marketplace.Api.Data;
+using Microsoft.EntityFrameworkCore;
+
+namespace Marketplace.Api.Events;
+
+/// <summary>One client event. Fields beyond <c>kind</c>, <c>occurredAt</c>, and <c>clientVersion</c> depend on the kind.</summary>
+public sealed record ClientEventDto(
+    string Kind,
+    DateTimeOffset OccurredAt,
+    string ClientVersion,
+    string? OsBuild,
+    string[]? Agents,
+    string[]? Installed,
+    Dictionary<string, string>? Checks,
+    string? PackageId,
+    string? Version,
+    string? FromVersion,
+    string? ToVersion);
+
+public sealed record EventsBatch(ClientEventDto[] Events);
+
+public sealed record EventsAccepted(int Accepted, int Duplicates, int Rejected, string[] Problems);
+
+public sealed record DailyCount(DateOnly Day, int Count);
+
+public sealed record PackageStats(
+    string Id,
+    int Installs,
+    int InstalledBase,
+    IReadOnlyList<DailyCount> InstallsByDay,
+    IReadOnlyDictionary<string, int> AgentMix);
+
+public sealed record AdminSummary(
+    int ActiveUsers1d,
+    int ActiveUsers7d,
+    int ActiveUsers30d,
+    int Publishers,
+    int Packages,
+    IReadOnlyDictionary<string, int> ClientVersions,
+    IReadOnlyDictionary<string, int> AgentMix,
+    IReadOnlyList<(string Id, int InstalledBase)> TopPackages,
+    IReadOnlyDictionary<string, int> PreflightFailures,
+    int OpenReports);
+
+public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProvider)
+{
+    public const int MaxBatch = 500;
+    private static readonly HashSet<string> Kinds = ["heartbeat", "install", "update", "uninstall"];
+    private static readonly TimeSpan FutureTolerance = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan MaxAge = TimeSpan.FromDays(30);
+
+    public async Task<EventsAccepted> RecordAsync(string account, EventsBatch batch, CancellationToken cancellationToken)
+    {
+        if (batch.Events.Length > MaxBatch)
+        {
+            throw new ArgumentException($"A batch may hold at most {MaxBatch} events.");
+        }
+
+        var now = timeProvider.GetUtcNow();
+        var received = now.UtcDateTime;
+        var accepted = 0;
+        var duplicates = 0;
+        var problems = new List<string>();
+        Heartbeat? heartbeat = null;
+        var pending = new List<ClientEvent>();
+        var seen = new HashSet<(string, DateTime, string?)>();
+
+        foreach (var dto in batch.Events)
+        {
+            if (!Kinds.Contains(dto.Kind))
+            {
+                problems.Add($"Unknown event kind {dto.Kind}.");
+                continue;
+            }
+
+            if (dto.OccurredAt > now + FutureTolerance || dto.OccurredAt < now - MaxAge)
+            {
+                problems.Add($"{dto.Kind} at {dto.OccurredAt:O} is outside the accepted window.");
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(dto.ClientVersion) || dto.ClientVersion.Length > 64)
+            {
+                problems.Add($"{dto.Kind} has no client version.");
+                continue;
+            }
+
+            var occurredAt = dto.OccurredAt.UtcDateTime;
+            var agents = Clean(dto.Agents, 16, 32);
+            if (dto.Kind == "heartbeat")
+            {
+                var candidate = new Heartbeat
+                {
+                    Account = account,
+                    OccurredAt = occurredAt,
+                    ClientVersion = dto.ClientVersion,
+                    OsBuild = (dto.OsBuild ?? string.Empty).Length <= 120 ? dto.OsBuild ?? string.Empty : dto.OsBuild![..120],
+                    Agents = agents,
+                    Installed = Clean(dto.Installed, 2000, 81),
+                    ChecksJson = JsonSerializer.Serialize(CleanChecks(dto.Checks)),
+                    ReceivedAt = received,
+                };
+                if (heartbeat is null || candidate.OccurredAt > heartbeat.OccurredAt)
+                {
+                    heartbeat = candidate;
+                }
+
+                accepted++;
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(dto.PackageId) || dto.PackageId.Length > 81 || !dto.PackageId.Contains('/'))
+            {
+                problems.Add($"{dto.Kind} has no canonical package id.");
+                continue;
+            }
+
+            if (!seen.Add((dto.Kind, occurredAt, dto.PackageId)))
+            {
+                duplicates++;
+                continue;
+            }
+
+            pending.Add(new ClientEvent
+            {
+                Account = account,
+                Kind = dto.Kind,
+                OccurredAt = occurredAt,
+                ClientVersion = dto.ClientVersion,
+                PackageId = dto.PackageId,
+                Version = Clip(dto.Kind == "update" ? dto.ToVersion ?? dto.Version : dto.Version, 64),
+                FromVersion = Clip(dto.FromVersion, 64),
+                Agents = agents,
+                ReceivedAt = received,
+            });
+        }
+
+        if (pending.Count > 0)
+        {
+            var kinds = pending.Select(item => item.Kind).Distinct().ToArray();
+            var earliest = pending.Min(item => item.OccurredAt);
+            var existing = await db.Events
+                .Where(item => item.Account == account && kinds.Contains(item.Kind) && item.OccurredAt >= earliest)
+                .Select(item => new { item.Kind, item.OccurredAt, item.PackageId })
+                .ToListAsync(cancellationToken);
+            var existingKeys = existing.Select(item => (item.Kind, item.OccurredAt, item.PackageId)).ToHashSet();
+            foreach (var item in pending)
+            {
+                if (existingKeys.Contains((item.Kind, item.OccurredAt, item.PackageId)))
+                {
+                    duplicates++;
+                    continue;
+                }
+
+                db.Events.Add(item);
+                accepted++;
+            }
+        }
+
+        if (heartbeat is not null)
+        {
+            var current = await db.Heartbeats.FindAsync([account], cancellationToken);
+            if (current is null)
+            {
+                db.Heartbeats.Add(heartbeat);
+            }
+            else if (heartbeat.OccurredAt >= current.OccurredAt)
+            {
+                current.OccurredAt = heartbeat.OccurredAt;
+                current.ClientVersion = heartbeat.ClientVersion;
+                current.OsBuild = heartbeat.OsBuild;
+                current.Agents = heartbeat.Agents;
+                current.Installed = heartbeat.Installed;
+                current.ChecksJson = heartbeat.ChecksJson;
+                current.ReceivedAt = heartbeat.ReceivedAt;
+            }
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+        return new EventsAccepted(accepted, duplicates, problems.Count, problems.ToArray());
+    }
+
+    public async Task<PackageStats> PackageStatsAsync(string canonicalId, CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var since = now.AddDays(-90);
+        var installs = await db.Events
+            .Where(item => item.Kind == "install" && item.PackageId == canonicalId)
+            .Select(item => new { item.OccurredAt, item.Agents })
+            .ToListAsync(cancellationToken);
+        var installedBase = await db.Heartbeats
+            .CountAsync(heartbeat => heartbeat.OccurredAt >= now.AddDays(-30) && heartbeat.Installed.Contains(canonicalId), cancellationToken);
+        var byDay = installs
+            .Where(item => item.OccurredAt >= since)
+            .GroupBy(item => DateOnly.FromDateTime(item.OccurredAt))
+            .Select(group => new DailyCount(group.Key, group.Count()))
+            .OrderBy(day => day.Day)
+            .ToArray();
+        var agentMix = installs
+            .Where(item => item.OccurredAt >= since)
+            .SelectMany(item => item.Agents)
+            .GroupBy(agent => agent, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+        return new PackageStats(canonicalId, installs.Count, installedBase, byDay, agentMix);
+    }
+
+    public async Task<AdminSummary> AdminSummaryAsync(CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var heartbeats = await db.Heartbeats.ToListAsync(cancellationToken);
+        var eventAccounts = await db.Events
+            .Where(item => item.OccurredAt >= now.AddDays(-30))
+            .Select(item => new { item.Account, item.OccurredAt })
+            .ToListAsync(cancellationToken);
+        int Active(int days)
+        {
+            var since = now.AddDays(-days);
+            return heartbeats.Where(heartbeat => heartbeat.OccurredAt >= since).Select(heartbeat => heartbeat.Account)
+                .Concat(eventAccounts.Where(item => item.OccurredAt >= since).Select(item => item.Account))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count();
+        }
+
+        var recent = heartbeats.Where(heartbeat => heartbeat.OccurredAt >= now.AddDays(-30)).ToArray();
+        var preflight = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var heartbeat in heartbeats.Where(heartbeat => heartbeat.OccurredAt >= now.AddDays(-7)))
+        {
+            Dictionary<string, string>? checks;
+            try
+            {
+                checks = JsonSerializer.Deserialize<Dictionary<string, string>>(heartbeat.ChecksJson);
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
+
+            foreach (var (id, status) in checks ?? [])
+            {
+                if (status == "fail")
+                {
+                    preflight[id] = preflight.GetValueOrDefault(id) + 1;
+                }
+            }
+        }
+
+        var installedBase = recent
+            .SelectMany(heartbeat => heartbeat.Installed.Distinct(StringComparer.Ordinal))
+            .GroupBy(id => id, StringComparer.Ordinal)
+            .Select(group => (group.Key, group.Count()))
+            .OrderByDescending(pair => pair.Item2)
+            .ThenBy(pair => pair.Key, StringComparer.Ordinal)
+            .Take(20)
+            .ToArray();
+        return new AdminSummary(
+            Active(1),
+            Active(7),
+            Active(30),
+            await db.Publishers.CountAsync(cancellationToken),
+            await db.Packages.CountAsync(package => package.Versions.Any(version => !version.Yanked), cancellationToken),
+            recent.GroupBy(heartbeat => heartbeat.ClientVersion, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal),
+            recent.SelectMany(heartbeat => heartbeat.Agents.Distinct(StringComparer.Ordinal)).GroupBy(agent => agent, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal),
+            installedBase,
+            preflight,
+            await db.Reports.CountAsync(cancellationToken));
+    }
+
+    private static string[] Clean(string[]? values, int maxCount, int maxLength) =>
+        (values ?? [])
+            .Select(value => value.Trim())
+            .Where(value => value.Length is > 0 and var length && length <= maxLength)
+            .Distinct(StringComparer.Ordinal)
+            .Take(maxCount)
+            .ToArray();
+
+    private static Dictionary<string, string> CleanChecks(Dictionary<string, string>? checks) =>
+        (checks ?? [])
+            .Where(pair => pair.Key.Length is > 0 and <= 64 && pair.Value is "ok" or "warn" or "fail" or "skipped")
+            .Take(200)
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+
+    private static string? Clip(string? value, int max) =>
+        value is null ? null : value.Length <= max ? value : value[..max];
+}

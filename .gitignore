@@ -29,3 +29,8 @@ dist-ssr
 # a fresh checkout has a complete preview of the download page.
 website/releases/*
 !website/releases/manifest.json
+
+# .NET build output
+server/**/bin/
+server/**/obj/
+server/**/TestResults/
