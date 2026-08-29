@@ -22,6 +22,21 @@ name = "skill-manager"
 path = "src/main.rs"
 test = false
 bench = false
+required-features = ["app"]
+
+[features]
+default = ["app"]
+# The desktop application and its IPC surface. Disable it to build the
+# validator binaries without Tauri; the marketplace server image does this so
+# it needs no GTK or WebKit libraries.
+app = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-autostart",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-opener",
+    "dep:tauri-plugin-single-instance",
+]
 
 [[bin]]
 name = "generate-schema"
@@ -42,31 +57,40 @@ test = false
 bench = false
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"], optional = true }
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1.2"
 sha2 = "0.11"
-tauri-plugin-autostart = "2.5.1"
-tauri-plugin-dialog = "2.7.2"
-tauri-plugin-opener = "2.5.4"
-tauri-plugin-single-instance = "2.4.3"
-tokio = { version = "1", features = ["time"] }
+tauri-plugin-autostart = { version = "2.5.1", optional = true }
+tauri-plugin-dialog = { version = "2.7.2", optional = true }
+tauri-plugin-opener = { version = "2.5.4", optional = true }
+tauri-plugin-single-instance = { version = "2.4.3", optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
 serde_yaml_ng = "0.10"
 jsonc-parser = { version = "0.33.1", features = ["cst", "serde_json"] }
 toml_edit = { version = "0.25.13", features = ["serde"] }
 url = "2"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots", "system-proxy"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls-native-roots", "system-proxy"] }
+base64 = "0.22"
 zip = "2"
 tar = "0.4"
 flate2 = "1"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_NetManagement",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Credentials",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+] }
 
 [dev-dependencies]
 tempfile = "3"

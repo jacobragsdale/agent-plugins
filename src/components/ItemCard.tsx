@@ -26,10 +26,24 @@ export function ItemCard({
             ))}
             {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
             {item.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
+            {item.marketplace?.lane === "official" ? <Badge color="violet">Official</Badge> : null}
           </div>
           <Text as="p" color="gray" size="2">
             {item.description}
           </Text>
+          {item.marketplace === null ? null : (
+            <div className="marketplace-meta">
+              <Text color="gray" size="1">
+                {item.marketplace.publisher} · v{item.marketplace.version} · {String(item.marketplace.installs)} install{item.marketplace.installs === 1 ? "" : "s"} ·{" "}
+                {String(item.marketplace.installedBase)} active user{item.marketplace.installedBase === 1 ? "" : "s"}
+              </Text>
+              {item.marketplace.tags.map((tag) => (
+                <Badge key={tag} color="gray" variant="outline" size="1">
+                  {tag}
+                </Badge>
+              ))}
+            </div>
+          )}
         </div>
         <div className="item-actions">
           <Button

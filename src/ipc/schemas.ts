@@ -31,6 +31,18 @@ export const capabilitySchema = z.discriminatedUnion("level", [
   z.strictObject({ level: z.literal("blocked"), reason: z.string().min(1), requiredAction: z.string().min(1) }).readonly()
 ]);
 export const compatibilitySchema = z.strictObject({ componentId: z.string().min(1), targetId: z.string().min(1), capability: capabilitySchema }).readonly();
+export const marketplaceMetaSchema = z
+  .strictObject({
+    publisher: z.string().min(1),
+    publisherAccount: z.string().min(1),
+    version: z.string().min(1),
+    lane: z.string().min(1),
+    tags: z.array(z.string().min(1)).readonly(),
+    publishedAt: z.string().min(1),
+    installs: z.number().int().nonnegative(),
+    installedBase: z.number().int().nonnegative()
+  })
+  .readonly();
 export const itemSchema = z
   .strictObject({
     id: z.string().min(3),
@@ -48,7 +60,8 @@ export const itemSchema = z
     components: z.array(componentSchema).readonly(),
     compatibility: z.array(compatibilitySchema).readonly(),
     destination: z.string().min(1).nullable(),
-    status: itemStatusSchema
+    status: itemStatusSchema,
+    marketplace: marketplaceMetaSchema.nullable().default(null)
   })
   .transform((item) => ({
     ...item,
@@ -98,6 +111,36 @@ export const repositorySchema = z
 export const itemReferenceSchema = z.strictObject({ id: z.string().min(1), sourceId: z.string().min(2), localId: z.string().min(1) }).readonly();
 export const itemFailureSchema = z.strictObject({ id: z.string().min(1), message: z.string().min(1) }).readonly();
 export const autoUpdateReportSchema = z.strictObject({ updatedItems: z.array(itemReferenceSchema).readonly(), failedItems: z.array(itemFailureSchema).readonly() }).readonly();
+export const identitySchema = z.strictObject({ account: z.string().min(1), namespace: z.string().min(1), displayName: z.string().min(1), admin: z.boolean(), authMode: z.string().min(1) }).readonly();
+export const checkStatusSchema = z.enum(["ok", "warn", "fail", "skipped"]);
+export const remediationSchema = z
+  .discriminatedUnion("kind", [
+    z.strictObject({ kind: z.literal("autoFixed") }),
+    z.strictObject({ kind: z.literal("action"), action: z.string().min(1) }),
+    z.strictObject({ kind: z.literal("manual"), text: z.string().min(1) })
+  ])
+  .nullable();
+export const preflightCheckSchema = z
+  .strictObject({
+    id: z.string().min(1),
+    group: z.string().min(1),
+    title: z.string().min(1),
+    status: checkStatusSchema,
+    detail: z.string(),
+    remediation: remediationSchema,
+    blocking: z.boolean(),
+    durationMillis: z.number().int().nonnegative()
+  })
+  .readonly();
+export const preflightReportSchema = z
+  .strictObject({
+    startedAtEpochSeconds: z.number().int().nonnegative(),
+    durationMillis: z.number().int().nonnegative(),
+    blocked: z.boolean(),
+    authMode: z.string().min(1),
+    checks: z.array(preflightCheckSchema).readonly()
+  })
+  .readonly();
 export const appStateSchema = z
   .strictObject({
     checkedAtEpochSeconds: z.number().int().nonnegative(),
@@ -106,7 +149,10 @@ export const appStateSchema = z
     repositories: z.array(repositorySchema).readonly().default([]),
     sources: z.array(sourceSchema).readonly(),
     items: z.array(itemSchema).readonly(),
-    agentProfiles: z.array(agentProfileSchema).readonly()
+    agentProfiles: z.array(agentProfileSchema).readonly(),
+    marketplaceUrl: z.string().min(1).nullable().default(null),
+    identity: identitySchema.nullable().default(null),
+    preflight: preflightReportSchema.nullable().default(null)
   })
   .readonly();
 export const preparedSourceSchema = z
@@ -158,3 +204,7 @@ export type BulkAction = z.infer<typeof bulkActionSchema>;
 export type BulkPlan = z.infer<typeof bulkPlanSchema>;
 export type AgentProfile = z.infer<typeof agentProfileSchema>;
 export type TargetId = z.infer<typeof targetIdSchema>;
+export type AppIdentity = z.infer<typeof identitySchema>;
+export type CheckStatus = z.infer<typeof checkStatusSchema>;
+export type PreflightCheck = z.infer<typeof preflightCheckSchema>;
+export type PreflightReport = z.infer<typeof preflightReportSchema>;

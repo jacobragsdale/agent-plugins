@@ -111,7 +111,57 @@ pub(super) fn build_app_state(
         sources,
         items,
         agent_profiles: agent_profiles::states(paths)?,
+        marketplace_url: None,
+        identity: None,
+        preflight: None,
     })
+}
+
+const IDENTITY_CACHE_FILE: &str = "marketplace-identity.json";
+
+/// Attaches marketplace index metadata to the items it lists.
+pub(super) fn apply_index(items: &mut [CatalogItemState], index: &crate::marketplace::Index) {
+    for item in items {
+        item.marketplace = index
+            .package(&item.id)
+            .map(crate::app_state::MarketplaceMeta::from_index);
+    }
+}
+
+pub(super) fn write_identity_cache(
+    cache: &std::path::Path,
+    identity: Option<&crate::app_state::MarketplaceIdentity>,
+) {
+    let path = cache.join(IDENTITY_CACHE_FILE);
+    match identity {
+        Some(identity) => {
+            if let Ok(json) = serde_json::to_vec(identity) {
+                let _ = std::fs::create_dir_all(cache);
+                let _ = std::fs::write(path, json);
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn read_identity_cache(cache: &std::path::Path) -> Option<crate::app_state::MarketplaceIdentity> {
+    let bytes = std::fs::read(cache.join(IDENTITY_CACHE_FILE)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Fills the marketplace fields of a cached state from what the last sync stored.
+pub(super) fn apply_cached_marketplace(state: &mut AppState, cache: &std::path::Path) {
+    let Some(base_url) = crate::locator::marketplace_base_url() else {
+        return;
+    };
+    state.marketplace_url = Some(base_url.to_string());
+    if let Some(index) = crate::marketplace::read_cached_index(cache) {
+        apply_index(&mut state.items, &index);
+    }
+    state.identity = read_identity_cache(cache);
+    state.preflight = crate::preflight::PreflightReport::read_cache(cache);
 }
 
 pub(super) fn repository_state(
@@ -214,6 +264,7 @@ pub(super) fn current_item_state(
             None => None,
         },
         status,
+        marketplace: None,
     })
 }
 
@@ -255,6 +306,7 @@ pub(super) fn removed_item_state(
                 .to_string(),
         ),
         status: super::status::item_status(paths, ledger_state, None, id),
+        marketplace: None,
     })
 }
 
@@ -295,12 +347,14 @@ pub(super) fn cached_state_now() -> Result<AppState, String> {
             message: None,
         })
         .collect::<Vec<_>>();
-    build_app_state(
+    let mut state = build_app_state(
         &paths,
         &repositories,
         &loaded,
         checked,
         AutoUpdateReport::default(),
         None,
-    )
+    )?;
+    apply_cached_marketplace(&mut state, &cache);
+    Ok(state)
 }

@@ -19,6 +19,13 @@ pub(crate) async fn load_cached_manifest_state(
 }
 
 #[tauri::command]
+pub(crate) async fn run_preflight(
+    runtime: State<'_, RuntimeState>,
+) -> Result<crate::preflight::PreflightReport, String> {
+    application::run_preflight(runtime.inner()).await
+}
+
+#[tauri::command]
 pub(crate) async fn sync_manifest_state(
     runtime: State<'_, RuntimeState>,
 ) -> Result<AppState, String> {
