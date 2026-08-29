@@ -137,7 +137,16 @@ pub(super) fn synchronize() -> Result<AppState, String> {
     let checked = current_epoch_seconds();
     let mut config_file = source::read_sources_config(&config)?;
     let mut catalog_message = ensure_default_catalog(&cache, &mut config_file.repositories);
-    let (updated_repositories, loaded_repositories) =
+    let installed_keys = crate::executor::read_ledger(&paths)
+        .map(|ledger| {
+            ledger
+                .items
+                .values()
+                .map(|record| record.source_key.clone())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let (updated_repositories, loaded_repositories, retired_repositories) =
         refresh_repositories(&cache, config_file.repositories);
     if let Some(message) =
         subscribe_marketplace_sources(&cache, &loaded_repositories, &mut config_file.sources)
@@ -147,7 +156,14 @@ pub(super) fn synchronize() -> Result<AppState, String> {
             None => message,
         });
     }
-    let (updated_sources, loaded_sources) = refresh_sources(&cache, config_file.sources);
+    let (updated_sources, loaded_sources, retired_sources) =
+        refresh_sources(&cache, config_file.sources, &installed_keys);
+    if let Some(message) = retired_message(&retired_repositories, &retired_sources) {
+        catalog_message = Some(match catalog_message {
+            Some(existing) => format!("{existing} {message}"),
+            None => message,
+        });
+    }
     source::write_sources_config(
         &config,
         &SourcesConfig {
@@ -352,14 +368,54 @@ pub(super) fn ensure_default_catalog(
     }
 }
 
+/// One line naming what sync retired because it no longer exists upstream.
+fn retired_message(repositories: &[String], sources: &[String]) -> Option<String> {
+    let mut parts = Vec::new();
+    if !repositories.is_empty() {
+        parts.push(format!(
+            "Removed the retired catalog{} {}.",
+            if repositories.len() == 1 { "" } else { "s" },
+            repositories.join(", ")
+        ));
+    }
+    if !sources.is_empty() {
+        parts.push(format!(
+            "Removed the retired source{} {}.",
+            if sources.len() == 1 { "" } else { "s" },
+            sources.join(", ")
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+/// Refreshes every configured catalog. A catalog whose URL no longer exists
+/// (HTTP 404/410) is retired: dropped from the configuration and its cache
+/// wiped, so a decommissioned host never surfaces as a persistent error. The
+/// returned names are the retired catalogs.
 pub(super) fn refresh_repositories(
     cache: &std::path::Path,
     definitions: Vec<ConfiguredRepository>,
-) -> (Vec<ConfiguredRepository>, Vec<LoadedRepository>) {
+) -> (
+    Vec<ConfiguredRepository>,
+    Vec<LoadedRepository>,
+    Vec<String>,
+) {
     let mut updated = Vec::with_capacity(definitions.len());
     let mut loaded = Vec::with_capacity(definitions.len());
+    let mut retired = Vec::new();
     for definition in definitions {
-        match source::prepare_repository_refresh(&definition, cache) {
+        let prepared = source::prepare_repository_refresh(&definition, cache).or_else(|message| {
+            if !source::is_corrupt_cache_error(&message) {
+                return Err(message);
+            }
+            eprintln!(
+                "Wiping the unreadable cache of the catalog {} and refreshing it again: {message}",
+                definition.name
+            );
+            source::remove_repository_cache(cache, &definition.repository_key)?;
+            source::prepare_repository_refresh(&definition, cache)
+        });
+        match prepared {
             Ok(candidate) => {
                 if candidate.definition.repository_id != definition.repository_id {
                     source::discard_repository(&candidate);
@@ -407,6 +463,18 @@ pub(super) fn refresh_repositories(
                 }
             }
             Err(message) => {
+                if crate::artifact::is_gone(&message) {
+                    if let Err(error) =
+                        source::remove_repository_cache(cache, &definition.repository_key)
+                    {
+                        eprintln!(
+                            "Could not remove the cache of the retired catalog {}: {error}",
+                            definition.name
+                        );
+                    }
+                    retired.push(definition.name.clone());
+                    continue;
+                }
                 let snapshot = source::load_current_repository(cache, &definition)
                     .ok()
                     .flatten();
@@ -421,22 +489,40 @@ pub(super) fn refresh_repositories(
             }
         }
     }
-    (updated, loaded)
+    (updated, loaded, retired)
 }
 
+/// Refreshes every configured source. A source whose archive no longer exists
+/// (HTTP 404/410) and has nothing installed from it is retired: dropped from
+/// the configuration and its cache wiped. One with installed packages is kept
+/// with a note so the packages can still be removed. The returned names are
+/// the retired sources.
 pub(super) fn refresh_sources(
     cache: &std::path::Path,
     definitions: Vec<ConfiguredSource>,
-) -> (Vec<ConfiguredSource>, Vec<LoadedSource>) {
+    installed_keys: &BTreeSet<String>,
+) -> (Vec<ConfiguredSource>, Vec<LoadedSource>, Vec<String>) {
     let mut claimed = definitions
         .iter()
         .map(|source| (source.source_id.clone(), source.source_key.clone()))
         .collect::<BTreeMap<_, _>>();
     let mut updated_definitions = Vec::with_capacity(definitions.len());
     let mut loaded = Vec::with_capacity(definitions.len());
+    let mut retired = Vec::new();
 
     for definition in definitions {
-        match source::prepare_refresh(&definition, cache) {
+        let prepared = source::prepare_refresh(&definition, cache).or_else(|message| {
+            if !source::is_corrupt_cache_error(&message) {
+                return Err(message);
+            }
+            eprintln!(
+                "Wiping the unreadable cache of the source {} and refreshing it again: {message}",
+                definition.name
+            );
+            source::remove_source_cache(cache, &definition.source_key)?;
+            source::prepare_refresh(&definition, cache)
+        });
+        match prepared {
             Ok(candidate) => {
                 let source_id_changed = candidate.definition.source_id != definition.source_id;
                 let duplicate_namespace = claimed
@@ -490,16 +576,44 @@ pub(super) fn refresh_sources(
                     ),
                 }
             }
-            Err(message) => push_refresh_error(
-                cache,
-                definition,
-                message,
-                &mut updated_definitions,
-                &mut loaded,
-            ),
+            Err(message) => {
+                if crate::artifact::is_gone(&message) {
+                    if !installed_keys.contains(&definition.source_key) {
+                        if let Err(error) =
+                            source::remove_source_cache(cache, &definition.source_key)
+                        {
+                            eprintln!(
+                                "Could not remove the cache of the retired source {}: {error}",
+                                definition.name
+                            );
+                        }
+                        retired.push(definition.name.clone());
+                        continue;
+                    }
+                    let message = format!(
+                        "{} is no longer published at its URL. Its installed packages remain until you remove the source.",
+                        definition.name
+                    );
+                    push_refresh_error(
+                        cache,
+                        definition,
+                        message,
+                        &mut updated_definitions,
+                        &mut loaded,
+                    );
+                    continue;
+                }
+                push_refresh_error(
+                    cache,
+                    definition,
+                    message,
+                    &mut updated_definitions,
+                    &mut loaded,
+                )
+            }
         }
     }
-    (updated_definitions, loaded)
+    (updated_definitions, loaded, retired)
 }
 
 pub(super) fn is_unsupported_legacy_install(record: &InstallationRecord) -> bool {
@@ -678,6 +792,103 @@ fn overlapping_update_groups<'a>(
         }
     }
     groups
+}
+
+#[cfg(test)]
+mod retire_tests {
+    use super::*;
+    use crate::locator::Locator;
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::net::TcpListener;
+
+    fn serve_not_found(requests: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for _ in 0..requests {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok() {
+                    if line == "\r\n" || line == "\n" || line.is_empty() {
+                        break;
+                    }
+                    line.clear();
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[test]
+    fn a_gone_source_without_installs_is_retired_and_its_cache_wiped() {
+        let base = serve_not_found(4);
+        let cache = tempfile::tempdir().expect("cache");
+        let locator = Locator::display_url(format!("{base}/retired-latest.zip"));
+        let definition = ConfiguredSource {
+            source_key: locator.source_key(),
+            source_id: "retired".to_string(),
+            name: "Retired".to_string(),
+            description: "Gone".to_string(),
+            locator,
+            repository_key: None,
+        };
+        let root = source::source_cache_root(cache.path(), &definition.source_key);
+        std::fs::create_dir_all(&root).expect("cache root");
+        std::fs::write(root.join("current.json"), b"{}").expect("stale pointer");
+
+        let (updated, loaded, retired) =
+            refresh_sources(cache.path(), vec![definition.clone()], &BTreeSet::new());
+        assert!(
+            updated.is_empty(),
+            "{:?}",
+            loaded
+                .iter()
+                .map(|source| source.message.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(loaded.is_empty());
+        assert_eq!(retired, vec!["Retired".to_string()]);
+        assert!(!root.exists());
+
+        let installed = BTreeSet::from([definition.source_key.clone()]);
+        let (updated, loaded, retired) =
+            refresh_sources(cache.path(), vec![definition], &installed);
+        assert_eq!(updated.len(), 1);
+        assert_eq!(retired.len(), 0);
+        assert!(loaded[0].refresh_failed);
+        assert!(loaded[0]
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("no longer published")));
+    }
+
+    #[test]
+    fn a_gone_catalog_is_retired() {
+        let base = serve_not_found(2);
+        let cache = tempfile::tempdir().expect("cache");
+        let locator = Locator::display_url(format!("{base}/catalog.json"));
+        let definition = ConfiguredRepository {
+            repository_key: locator.repository_key(),
+            repository_id: "nexus".to_string(),
+            name: "Nexus".to_string(),
+            description: "Retired host".to_string(),
+            locator,
+        };
+        let (updated, loaded, retired) = refresh_repositories(cache.path(), vec![definition]);
+        assert!(updated.is_empty());
+        assert!(loaded.is_empty());
+        assert_eq!(retired, vec!["Nexus".to_string()]);
+        assert_eq!(
+            retired_message(&retired, &[]).as_deref(),
+            Some("Removed the retired catalog Nexus.")
+        );
+    }
 }
 
 #[cfg(test)]

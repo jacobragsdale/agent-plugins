@@ -395,6 +395,12 @@ fn is_loopback_http(url: &str) -> bool {
     })
 }
 
+/// True when a refresh error means the artifact no longer exists at its URL
+/// (HTTP 404 or 410), as opposed to a transient failure.
+pub(crate) fn is_gone(message: &str) -> bool {
+    message.contains("HTTP 404") || message.contains("HTTP 410")
+}
+
 fn require_success(response: Response, operation: &str) -> Result<Response, String> {
     let status = response.status();
     if status.is_success() {
