@@ -626,6 +626,12 @@ pub(crate) fn discard_repository(candidate: &RepositoryCandidate) {
     }
 }
 
+/// True when a refresh failed because the local cache for the source or
+/// catalog is unreadable, so wiping the cache and refreshing again is the fix.
+pub(crate) fn is_corrupt_cache_error(message: &str) -> bool {
+    message.contains("revision pointer")
+}
+
 pub(crate) fn remove_source_cache(cache_base: &Path, source_key: &str) -> Result<(), String> {
     remove_cache_root(&source_cache_root(cache_base, source_key))
 }
