@@ -1,5 +1,5 @@
 import { confirm } from "@tauri-apps/plugin-dialog";
-import type { AgentProfile, AppState, BulkAction, BulkPlan, CatalogItem, ItemStatus, SourceState } from "../ipc/schemas";
+import type { AgentProfile, AppState, BulkAction, BulkPlan, CatalogItem, ItemStatus, SourceRemovalPlan, SourceState } from "../ipc/schemas";
 
 export type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
 
@@ -120,6 +120,37 @@ export function bulkLabels(action: BulkAction): Readonly<{ action: string; title
     case "uninstall":
       return { action: "Uninstall", title: "Uninstall all", button: "Uninstall", warning: "" };
   }
+}
+
+// A package that runs an MCP server starts a command on this machine whenever
+// an agent loads it, so the app asks before it installs one.
+export async function reviewApproval(name: string, riskDetails: readonly string[]): Promise<boolean> {
+  const detail = riskDetails.length === 0 ? "" : `\n\n${riskDetails.join("\n")}`;
+  return confirm(`${name} installs an MCP server. Every detected agent will run it.${detail}`, { title: "Approve MCP server", kind: "warning", okLabel: "Approve and Install", cancelLabel: "Cancel" });
+}
+
+export async function reviewBulkApproval(names: readonly string[]): Promise<boolean> {
+  return confirm(`${names.join(", ")} install MCP servers. Every detected agent will run them.`, {
+    title: "Approve MCP servers",
+    kind: "warning",
+    okLabel: "Approve and Install",
+    cancelLabel: "Cancel"
+  });
+}
+
+export async function reviewSourceRemoval(source: SourceState, plan: SourceRemovalPlan): Promise<boolean> {
+  const count = plan.items.length;
+  const modified = plan.items.flatMap((item) => item.paths).filter((path) => path.modified);
+  const warning =
+    modified.length === 0
+      ? ""
+      : ` ${String(modified.length)} file${modified.length === 1 ? " has" : "s have"} local changes that were not made by Agent Plugins: ${modified.map((path) => path.path).join(", ")}.`;
+  return confirm(`Remove ${source.name} and uninstall ${String(count)} package${count === 1 ? "" : "s"} it installed?${warning}`, {
+    title: "Remove source",
+    kind: "warning",
+    okLabel: modified.length === 0 ? "Remove" : "Remove and Discard Changes",
+    cancelLabel: "Cancel"
+  });
 }
 
 export async function reviewReset(): Promise<boolean> {

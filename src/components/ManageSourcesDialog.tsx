@@ -37,6 +37,7 @@ export function ManageSourcesDialog({
   open,
   state,
   adding,
+  error,
   removing,
   onOpenChange,
   onAddListed,
@@ -46,6 +47,7 @@ export function ManageSourcesDialog({
   open: boolean;
   state: AppState | null;
   adding: boolean;
+  error: string | null;
   removing: ReadonlySet<string>;
   onOpenChange: (open: boolean) => void;
   onAddListed: (repository: RepositoryState, listed: ListedSource) => Promise<void>;
@@ -60,6 +62,11 @@ export function ManageSourcesDialog({
       <Dialog.Content maxWidth="720px">
         <Dialog.Title>Manage sources</Dialog.Title>
         <Dialog.Description>Adding a source makes its skills and MCP servers available. Nothing is installed until you choose it.</Dialog.Description>
+        {error === null ? null : (
+          <Text as="p" color="red" size="2">
+            {error}
+          </Text>
+        )}
         {state?.catalogMessage === null || state?.catalogMessage === undefined ? null : (
           <Text as="p" color="red" size="2">
             {state.catalogMessage}

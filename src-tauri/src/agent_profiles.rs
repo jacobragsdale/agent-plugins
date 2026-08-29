@@ -9,12 +9,14 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const PROFILES_FILE: &str = "agent-profiles.json";
 const PROFILES_BACKUP_FILE: &str = "agent-profiles.json.previous";
 const PROFILES_VERSION: u8 = 1;
 const DETECTION_TIMEOUT: Duration = Duration::from_secs(3);
+const DETECTION_CACHE_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -141,6 +143,8 @@ pub(crate) fn apply_detected_defaults(paths: &SystemPaths) -> Result<Vec<AgentPr
     Ok(materialize(&next))
 }
 
+/// Only tests choose an agent by hand; the app enables what it detects.
+#[cfg(test)]
 pub(crate) fn set_enabled(
     paths: &SystemPaths,
     target_id: TargetId,
@@ -208,13 +212,44 @@ fn reload_guidance(target: TargetId) -> &'static str {
     }
 }
 
+#[derive(Clone)]
 struct Detection {
     detected: bool,
     version: Option<String>,
     message: Option<String>,
 }
 
+/// Detection runs `<agent> --version` for most targets, so a burst of state
+/// reloads would spawn a process per agent per reload. Remember what it found
+/// for a short while; a sync or an on-demand preflight starts over.
+fn detection_cache() -> &'static Mutex<BTreeMap<TargetId, (Instant, Detection)>> {
+    static CACHE: OnceLock<Mutex<BTreeMap<TargetId, (Instant, Detection)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Forgets what detection found, so the next read probes the machine again.
+pub(crate) fn clear_detection_cache() {
+    if let Ok(mut cache) = detection_cache().lock() {
+        cache.clear();
+    }
+}
+
 fn detect(target: TargetId) -> Detection {
+    if let Ok(cache) = detection_cache().lock() {
+        if let Some((found_at, detection)) = cache.get(&target) {
+            if found_at.elapsed() < DETECTION_CACHE_TTL {
+                return detection.clone();
+            }
+        }
+    }
+    let detection = detect_now(target);
+    if let Ok(mut cache) = detection_cache().lock() {
+        cache.insert(target, (Instant::now(), detection.clone()));
+    }
+    detection
+}
+
+fn detect_now(target: TargetId) -> Detection {
     if let Some(detection) = detect_application(target) {
         return detection;
     }

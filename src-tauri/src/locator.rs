@@ -45,6 +45,17 @@ impl Locator {
     }
 }
 
+/// Where a person downloads a newer client. A build-time constant like
+/// `MARKETPLACE_URL`; empty means the app cannot offer a download and says so
+/// instead of opening nothing.
+pub(crate) const DOWNLOAD_URL: &str = "";
+
+/// The download site URL, or `None` when this build has none.
+pub(crate) fn download_url() -> Option<&'static str> {
+    let url = DOWNLOAD_URL.trim().trim_end_matches('/');
+    (!url.is_empty()).then_some(url)
+}
+
 /// The marketplace base URL without a trailing slash, or `None` when disabled.
 pub(crate) fn marketplace_base_url() -> Option<&'static str> {
     let url = MARKETPLACE_URL.trim().trim_end_matches('/');

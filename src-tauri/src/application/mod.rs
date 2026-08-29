@@ -1,6 +1,5 @@
 //! Application service for source synchronization and file installation.
 
-mod agents;
 mod items;
 mod project;
 mod sources;
@@ -8,8 +7,8 @@ pub(crate) mod status;
 mod sync;
 
 use crate::app_state::SourceStatus;
+use crate::source::SourceCandidate;
 use crate::source::{ConfiguredRepository, ConfiguredSource, RepositorySnapshot, SourceSnapshot};
-use crate::source::{RepositoryCandidate, SourceCandidate};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "app")]
@@ -18,17 +17,11 @@ use tokio::sync::Mutex;
 #[cfg(feature = "app")]
 use tokio::time::{self, MissedTickBehavior};
 
-pub(crate) use agents::{
-    list_agent_profiles, preview_agent_cleanup, preview_agent_enable, set_agent_enabled,
-};
 pub(crate) use items::{
-    bulk_plan, bulk_run, install_item, plan_source_removal, preview_install, remove_source,
-    replace_item, reset_app, uninstall_item,
+    bulk_plan, bulk_run, install_item, plan_source_removal, remove_source, replace_item, reset_app,
+    uninstall_item,
 };
-pub(crate) use sources::{
-    cancel_prepared_source, cancel_prepared_source_repository, confirm_source,
-    confirm_source_repository, prepare_source, prepare_source_repository, remove_source_repository,
-};
+pub(crate) use sources::{cancel_prepared_source, confirm_source, prepare_source};
 pub(crate) use sync::{load_cached_app_state, run_preflight, sync_app_state};
 
 #[cfg(feature = "app")]
@@ -40,7 +33,6 @@ pub(crate) struct RuntimeState {
     pub(super) operation_lock: Mutex<()>,
     pub(super) sync_lock: Mutex<()>,
     pub(super) pending_sources: Mutex<BTreeMap<String, SourceCandidate>>,
-    pub(super) pending_repositories: Mutex<BTreeMap<String, RepositoryCandidate>>,
 }
 
 impl RuntimeState {
@@ -49,7 +41,6 @@ impl RuntimeState {
             operation_lock: Mutex::new(()),
             sync_lock: Mutex::new(()),
             pending_sources: Mutex::new(BTreeMap::new()),
-            pending_repositories: Mutex::new(BTreeMap::new()),
         })
     }
 }
@@ -116,14 +107,15 @@ pub(crate) fn spawn_app_sync<R: Runtime>(app: AppHandle<R>) {
         let Some(runtime) = app.try_state::<RuntimeState>() else {
             return;
         };
-        if let Ok(state) = sync_app_state(runtime.inner()).await {
-            let _ = app.emit(
-                SCHEDULED_SYNC_EVENT,
-                crate::app_state::ScheduledSync::Updated {
-                    state: Box::new(state),
-                },
-            );
-        }
+        // Report a failed manual check the same way the scheduler does, so
+        // "Check for Updates Now" is never silent.
+        let event = match sync_app_state(runtime.inner()).await {
+            Ok(state) => crate::app_state::ScheduledSync::Updated {
+                state: Box::new(state),
+            },
+            Err(message) => crate::app_state::ScheduledSync::Failed { message },
+        };
+        let _ = app.emit(SCHEDULED_SYNC_EVENT, event);
     });
 }
 
@@ -243,7 +235,11 @@ mod live_nexus_tests {
     async fn install_git_ops(runtime: &RuntimeState) -> Result<AppState, String> {
         let state = add_listed_skillbook(runtime).await?;
         if !state.agent_profiles.iter().any(|profile| profile.enabled) {
-            set_agent_enabled(runtime, TargetId::GrokBuild, true, false, true).await?;
+            crate::agent_profiles::set_enabled(
+                &crate::paths::SystemPaths::from_system()?,
+                TargetId::GrokBuild,
+                true,
+            )?;
         }
         install_item(runtime, "skillbook", "git-ops", true, None).await?;
         load_cached_app_state(runtime)

@@ -21,7 +21,14 @@ export const agentProfileSchema = z
   })
   .readonly();
 export const componentSchema = z
-  .strictObject({ id: z.string().min(1), kind: z.string().min(1), description: z.string().min(1), manualInvocation: z.boolean(), status: itemStatusSchema.optional() })
+  .strictObject({
+    id: z.string().min(1),
+    kind: z.string().min(1),
+    description: z.string().min(1),
+    manualInvocation: z.boolean(),
+    status: itemStatusSchema.optional(),
+    requiresApproval: z.boolean().default(false)
+  })
   .readonly();
 export const capabilitySchema = z.discriminatedUnion("level", [
   z.strictObject({ level: z.literal("native") }).readonly(),
@@ -61,6 +68,8 @@ export const itemSchema = z
     compatibility: z.array(compatibilitySchema).readonly(),
     destination: z.string().min(1).nullable(),
     status: itemStatusSchema,
+    requiresApproval: z.boolean().default(false),
+    riskDetails: z.array(z.string().min(1)).readonly().default([]),
     marketplace: marketplaceMetaSchema.nullable().default(null)
   })
   .transform((item) => ({
@@ -70,7 +79,8 @@ export const itemSchema = z
       kind: component.kind,
       description: component.description,
       manualInvocation: component.manualInvocation,
-      status: component.status ?? item.status
+      status: component.status ?? item.status,
+      requiresApproval: component.requiresApproval
     }))
   }))
   .readonly();
@@ -151,6 +161,7 @@ export const appStateSchema = z
     items: z.array(itemSchema).readonly(),
     agentProfiles: z.array(agentProfileSchema).readonly(),
     marketplaceUrl: z.string().min(1).nullable().default(null),
+    downloadUrl: z.string().min(1).nullable().default(null),
     identity: identitySchema.nullable().default(null),
     preflight: preflightReportSchema.nullable().default(null)
   })
@@ -178,14 +189,6 @@ export const bulkResultSchema = z
 export const removalPathSchema = z.strictObject({ path: z.string().min(1), modified: z.boolean() }).readonly();
 export const removalItemSchema = z.strictObject({ id: z.string().min(1), paths: z.array(removalPathSchema).readonly() }).readonly();
 export const sourceRemovalPlanSchema = z.strictObject({ sourceId: z.string().min(2), items: z.array(removalItemSchema).readonly() }).readonly();
-export const targetCleanupPreviewSchema = z
-  .strictObject({
-    targetId: targetIdSchema,
-    bindingCount: z.number().int().nonnegative(),
-    resourcesRemoved: z.array(z.string().min(1)).readonly(),
-    resourcesRetained: z.array(z.string().min(1)).readonly()
-  })
-  .readonly();
 export const scheduledSyncSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("updated"), state: appStateSchema }).readonly(),
   z.strictObject({ kind: z.literal("failed"), message: z.string().min(1) }).readonly()
@@ -205,6 +208,7 @@ export type BulkPlan = z.infer<typeof bulkPlanSchema>;
 export type AgentProfile = z.infer<typeof agentProfileSchema>;
 export type TargetId = z.infer<typeof targetIdSchema>;
 export type AppIdentity = z.infer<typeof identitySchema>;
+export type SourceRemovalPlan = z.infer<typeof sourceRemovalPlanSchema>;
 export type CheckStatus = z.infer<typeof checkStatusSchema>;
 export type PreflightCheck = z.infer<typeof preflightCheckSchema>;
 export type PreflightReport = z.infer<typeof preflightReportSchema>;

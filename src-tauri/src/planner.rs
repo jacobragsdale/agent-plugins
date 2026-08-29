@@ -247,18 +247,9 @@ pub(crate) fn preflight_installed_conflicts(
     Ok(())
 }
 
-pub(crate) fn preview(item: &CatalogItem, plan: &OperationPlan) -> InstallPreview {
-    let planned_ids = plan
-        .compatibility
-        .iter()
-        .map(|entry| entry.component_id.as_str())
-        .collect::<BTreeSet<_>>();
-    let components = item
-        .components
-        .iter()
-        .filter(|component| planned_ids.contains(component.id.as_str()))
-        .collect::<Vec<_>>();
-    let trust_tier = if components
+/// Trust tier of a set of components: 3 runs an MCP server, 2 adds a skill.
+fn trust_tier(components: &[&crate::catalog::CatalogComponent]) -> u8 {
+    if components
         .iter()
         .any(|component| component.kind == CatalogComponentKind::McpServer)
     {
@@ -270,9 +261,32 @@ pub(crate) fn preview(item: &CatalogItem, plan: &OperationPlan) -> InstallPrevie
         2
     } else {
         1
-    };
+    }
+}
+
+/// Whether installing these components needs the explicit Tier 3 approval.
+/// The app asks before it installs; the CLI takes `--approve-mcp`.
+pub(crate) fn requires_approval(
+    item: &CatalogItem,
+    components: &[&crate::catalog::CatalogComponent],
+) -> bool {
+    item.manifest_version == 2 && trust_tier(components) >= 3
+}
+
+pub(crate) fn preview(item: &CatalogItem, plan: &OperationPlan) -> InstallPreview {
+    let planned_ids = plan
+        .compatibility
+        .iter()
+        .map(|entry| entry.component_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let components = item
+        .components
+        .iter()
+        .filter(|component| planned_ids.contains(component.id.as_str()))
+        .collect::<Vec<_>>();
+    let trust_tier = trust_tier(&components);
     let mut risk_details = Vec::new();
-    for component in components {
+    for component in &components {
         let Some(server) = &component.mcp_server else {
             continue;
         };
@@ -320,7 +334,7 @@ pub(crate) fn preview(item: &CatalogItem, plan: &OperationPlan) -> InstallPrevie
             .collect(),
         warnings: plan.warnings.clone(),
         trust_tier,
-        requires_approval: item.manifest_version == 2 && trust_tier >= 3,
+        requires_approval: requires_approval(item, &components),
         risk_details,
     }
 }

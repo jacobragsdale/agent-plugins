@@ -59,12 +59,12 @@ Checks run in parallel where independent, each with a timeout. A timed-out check
 
 ### Agents
 
-| ID                | Checks                                                                | Status rules                           | Remediation         |
-| ----------------- | --------------------------------------------------------------------- | -------------------------------------- | ------------------- |
-| `agents.detected` | At least one supported agent is installed.                            | `warn` when none.                      | action `showAgents` |
-| `agents.ledger`   | The ledger reads and its version is current.                          | `fail` and blocking when unreadable.   | manual              |
-| `agents.journal`  | The recovery journal was clean, rolled back, or cleaned up at launch. | `warn` when a rollback or cleanup ran. | —                   |
-| `agents.drift`    | Owned resources whose digest no longer matches the ledger.            | `warn` with the count and paths.       | action `showDrift`  |
+| ID                | Checks                                                                | Status rules                           | Remediation        |
+| ----------------- | --------------------------------------------------------------------- | -------------------------------------- | ------------------ |
+| `agents.detected` | At least one supported agent is installed.                            | `warn` when none.                      | manual             |
+| `agents.ledger`   | The ledger reads and its version is current.                          | `fail` and blocking when unreadable.   | manual             |
+| `agents.journal`  | The recovery journal was clean, rolled back, or cleaned up at launch. | `warn` when a rollback or cleanup ran. | —                  |
+| `agents.drift`    | Owned resources whose digest no longer matches the ledger.            | `warn` with the count and paths.       | action `showDrift` |
 
 ### Dependencies
 
@@ -76,6 +76,10 @@ Checks run in parallel where independent, each with a timeout. A timed-out check
 | `dependencies.publishSkill` | The official `publish` skill is installed.                                                                     | `warn` when absent.                         | action `installPublishSkill` |
 
 Planned, not yet emitted: `agents.<target>.config` (each shared document the adapter can write parses in its declared format) and `agents.<target>.version` (detected version against the adapter's tested range).
+
+## Presentation
+
+The header carries one button. It stays quiet — a green dot beside the namespace — until a check _fails_; warnings never colour it. A failure turns it red and names the failing check, and the same line appears under the catalog header. The panel behind it leads with three rows, Windows sign-in, marketplace server, and the agents on this machine, each showing the failing check's detail and remediation when one failed. Failures outside those three get a row of their own. Everything else, warnings included, sits in the collapsed **Agent details** and **All checks** sections.
 
 ## Blocking
 

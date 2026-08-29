@@ -12,6 +12,7 @@ export function SourceGroup({
   items,
   busyIds,
   allBusy,
+  filtering,
   onItemChange,
   onBulk,
   onError
@@ -20,13 +21,16 @@ export function SourceGroup({
   items: readonly CatalogItem[];
   busyIds: ReadonlySet<string>;
   allBusy: boolean;
+  filtering: boolean;
   onItemChange: (item: CatalogItem, componentId?: string) => Promise<void>;
   onBulk: (source: SourceState, action: BulkAction) => Promise<void>;
   onError: (message: string) => void;
 }>): JSX.Element {
-  const canInstall = items.some((item) => supportsBulkAction(item.status, "install"));
-  const canReplace = items.some((item) => supportsBulkAction(item.status, "replace"));
-  const canUninstall = items.some((item) => supportsBulkAction(item.status, "uninstall"));
+  // Bulk actions cover the whole source, so they stay out of sight while a
+  // filter is showing only part of it.
+  const canInstall = !filtering && items.some((item) => supportsBulkAction(item.status, "install"));
+  const canReplace = !filtering && items.some((item) => supportsBulkAction(item.status, "replace"));
+  const canUninstall = !filtering && items.some((item) => supportsBulkAction(item.status, "uninstall"));
   return (
     <section className="source-group">
       <div className="source-heading">
