@@ -93,8 +93,8 @@ jobs:
       - name: Build the validator the server image ships
         run: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin validate-source
 
-      - run: dotnet restore server/Marketplace.sln
-      - run: dotnet build server/Marketplace.sln --no-restore -warnaserror
+      - run: dotnet restore server/Marketplace.slnx
+      - run: dotnet build server/Marketplace.slnx --no-restore -warnaserror
 
       - name: Integration tests (PostgreSQL via Testcontainers, real validator)
         env:
