@@ -375,7 +375,7 @@ mod tests {
         )
         .expect("skill file");
         fs::write(
-            source_root.join("skill-manager.json"),
+            source_root.join("agent-plugins.json"),
             r#"{
               "version":2,
               "source":{"id":"acme","name":"Acme","description":"Shared config."},
@@ -500,7 +500,7 @@ mod tests {
         )
         .expect("mcp");
         fs::write(
-            source_root.join("skill-manager.json"),
+            source_root.join("agent-plugins.json"),
             r#"{
               "version":2,
               "source":{"id":"acme","name":"Acme","description":"Shared config."},

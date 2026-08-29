@@ -1,23 +1,23 @@
 # CLI reference
 
-`skill-manager` is the Agent Plugins executable. When its first argument names a command it runs headless — no window — so a person or an agent can drive it from a terminal. Every command shares the app's validator, locator, identity, and installer, so a CLI publish or install is the same operation the window performs, authenticated the same way ([ADR 0004](decisions/0004-internal-marketplace.md)).
+`agent-plugins` is the Agent Plugins executable. When its first argument names a command it runs headless — no window — so a person or an agent can drive it from a terminal. Every command shares the app's validator, locator, identity, and installer, so a CLI publish or install is the same operation the window performs, authenticated the same way ([ADR 0004](decisions/0004-internal-marketplace.md)).
 
 The app puts itself on `PATH` on first run. Otherwise call it by path:
 
 ```text
-"%LOCALAPPDATA%\Programs\Agent Plugins\skill-manager.exe"
+"%LOCALAPPDATA%\Programs\Agent Plugins\agent-plugins.exe"
 ```
 
 ## Synopsis
 
 ```text
-skill-manager whoami
-skill-manager validate <path>
-skill-manager search [query]
-skill-manager publish <path> --version <semver> [--namespace <ns>] [--package-id <id>]
+agent-plugins whoami
+agent-plugins validate <path>
+agent-plugins search [query]
+agent-plugins publish <path> --version <semver> [--namespace <ns>] [--package-id <id>]
                              [--tags a,b] [--changelog <text>] [--yes]
-skill-manager install <namespace>/<package> [--approve-mcp]
-skill-manager help
+agent-plugins install <namespace>/<package> [--approve-mcp]
+agent-plugins help
 ```
 
 Exit status is `0` on success and `1` on failure; failures print `error: <message>` on stderr. Any argument that is not one of `validate`, `publish`, `search`, `install`, `whoami`, `help`, or `--help` starts the desktop app instead.
@@ -48,7 +48,7 @@ admin: false
 
 Validates a source tree or a published HTTPS archive against the same rules the marketplace server applies: source containment, component names, MCP shape, portability, symlinks, and repository limits. Writes nothing.
 
-`<path>` is a directory containing `skill-manager.json`, or an HTTPS URL of a zip, tar, or tar.gz of that tree.
+`<path>` is a directory containing `agent-plugins.json`, or an HTTPS URL of a zip, tar, or tar.gz of that tree.
 
 ```text
 acme: 3 valid install(s), 0 catalog error(s)
@@ -74,7 +74,7 @@ Stages `<path>` into a one-package source tree, refuses anything that looks like
 
 | Argument             | Required | Meaning                                                                                                                                                     |
 | -------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `<path>`             | yes      | A skill directory containing `SKILL.md`, an MCP document in the `mcp.json` shape, or a source tree with `skill-manager.json` declaring exactly one package. |
+| `<path>`             | yes      | A skill directory containing `SKILL.md`, an MCP document in the `mcp.json` shape, or a source tree with `agent-plugins.json` declaring exactly one package. |
 | `--version <semver>` | yes      | `major.minor.patch`. Immutable once published.                                                                                                              |
 | `--namespace <ns>`   | no       | Publish somewhere other than your own namespace. You must be allowlisted for it, or an admin.                                                               |
 | `--package-id <id>`  | no       | Override the derived package ID.                                                                                                                            |
@@ -120,15 +120,15 @@ Syncs, then installs one catalog package onto every detected agent, exactly as t
 
 | Argument        | Meaning                                                                                                      |
 | --------------- | ------------------------------------------------------------------------------------------------------------ |
-| `<ns>/<pkg>`    | The catalog ID. `skill-manager search` prints it.                                                            |
+| `<ns>/<pkg>`    | The catalog ID. `agent-plugins search` prints it.                                                            |
 | `--approve-mcp` | Grants the Tier 3 approval. Required for any package containing an MCP server; without it the install fails. |
 
 ```text
 installed jacob/review (Review workflow)
-  backed up C:\Users\jacob\.agents\.skill-manager-backups\...
+  backed up C:\Users\jacob\.agents\.agent-plugins-backups\...
 ```
 
-Backup lines appear only when an existing destination had to be preserved. An unknown ID fails with `<id> is not in the catalog. Try 'skill-manager search'.`
+Backup lines appear only when an existing destination had to be preserved. An unknown ID fails with `<id> is not in the catalog. Try 'agent-plugins search'.`
 
 There is no `uninstall` command; uninstall from the app.
 

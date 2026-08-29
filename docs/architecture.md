@@ -4,9 +4,9 @@ Agent Plugins turns immutable source packages into desired resources for explici
 
 ## Source snapshots and normalization
 
-A **source** is a tree with a top-level `skill-manager.json` source manifest. A **source repository** is a catalog that lists HTTPS source archives; adding it never writes `sources[]`. See [source acquisition](diagrams/source-acquisition.mmd), [ADR 0002](decisions/0002-source-repositories-and-locators.md), and [ADR 0003](decisions/0003-artifact-only-catalog.md).
+A **source** is a tree with a top-level `agent-plugins.json` source manifest. A **source repository** is a catalog that lists HTTPS source archives; adding it never writes `sources[]`. See [source acquisition](diagrams/source-acquisition.mmd), [ADR 0002](decisions/0002-source-repositories-and-locators.md), and [ADR 0003](decisions/0003-artifact-only-catalog.md).
 
-`sourceId` is the short namespace published in `skill-manager.json`. `sourceKey` is a hash of the artifact URL identity. A publisher cannot transfer cache or installation ownership by changing its display namespace.
+`sourceId` is the short namespace published in `agent-plugins.json`. `sourceKey` is a hash of the artifact URL identity. A publisher cannot transfer cache or installation ownership by changing its display namespace.
 
 An artifact refresh HEADs for validators, GETs when needed, extracts a zip/tar/tar.gz (or reads catalog JSON), and uses the payload digest as the revision. A failed refresh leaves the prior validated snapshot active. Scheduled sync refreshes catalogs first, then sources; a catalog failure does not block source refresh. When the default catalog URL is set, sync adds that catalog if it is missing.
 
@@ -34,7 +34,7 @@ Only `executor.rs` mutates planned resources. It stages every path and complete 
 
 An activation or ledger error rolls back the complete operation. On launch, a journal whose transaction ID is absent from the ledger is rolled back; a journal already committed in the ledger is cleaned up. Bulk install/uninstall and source removal share the same all-or-nothing boundary. App reset also uses that transaction when it can, but it still wipes ledger ownership if a leftover file cannot be staged, then best-effort removes namespaced skill directories and backs up modified destinations. After resources are gone it deletes Agent Plugins' own config, cache, and data so sources must be added again.
 
-Unmanaged replacement and force-removal of modified content create a persistent backup under `~/.agents/.skill-manager-backups`. Normal update and uninstall stop on drift. Shared config mutations preserve comments where the target format permits and never claim unrelated keys.
+Unmanaged replacement and force-removal of modified content create a persistent backup under `~/.agents/.agent-plugins-backups`. Normal update and uninstall stop on drift. Shared config mutations preserve comments where the target format permits and never claim unrelated keys.
 
 ## Ledger v4
 

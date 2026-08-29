@@ -1,15 +1,15 @@
-name: skill-manager-site
+name: agent-plugins-site
 
 services:
   site:
     build:
       context: ..
       dockerfile: website/Dockerfile
-    image: skill-manager-site:local
+    image: agent-plugins-site:local
     restart: unless-stopped
     read_only: true
     ports:
-      - "${SKILL_MANAGER_SITE_BIND:-127.0.0.1}:${SKILL_MANAGER_SITE_PORT:-8080}:8080"
+      - "${AGENT_PLUGINS_SITE_BIND:-127.0.0.1}:${AGENT_PLUGINS_SITE_PORT:-8080}:8080"
     volumes:
       - ./releases:/srv/releases:ro
     tmpfs:

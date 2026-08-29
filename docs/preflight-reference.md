@@ -72,7 +72,7 @@ Checks run in parallel where independent, each with a timeout. A timed-out check
 | --------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | ---------------------------- |
 | `dependencies.uv`           | `uv` and `uvx` are on the login PATH (existing behavior).                                                      | autoFixed by download when missing.         | autoFixed                    |
 | `dependencies.node`         | `npx` resolves. Only evaluated when an installed MCP server uses `npx`.                                        | `warn` when missing; `skipped` when unused. | manual                       |
-| `dependencies.cli`          | The application's own executable directory is on the user PATH so `skill-manager publish` works from an agent. | autoFixed.                                  | autoFixed                    |
+| `dependencies.cli`          | The application's own executable directory is on the user PATH so `agent-plugins publish` works from an agent. | autoFixed.                                  | autoFixed                    |
 | `dependencies.publishSkill` | The official `publish` skill is installed.                                                                     | `warn` when absent.                         | action `installPublishSkill` |
 
 Planned, not yet emitted: `agents.<target>.config` (each shared document the adapter can write parses in its declared format) and `agents.<target>.version` (detected version against the adapter's tested range).

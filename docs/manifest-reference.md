@@ -1,15 +1,15 @@
 # Source manifest reference
 
-The source manifest is the file named `skill-manager.json` at the root of a source archive. Agent Plugins reads that file and nothing else to learn what the source publishes. A source without this file is rejected.
+The source manifest is the file named `agent-plugins.json` at the root of a source archive. Agent Plugins reads that file and nothing else to learn what the source publishes. A source without this file is rejected.
 
 The locally pinned generated schema is [`schemas/v2/source-manifest.schema.json`](../schemas/v2/source-manifest.schema.json). Unknown fields are rejected. Version 1 generic file installs are rejected.
 
-A **source repository** is a separate catalog document (`skill-manager-repository.json` or a raw JSON URL). It lists source locators and is not installable. See [the source-repository reference](source-repository-reference.md).
+A **source repository** is a separate catalog document (`agent-plugins-repository.json` or a raw JSON URL). It lists source locators and is not installable. See [the source-repository reference](source-repository-reference.md).
 
 ## Object model
 
 ```text
-skill-manager.json
+agent-plugins.json
 ├── version                     2
 ├── source                      who published this tree
 │   ├── id                      namespace for package and install names
@@ -193,7 +193,7 @@ Agent Plugins writes configuration but never starts the server.
 
 These documents fail validation:
 
-- missing `skill-manager.json`, or a document larger than 1 MB
+- missing `agent-plugins.json`, or a document larger than 1 MB
 - `version` other than `2`, including version 1 generic file installs
 - unknown fields, including `format: "agent-plugin@1.0.0"` package trees
 - `instructionSet` components

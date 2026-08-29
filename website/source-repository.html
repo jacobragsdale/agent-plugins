@@ -4,10 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#d4d0c8" />
-    <meta name="description" content="How to publish a skill-manager-repository.json catalog of Agent Plugins sources." />
+    <meta name="description" content="How to publish an agent-plugins-repository.json catalog of Agent Plugins sources." />
     <link rel="icon" href="/assets/icon.png" />
     <link rel="stylesheet" href="/styles.css" />
-    <title>Source repository — skill-manager-repository.json</title>
+    <title>Source repository — agent-plugins-repository.json</title>
   </head>
   <body class="spec-page">
     <a class="skip-link" href="#content">Skip to content</a>
@@ -17,7 +17,7 @@
         <h1>Source repository</h1>
         <p class="spec-intro">
           A source repository is a catalog that lists sources. It is not installable. Packages appear only after a listed
-          <a href="/source-manifest.html">source</a> is added. Publish the document as raw JSON at an HTTPS URL. The conventional filename is <code>skill-manager-repository.json</code>.
+          <a href="/source-manifest.html">source</a> is added. Publish the document as raw JSON at an HTTPS URL. The conventional filename is <code>agent-plugins-repository.json</code>.
         </p>
       </header>
 
@@ -81,11 +81,11 @@
           <li>
             <h2>Validate and publish</h2>
             <p>Check the JSON before publishing it:</p>
-            <pre><code>jq empty skill-manager-repository.json</code></pre>
+            <pre><code>jq empty agent-plugins-repository.json</code></pre>
             <p>For structural validation, save the <a href="/schema/v1/source-repository.schema.json">catalog JSON Schema</a> beside the document and run:</p>
             <pre><code>npx ajv-cli validate --spec=draft2020 --strict=false \
   -s source-repository.schema.json \
-  -d skill-manager-repository.json</code></pre>
+  -d agent-plugins-repository.json</code></pre>
             <p>
               Host the JSON at a stable HTTPS URL. In Agent Plugins, listed sources appear in Manage Sources by name and description. Select Add on a listed source. Adding a source does not install
               its packages.

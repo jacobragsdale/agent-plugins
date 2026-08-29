@@ -8,7 +8,7 @@ Use this layout:
 
 ```text
 example-source/
-├── skill-manager.json
+├── agent-plugins.json
 ├── mcp/
 │   └── database.json
 └── skills/
@@ -44,7 +44,7 @@ The stdio command must be a bare executable on `PATH`. Do not use `./bin/server`
 
 ## Declare the package
 
-Create the root source manifest, `skill-manager.json`:
+Create the root source manifest, `agent-plugins.json`:
 
 ```json
 {
@@ -71,30 +71,30 @@ One package can bundle several skills and MCP servers. Users can install the pac
 Validate the JSON shape against the checked-in schema:
 
 ```bash
-jq empty skill-manager.json
+jq empty agent-plugins.json
 npx ajv-cli validate --spec=draft2020 --strict=false \
-  -s https://raw.githubusercontent.com/jacobragsdale/skill-manager/main/schemas/v2/source-manifest.schema.json \
-  -d skill-manager.json
+  -s https://raw.githubusercontent.com/jacobragsdale/agent-plugins/main/schemas/v2/source-manifest.schema.json \
+  -d agent-plugins.json
 ```
 
 Then run the repository-aware validator for source containment, component names, MCP shape, portability, symlinks, and repository limits:
 
 ```bash
-cargo run --manifest-path /path/to/skill-manager/src-tauri/Cargo.toml \
+cargo run --manifest-path /path/to/agent-plugins/src-tauri/Cargo.toml \
   --bin validate-source -- /path/to/example-source
 ```
 
 You can also validate a published HTTPS archive of the same tree:
 
 ```bash
-cargo run --manifest-path /path/to/skill-manager/src-tauri/Cargo.toml \
+cargo run --manifest-path /path/to/agent-plugins/src-tauri/Cargo.toml \
   --bin validate-source -- \
   https://nexus.example.com/repository/raw/sources/example-latest.zip
 ```
 
 ## Publish a zip of the same tree
 
-A source artifact is a zip, tar, or tar.gz of the source tree: `skill-manager.json` at the root, plus every referenced path. If the archive contains exactly one top-level directory and no sibling files, Agent Plugins treats that directory as the source root.
+A source artifact is a zip, tar, or tar.gz of the source tree: `agent-plugins.json` at the root, plus every referenced path. If the archive contains exactly one top-level directory and no sibling files, Agent Plugins treats that directory as the source root.
 
 Host the archive at a stable HTTPS URL that you overwrite when you want users to receive a new snapshot, for example `…/example-latest.zip`. Agent Plugins always fetches that URL; it does not pin versions and does not send credentials.
 

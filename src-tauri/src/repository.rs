@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
 
-pub const REPOSITORY_MANIFEST_FILE: &str = "skill-manager-repository.json";
+pub const REPOSITORY_MANIFEST_FILE: &str = "agent-plugins-repository.json";
 pub const REPOSITORY_MANIFEST_VERSION: u8 = 1;
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_LISTED_SOURCES: usize = 5000;

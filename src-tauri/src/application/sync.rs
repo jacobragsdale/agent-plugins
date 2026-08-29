@@ -978,7 +978,7 @@ mod tests {
         )
         .expect("skill");
         fs::write(
-            source_root.join("skill-manager.json"),
+            source_root.join("agent-plugins.json"),
             r#"{
               "version": 2,
               "source": {"id":"skillbook","name":"Skillbook","description":"Skills"},

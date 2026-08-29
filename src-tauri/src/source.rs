@@ -1047,7 +1047,7 @@ pub fn validate_source_repository_locator(url: &str) -> Result<RepositoryValidat
 pub(crate) fn validate_remote_repository(
     locator: &Locator,
 ) -> Result<RepositoryValidationReport, String> {
-    let cache = temporary_path(&std::env::temp_dir(), "skill-manager-repository-validation");
+    let cache = temporary_path(&std::env::temp_dir(), "agent-plugins-repository-validation");
     fs::create_dir(&cache)
         .map_err(|error| format!("Could not create {}: {error}", cache.display()))?;
     let result = prepare_new_repository(locator, &cache);
@@ -1067,7 +1067,7 @@ pub(crate) fn validate_remote_repository(
 }
 
 fn validate_remote_source(locator: &Locator) -> Result<SourceValidationReport, String> {
-    let cache = temporary_path(&std::env::temp_dir(), "skill-manager-validation");
+    let cache = temporary_path(&std::env::temp_dir(), "agent-plugins-validation");
     fs::create_dir(&cache)
         .map_err(|error| format!("Could not create {}: {error}", cache.display()))?;
     let result = prepare_new_source(locator, &cache, None, None);
@@ -1115,7 +1115,7 @@ mod tests {
         )
         .expect("skill");
         fs::write(
-            tree.path().join("skill-manager.json"),
+            tree.path().join("agent-plugins.json"),
             format!(
                 r#"{{
                   "version": 2,
@@ -1169,7 +1169,7 @@ mod tests {
             snapshot.path,
             revision_path(cache.path(), &source_key, &revision)
         );
-        assert!(snapshot.path.join("skill-manager.json").is_file());
+        assert!(snapshot.path.join("agent-plugins.json").is_file());
         assert_eq!(
             read_current_pointer(&source_root)
                 .expect("pointer")

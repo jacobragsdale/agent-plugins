@@ -81,12 +81,12 @@ public sealed partial class PublishService(
 
         if (inspected.SourceId != request.Namespace)
         {
-            throw new PublishRejectedException(422, $"skill-manager.json declares source.id {inspected.SourceId}; the namespace is {request.Namespace}.");
+            throw new PublishRejectedException(422, $"agent-plugins.json declares source.id {inspected.SourceId}; the namespace is {request.Namespace}.");
         }
 
         if (inspected.PackageId != request.PackageId)
         {
-            throw new PublishRejectedException(422, $"skill-manager.json declares package {inspected.PackageId}; the request names {request.PackageId}.");
+            throw new PublishRejectedException(422, $"agent-plugins.json declares package {inspected.PackageId}; the request names {request.PackageId}.");
         }
 
         var outcome = await ValidateAsync(request.Archive, inspected.RootPrefix, cancellationToken);

@@ -449,7 +449,7 @@ mod tests {
         )
         .expect("skill");
         fs::write(
-            root.path().join("skill-manager.json"),
+            root.path().join("agent-plugins.json"),
             r#"{
               "version": 2,
               "source": { "id": "acme", "name": "Acme", "description": "Test source" },
@@ -562,7 +562,7 @@ mod tests {
         let bytes = zip_bytes(tree.path(), Some("repo-main"));
         let destination = tempfile::tempdir().expect("dest");
         extract_source_archive(&bytes, destination.path()).expect("extract");
-        assert!(destination.path().join("skill-manager.json").is_file());
+        assert!(destination.path().join("agent-plugins.json").is_file());
         assert!(destination.path().join("skills/review/SKILL.md").is_file());
         assert!(!destination.path().join("repo-main").exists());
     }

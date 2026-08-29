@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn catalog_tree_accepts_regular_files() {
         let root = tempfile::tempdir().expect("root");
-        fs::write(root.path().join("skill-manager.json"), "{}").expect("manifest");
+        fs::write(root.path().join("agent-plugins.json"), "{}").expect("manifest");
         validate_catalog_tree(root.path()).expect("valid");
     }
 }

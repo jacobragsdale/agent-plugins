@@ -5,21 +5,21 @@ description: Find and install skills and MCP servers from the company marketplac
 
 # Marketplace search and install
 
-Agent Plugins' command line, `skill-manager`, searches the company marketplace
+Agent Plugins' command line, `agent-plugins`, searches the company marketplace
 and installs packages into every coding agent on this machine in one
 transaction. Authentication is the user's Windows logon.
 
 ## Find the command
 
-Try `skill-manager help`. If it is not on PATH, use the installed executable:
+Try `agent-plugins help`. If it is not on PATH, use the installed executable:
 
-- Windows: `"%LOCALAPPDATA%\Programs\Agent Plugins\skill-manager.exe"`
-- macOS (development): `/Applications/Agent Plugins.app/Contents/MacOS/skill-manager`
+- Windows: `"%LOCALAPPDATA%\Programs\Agent Plugins\agent-plugins.exe"`
+- macOS (development): `/Applications/Agent Plugins.app/Contents/MacOS/agent-plugins`
 
 ## Search
 
 ```
-skill-manager search <words>
+agent-plugins search <words>
 ```
 
 Prints matching packages as `namespace/package`, version, publisher, install
@@ -30,7 +30,7 @@ trust here.
 ## Install
 
 ```
-skill-manager install <namespace>/<package>
+agent-plugins install <namespace>/<package>
 ```
 
 Skills install without further approval. If the package contains an MCP

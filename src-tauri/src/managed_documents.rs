@@ -297,7 +297,7 @@ fn json_to_toml_item(value: &Value) -> Result<Item, String> {
 
 pub(crate) fn marked_block(body: &str, marker_id: &str) -> String {
     format!(
-        "<!-- skill-manager:start:{marker_id} -->\n{}\n<!-- skill-manager:end:{marker_id} -->",
+        "<!-- agent-plugins:start:{marker_id} -->\n{}\n<!-- agent-plugins:end:{marker_id} -->",
         body.trim_end()
     )
 }
@@ -339,8 +339,8 @@ pub(crate) fn remove_text_blocks(
 pub(crate) fn text_block_body(contents: &[u8], marker_id: &str) -> Result<Option<String>, String> {
     let text = std::str::from_utf8(contents)
         .map_err(|error| format!("Instructions file is not UTF-8: {error}"))?;
-    let start = format!("<!-- skill-manager:start:{marker_id} -->");
-    let end = format!("<!-- skill-manager:end:{marker_id} -->");
+    let start = format!("<!-- agent-plugins:start:{marker_id} -->");
+    let end = format!("<!-- agent-plugins:end:{marker_id} -->");
     let Some(start_index) = text.find(&start) else {
         return Ok(None);
     };
@@ -363,8 +363,8 @@ pub(crate) fn text_block_body(contents: &[u8], marker_id: &str) -> Result<Option
 }
 
 fn remove_text_block_string(text: &str, marker_id: &str) -> Result<String, String> {
-    let start = format!("<!-- skill-manager:start:{marker_id} -->");
-    let end = format!("<!-- skill-manager:end:{marker_id} -->");
+    let start = format!("<!-- agent-plugins:start:{marker_id} -->");
+    let end = format!("<!-- agent-plugins:end:{marker_id} -->");
     let Some(start_index) = text.find(&start) else {
         return Ok(text.to_string());
     };

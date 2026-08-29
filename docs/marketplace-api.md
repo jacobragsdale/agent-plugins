@@ -35,11 +35,11 @@ Returns the caller's identity.
 
 ### `GET /api/catalog`
 
-Returns a `skill-manager-repository.json` document. Each listed source is one namespace with at least one non-yanked package. The listing carries the optional marketplace fields `publisher`, `packageCount`, and `updatedAt`. `ETag` is the digest of the document.
+Returns a `agent-plugins-repository.json` document. Each listed source is one namespace with at least one non-yanked package. The listing carries the optional marketplace fields `publisher`, `packageCount`, and `updatedAt`. `ETag` is the digest of the document.
 
 ### `GET /api/sources/{namespace}/archive`
 
-Returns the namespace's current source archive: a zip whose root `skill-manager.json` has `source.id` equal to the namespace and one package per latest non-yanked version. Supports `HEAD`, `ETag`, and `Last-Modified`.
+Returns the namespace's current source archive: a zip whose root `agent-plugins.json` has `source.id` equal to the namespace and one package per latest non-yanked version. Supports `HEAD`, `ETag`, and `Last-Modified`.
 
 ### `GET /api/index`
 
@@ -77,7 +77,7 @@ Returns the package's versions, newest first, with `yanked` flags and each versi
 
 Publishes a version. Multipart form: `archive` (zip, tar, or tar.gz containing exactly one package), `version` (semver string), optional `tags` (comma separated), optional `changelog` (text).
 
-Server checks, in order: caller owns `{namespace}`; archive within 50 MB and free of unsafe entries; `skill-manager.json` present with `source.id == namespace`, exactly one package whose `id == packageId`; the Rust `validate-source` binary reports no errors; the version is not already published. On success the version is stored in Artifact Keeper, the namespace archive is regenerated, and the response is `201` with the version document. Validation failures return `422` with the validator messages.
+Server checks, in order: caller owns `{namespace}`; archive within 50 MB and free of unsafe entries; `agent-plugins.json` present with `source.id == namespace`, exactly one package whose `id == packageId`; the Rust `validate-source` binary reports no errors; the version is not already published. On success the version is stored in Artifact Keeper, the namespace archive is regenerated, and the response is `201` with the version document. Validation failures return `422` with the validator messages.
 
 ### `POST /api/packages/{namespace}/{packageId}/versions/{version}/yank`
 

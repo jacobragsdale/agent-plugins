@@ -446,7 +446,7 @@ pub(super) fn mutation_backup(
     }
     let directory = paths
         .home
-        .join(".agents/.skill-manager-backups")
+        .join(".agents/.agent-plugins-backups")
         .join(transaction_id);
     fs::create_dir_all(&directory)
         .map_err(|error| format!("Could not create {}: {error}", directory.display()))?;

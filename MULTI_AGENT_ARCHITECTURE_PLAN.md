@@ -6,7 +6,7 @@
 
 ## Executive decision
 
-Skill Manager should evolve from an explicit path copier with client-specific plugin side effects into a desired-state manager for agent configuration.
+Agent Plugins should evolve from an explicit path copier with client-specific plugin side effects into a desired-state manager for agent configuration.
 
 The proposal's central insight is correct: content concepts and agent targets are separate axes. The important refinement is that adapters must be pure planners, not independent installers. They should translate a validated source component into a declarative resource plan; one central engine must perform conflict detection, staging, rollback, ownership tracking, and recovery for every target.
 
@@ -70,7 +70,7 @@ These are immediate correctness gaps, not merely future extensibility concerns. 
 
 ## Product goals
 
-1. Let users select the coding agents they use and the scopes they want Skill Manager to manage.
+1. Let users select the coding agents they use and the scopes they want Agent Plugins to manage.
 2. Let one source repository publish portable skills, MCP servers, always-on instructions, and portable Agent Plugin packages.
 3. Preserve an escape hatch for generic file/directory installs without confusing those installs with portable agent concepts.
 4. Install each supported component into the native or shared location appropriate for every enabled agent.
@@ -85,7 +85,7 @@ These are immediate correctness gaps, not merely future extensibility concerns. 
 
 - Proving that arbitrary natural-language rules are semantically consistent.
 - Silently reverse-engineering undocumented application databases or settings.
-- Dynamically downloading executable adapter code. Target adapters should initially ship with Skill Manager.
+- Dynamically downloading executable adapter code. Target adapters should initially ship with Agent Plugins.
 - Becoming a marketplace, dependency solver, or secrets manager in the first architecture release.
 - Making all vendor-native plugin formats portable.
 - Auto-enabling hooks, in-process plugins, or background processes without a separate high-risk approval.
@@ -102,7 +102,7 @@ This is a research snapshot, not a timeless support promise. Each target adapter
 | Codex              | User skills use `~/.agents/skills`; repository skills also use `.agents/skills`.                       | Global instructions use `~/.codex/AGENTS.md` or `AGENTS.override.md`; project instructions are layered by directory.                                                             | User and trusted-project servers use `[mcp_servers.<id>]` tables in Codex `config.toml`. | Plugins can bundle skills and MCP servers, but their installed identity and policy are separate from bare MCP entries.                                             |
 | OpenCode           | Current documentation includes native and `.agents`/Claude-compatible skill locations.                 | Global `~/.config/opencode/AGENTS.md`, project `AGENTS.md`, and configured instruction paths are supported.                                                                      | MCP entries live in OpenCode's JSON/JSONC configuration.                                 | OpenCode plugins are in-process JavaScript/TypeScript extensions; the v2 API is explicitly beta. Treat them as target-native executable extensions.                |
 | Grok Build         | User and project `.grok/skills` locations are documented, with additional compatibility scanning.      | Project `AGENTS.md` is documented; compatibility behavior is configurable.                                                                                                       | User and project `[mcp_servers]` tables live in `config.toml`.                           | Grok has native plugins and is still evolving quickly; its open-source harness is the most precise compatibility reference.                                        |
-| GitHub Copilot CLI | Personal skills can use `~/.agents/skills` or `~/.copilot/skills`.                                     | Instruction sources are discovered separately and have client-defined precedence.                                                                                                | MCP can be managed as a first-class resource.                                            | Copilot has a rich native plugin format and direct-install cache. Current Skill Manager behavior must be migrated, not assumed correct from path shape alone.      |
+| GitHub Copilot CLI | Personal skills can use `~/.agents/skills` or `~/.copilot/skills`.                                     | Instruction sources are discovered separately and have client-defined precedence.                                                                                                | MCP can be managed as a first-class resource.                                            | Copilot has a rich native plugin format and direct-install cache. Current Agent Plugins behavior must be migrated, not assumed correct from path shape alone.      |
 
 Two conclusions follow from this table:
 
@@ -382,7 +382,7 @@ Configuration types have different activation risk:
 Additional rules:
 
 - Sources may reference environment-variable names but must not contain or request persisted secret values.
-- Skill Manager does not start MCP servers or run hook/plugin code during installation.
+- Agent Plugins does not start MCP servers or run hook/plugin code during installation.
 - Installing an enabled MCP or plugin configuration still authorizes a target agent to execute it later, so “not executed during install” is not sufficient disclosure.
 - Portable Agent Plugin schemas and supported versions are pinned locally.
 - Native plugins are target-qualified and never translated into another target's runtime extension format.
@@ -599,7 +599,7 @@ Use disposable homes and, where necessary, disposable repositories for each supp
 - the target actually discovers the skill/rule/plugin;
 - the target's own list/inspect command reports the MCP or plugin;
 - updates are visible after the documented reload boundary;
-- uninstall removes only Skill Manager-owned resources; and
+- uninstall removes only Agent Plugins-owned resources; and
 - Windows path, process, JSON/TOML, and line-ending behavior is real rather than inferred from package artifacts.
 
 Static file assertions establish the plan and on-disk state. They do not establish that an agent loaded the configuration.

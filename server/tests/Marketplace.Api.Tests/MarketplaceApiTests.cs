@@ -61,7 +61,7 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
         var etag = download.Headers.ETag?.Tag;
         Assert.NotNull(etag);
         using var zip = new ZipArchive(new MemoryStream(await download.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken)));
-        var manifestEntry = zip.GetEntry("skill-manager.json");
+        var manifestEntry = zip.GetEntry("agent-plugins.json");
         Assert.NotNull(manifestEntry);
         using var manifestStream = manifestEntry.Open();
         var manifest = await JsonDocument.ParseAsync(manifestStream, cancellationToken: TestContext.Current.CancellationToken);
@@ -156,7 +156,7 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
         using var client = factory.ClientFor("TEST\\broken");
         var archive = SamplePackages.Zip(new Dictionary<string, string>
         {
-            ["skill-manager.json"] = """{"version":2,"source":{"id":"broken","name":"b","description":"b"},"packages":[{"id":"nope","components":[{"kind":"skill","path":"skills/nope"}]}]}""",
+            ["agent-plugins.json"] = """{"version":2,"source":{"id":"broken","name":"b","description":"b"},"packages":[{"id":"nope","components":[{"kind":"skill","path":"skills/nope"}]}]}""",
         });
         using var form = SamplePackages.PublishForm(archive, "1.0.0");
         var response = await client.PostAsync("/api/packages/broken/nope/versions", form, TestContext.Current.CancellationToken);

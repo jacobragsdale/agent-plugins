@@ -5,7 +5,7 @@ description: Publish a skill or MCP server configuration to the company marketpl
 
 # Publish to the marketplace
 
-Agent Plugins ships a command line, `skill-manager`, that publishes a package
+Agent Plugins ships a command line, `agent-plugins`, that publishes a package
 under the user's own namespace. Authentication is the user's Windows logon, so
 there is nothing to log in to. You do the judgment work (description, tags,
 version, changelog); the CLI does the trust-sensitive work (validation, secret
@@ -13,12 +13,12 @@ scan, upload).
 
 ## Find the command
 
-Try `skill-manager help`. If it is not on PATH, use the installed executable:
+Try `agent-plugins help`. If it is not on PATH, use the installed executable:
 
-- Windows: `"%LOCALAPPDATA%\Programs\Agent Plugins\skill-manager.exe"`
-- macOS (development): `/Applications/Agent Plugins.app/Contents/MacOS/skill-manager`
+- Windows: `"%LOCALAPPDATA%\Programs\Agent Plugins\agent-plugins.exe"`
+- macOS (development): `/Applications/Agent Plugins.app/Contents/MacOS/agent-plugins`
 
-Every command below accepts the full path in place of `skill-manager`.
+Every command below accepts the full path in place of `agent-plugins`.
 
 ## Steps
 
@@ -28,17 +28,17 @@ Every command below accepts the full path in place of `skill-manager`.
    JSON document in the Agent Plugins `mcp.json` shape. Do not publish a skill
    that Agent Plugins installed from the marketplace (its name starts with a
    publisher namespace such as `jacob-`) unless the user owns it.
-2. **Confirm identity.** Run `skill-manager whoami` and tell the user the
+2. **Confirm identity.** Run `agent-plugins whoami` and tell the user the
    namespace the package will publish under.
-3. **Validate.** Run `skill-manager validate <path>` when the path holds a
-   `skill-manager.json`; otherwise skip to the dry run in step 6, which
+3. **Validate.** Run `agent-plugins validate <path>` when the path holds a
+   `agent-plugins.json`; otherwise skip to the dry run in step 6, which
    validates the staged package.
 4. **Improve the listing.** Read `SKILL.md`. The frontmatter `description` is
    what other people's agents use to decide when to trigger the skill, so make
    sure it states _what_ the skill does and _when_ to use it, in one or two
    sentences, with concrete trigger phrases. Propose an edit if it is vague;
    apply it only with the user's agreement.
-5. **Choose version, tags, and changelog.** Run `skill-manager search <name>`
+5. **Choose version, tags, and changelog.** Run `agent-plugins search <name>`
    to see whether a version is already published. Propose the next semantic
    version (`1.0.0` for a first publish; bump patch for fixes, minor for new
    behavior). Propose up to five lowercase tags that someone would search for.
@@ -49,7 +49,7 @@ Every command below accepts the full path in place of `skill-manager`.
 7. **Publish.** Run with `--yes`:
 
    ```
-   skill-manager publish <path> --version <semver> --tags <a,b,c> --changelog "<text>" --yes
+   agent-plugins publish <path> --version <semver> --tags <a,b,c> --changelog "<text>" --yes
    ```
 
    Report the printed marketplace URL. If the CLI refuses because of a secret
