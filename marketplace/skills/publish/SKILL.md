@@ -30,7 +30,7 @@ Every command below accepts the full path in place of `agent-plugins`.
    publisher namespace such as `jacob-`) unless the user owns it.
 2. **Confirm identity.** Run `agent-plugins whoami` and tell the user the
    namespace the package will publish under.
-3. **Validate.** Run `agent-plugins validate <path>` when the path holds a
+3. **Validate.** Run `agent-plugins validate <path>` when the path holds an
    `agent-plugins.json`; otherwise skip to the dry run in step 6, which
    validates the staged package.
 4. **Improve the listing.** Read `SKILL.md`. The frontmatter `description` is

@@ -35,7 +35,7 @@ Returns the caller's identity.
 
 ### `GET /api/catalog`
 
-Returns a `agent-plugins-repository.json` document. Each listed source is one namespace with at least one non-yanked package. The listing carries the optional marketplace fields `publisher`, `packageCount`, and `updatedAt`. `ETag` is the digest of the document.
+Returns an `agent-plugins-repository.json` document. Each listed source is one namespace with at least one non-yanked package. The listing carries the optional marketplace fields `publisher`, `packageCount`, and `updatedAt`. `ETag` is the digest of the document.
 
 ### `GET /api/sources/{namespace}/archive`
 
