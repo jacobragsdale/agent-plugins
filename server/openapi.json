@@ -1,0 +1,112 @@
+{
+  "openapi": "3.1.1",
+  "info": { "title": "Marketplace.Api | v1", "version": "1.0.0" },
+  "servers": [{ "url": "http://127.0.0.1:5088/" }],
+  "paths": {
+    "/api/health": { "get": { "tags": ["Marketplace.Api"], "operationId": "Health", "responses": { "200": { "description": "OK" } } } },
+    "/api/me": { "get": { "tags": ["Marketplace.Api"], "operationId": "Me", "responses": { "200": { "description": "OK" } } } },
+    "/api/catalog": { "get": { "tags": ["Marketplace.Api"], "operationId": "Catalog", "responses": { "200": { "description": "OK" } } } },
+    "/api/sources/{ns}/archive": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "SourceArchive",
+        "parameters": [{ "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      },
+      "head": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "SourceArchive",
+        "parameters": [{ "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/index": { "get": { "tags": ["Marketplace.Api"], "operationId": "Index", "responses": { "200": { "description": "OK" } } } },
+    "/api/packages/{ns}/{packageId}": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Package",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/packages/{ns}/{packageId}/versions": {
+      "post": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Publish",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/packages/{ns}/{packageId}/versions/{version}/yank": {
+      "post": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Yank",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/events": {
+      "post": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Events",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EventsBatch" } } }, "required": true },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/stats/packages/{ns}/{packageId}": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "PackageStats",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/reports": {
+      "post": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Report",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReportRequest" } } }, "required": true },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/admin/summary": { "get": { "tags": ["Marketplace.Api"], "operationId": "AdminSummary", "responses": { "200": { "description": "OK" } } } },
+    "/api/admin/reports": { "get": { "tags": ["Marketplace.Api"], "operationId": "AdminReports", "responses": { "200": { "description": "OK" } } } }
+  },
+  "components": {
+    "schemas": {
+      "ClientEventDto": {
+        "required": ["kind", "occurredAt", "clientVersion", "osBuild", "agents", "installed", "checks", "packageId", "version", "fromVersion", "toVersion"],
+        "type": "object",
+        "properties": {
+          "kind": { "type": "string" },
+          "occurredAt": { "type": "string", "format": "date-time" },
+          "clientVersion": { "type": "string" },
+          "osBuild": { "type": ["null", "string"] },
+          "agents": { "type": ["null", "array"], "items": { "type": "string" } },
+          "installed": { "type": ["null", "array"], "items": { "type": "string" } },
+          "checks": { "type": ["null", "object"], "additionalProperties": { "type": "string" } },
+          "packageId": { "type": ["null", "string"] },
+          "version": { "type": ["null", "string"] },
+          "fromVersion": { "type": ["null", "string"] },
+          "toVersion": { "type": ["null", "string"] }
+        }
+      },
+      "EventsBatch": { "required": ["events"], "type": "object", "properties": { "events": { "type": "array", "items": { "$ref": "#/components/schemas/ClientEventDto" } } } },
+      "ReportRequest": { "required": ["packageId", "reason"], "type": "object", "properties": { "packageId": { "type": "string" }, "reason": { "type": "string" } } }
+    }
+  },
+  "tags": [{ "name": "Marketplace.Api" }]
+}

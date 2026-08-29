@@ -1,11 +1,8 @@
 .git
-.github
-.agents
-dist
 node_modules
+dist
 src-tauri/target
-website/releases/*
-!website/releases/manifest.json
-*.log
-*.local
-*.tsbuildinfo
+src-tauri/gen
+server/**/bin
+server/**/obj
+server/**/TestResults
