@@ -12,10 +12,10 @@ use crate::source::{ConfiguredRepository, ConfiguredSource, RepositorySnapshot, 
 use crate::source::{RepositoryCandidate, SourceCandidate};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{
-    async_runtime::{self, Mutex},
-    AppHandle, Emitter, Manager, Runtime,
-};
+#[cfg(feature = "app")]
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tokio::sync::Mutex;
+#[cfg(feature = "app")]
 use tokio::time::{self, MissedTickBehavior};
 
 pub(crate) use agents::{
@@ -29,9 +29,11 @@ pub(crate) use sources::{
     cancel_prepared_source, cancel_prepared_source_repository, confirm_source,
     confirm_source_repository, prepare_source, prepare_source_repository, remove_source_repository,
 };
-pub(crate) use sync::{load_cached_app_state, sync_app_state};
+pub(crate) use sync::{load_cached_app_state, run_preflight, sync_app_state};
 
+#[cfg(feature = "app")]
 const SCHEDULED_SYNC_EVENT: &str = "scheduled-sync";
+#[cfg(feature = "app")]
 const SCHEDULED_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 pub(crate) struct RuntimeState {
@@ -73,7 +75,7 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
-    async_runtime::spawn_blocking(task)
+    tokio::task::spawn_blocking(task)
         .await
         .map_err(|error| format!("{context} worker failed: {error}"))?
 }
@@ -85,6 +87,7 @@ pub(super) fn current_epoch_seconds() -> u64 {
         .as_secs()
 }
 
+#[cfg(feature = "app")]
 pub(crate) async fn run_scheduled_sync<R: Runtime>(app: AppHandle<R>) {
     let mut interval = time::interval(SCHEDULED_SYNC_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -107,8 +110,9 @@ pub(crate) async fn run_scheduled_sync<R: Runtime>(app: AppHandle<R>) {
     }
 }
 
+#[cfg(feature = "app")]
 pub(crate) fn spawn_app_sync<R: Runtime>(app: AppHandle<R>) {
-    async_runtime::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let Some(runtime) = app.try_state::<RuntimeState>() else {
             return;
         };
@@ -137,7 +141,8 @@ mod live_nexus_tests {
             crate::qa_paths::root().expect("qa root").is_some(),
             "SKILL_MANAGER_QA_ROOT must name a directory under the process temp dir"
         );
-        async_runtime::block_on(async {
+        let tokio_runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        tokio_runtime.block_on(async {
             let runtime = RuntimeState::new().expect("runtime");
             match live_step().as_str() {
                 "sync" => {

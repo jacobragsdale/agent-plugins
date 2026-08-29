@@ -44,8 +44,8 @@ pub(crate) fn validators_match(stored: &ArtifactValidators, remote: &ArtifactVal
 }
 
 pub(crate) fn head_artifact(url: &str) -> Result<ArtifactValidators, String> {
-    let response = client()?
-        .head(fetch_url(url)?)
+    let target = fetch_url(url)?;
+    let response = crate::marketplace::authorize(client()?.head(&target), &target)?
         .send()
         .map_err(fetch_error)?;
     let response = require_success(response, "Could not inspect the artifact")?;
@@ -53,7 +53,10 @@ pub(crate) fn head_artifact(url: &str) -> Result<ArtifactValidators, String> {
 }
 
 pub(crate) fn download_artifact(url: &str) -> Result<DownloadedBytes, String> {
-    let response = client()?.get(fetch_url(url)?).send().map_err(fetch_error)?;
+    let target = fetch_url(url)?;
+    let response = crate::marketplace::authorize(client()?.get(&target), &target)?
+        .send()
+        .map_err(fetch_error)?;
     let response = require_success(response, "Could not download the artifact")?;
     let validators = validators_from_headers(response.headers());
     if let Some(length) = response.content_length() {

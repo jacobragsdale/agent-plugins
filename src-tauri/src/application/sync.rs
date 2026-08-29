@@ -78,6 +78,52 @@ pub(crate) async fn load_cached_app_state(
     .await
 }
 
+/// Re-runs the preflight on demand against the cached state.
+pub(crate) async fn run_preflight(
+    runtime: &RuntimeState,
+) -> Result<crate::preflight::PreflightReport, String> {
+    let _sync_guard = runtime.sync_lock.lock().await;
+    run_blocking("Preflight", || {
+        let paths = SystemPaths::from_system()?;
+        let cache = cache_base_dir()?;
+        let state = super::project::cached_state_now()?;
+        let ledger_error = crate::executor::read_ledger(&paths).err();
+        let catalog_age = state
+            .repositories
+            .iter()
+            .find(|repository| {
+                crate::locator::default_catalog_locator()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|default| {
+                        Locator::parse(&repository.url).ok().as_ref() == Some(&default)
+                    })
+            })
+            .and_then(|repository| repository.revision.as_ref().map(|_| 0));
+        let (report, findings) = crate::preflight::run(&crate::preflight::PreflightInput {
+            paths: &paths,
+            startup: crate::STARTUP_REPORT.get(),
+            profiles: &state.agent_profiles,
+            items: &state.items,
+            catalog_age_seconds: catalog_age,
+            ledger_error,
+        });
+        report.write_cache(&cache);
+        let identity = findings
+            .identity
+            .map(|me| crate::app_state::MarketplaceIdentity {
+                account: me.account,
+                namespace: me.namespace,
+                display_name: me.display_name,
+                admin: me.admin,
+                auth_mode: report.auth_mode.clone(),
+            });
+        super::project::write_identity_cache(&cache, identity.as_ref());
+        Ok(report)
+    })
+    .await
+}
+
 pub(crate) async fn sync_app_state(runtime: &RuntimeState) -> Result<AppState, String> {
     let _sync_guard = runtime.sync_lock.lock().await;
     let _operation_guard = runtime.operation_lock.lock().await;
@@ -90,9 +136,17 @@ pub(super) fn synchronize() -> Result<AppState, String> {
     let config = config_base_dir()?;
     let checked = current_epoch_seconds();
     let mut config_file = source::read_sources_config(&config)?;
-    let catalog_message = ensure_default_catalog(&cache, &mut config_file.repositories);
+    let mut catalog_message = ensure_default_catalog(&cache, &mut config_file.repositories);
     let (updated_repositories, loaded_repositories) =
         refresh_repositories(&cache, config_file.repositories);
+    if let Some(message) =
+        subscribe_marketplace_sources(&cache, &loaded_repositories, &mut config_file.sources)
+    {
+        catalog_message = Some(match catalog_message {
+            Some(existing) => format!("{existing} {message}"),
+            None => message,
+        });
+    }
     let (updated_sources, loaded_sources) = refresh_sources(&cache, config_file.sources);
     source::write_sources_config(
         &config,
@@ -104,14 +158,171 @@ pub(super) fn synchronize() -> Result<AppState, String> {
     retire_unsupported_legacy_installs(&paths)?;
     agent_profiles::apply_detected_defaults(&paths)?;
     let report = reconcile_installed_items(&paths, &loaded_sources)?;
-    super::project::build_app_state(
+    let updated_ids = report
+        .updated_items
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    let mut state = super::project::build_app_state(
         &paths,
         &loaded_repositories,
         &loaded_sources,
         checked,
         report,
         catalog_message,
-    )
+    )?;
+    enrich_with_marketplace(
+        &paths,
+        &cache,
+        &loaded_repositories,
+        &mut state,
+        &updated_ids,
+    );
+    Ok(state)
+}
+
+/// Adds every source the marketplace catalog lists that is not configured yet.
+/// The catalog is the authority: browsing the marketplace needs no Manage
+/// Sources step. Returns a message when some listed source could not be added.
+pub(super) fn subscribe_marketplace_sources(
+    cache: &std::path::Path,
+    repositories: &[LoadedRepository],
+    sources: &mut Vec<ConfiguredSource>,
+) -> Option<String> {
+    let default = crate::locator::default_catalog_locator().ok().flatten()?;
+    let repository = repositories
+        .iter()
+        .find(|repository| repository.definition.locator.same_identity(&default))?;
+    let snapshot = repository.snapshot.as_ref()?;
+    let listed = snapshot.manifest.canonical_sources().ok()?;
+    let mut problems = Vec::new();
+    let mut added = false;
+    for entry in listed {
+        let Ok(locator) = entry.locator() else {
+            continue;
+        };
+        let configured = sources.iter().any(|source| {
+            source.locator.same_identity(&locator)
+                || entry.source_id.as_deref() == Some(source.source_id.as_str())
+        });
+        if configured {
+            continue;
+        }
+        match source::prepare_new_source(
+            &locator,
+            cache,
+            Some(repository.definition.repository_key.clone()),
+            entry.source_id.as_deref(),
+        ) {
+            Ok(candidate) => match source::activate_candidate(cache, candidate) {
+                Ok(activated) => {
+                    sources.push(activated.definition);
+                    added = true;
+                }
+                Err(message) => problems.push(format!("{}: {message}", entry.name)),
+            },
+            Err(message) => problems.push(format!("{}: {message}", entry.name)),
+        }
+    }
+    if added {
+        sources.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.source_id.cmp(&right.source_id))
+        });
+    }
+    (!problems.is_empty()).then(|| {
+        format!(
+            "Some marketplace sources could not be added: {}",
+            problems.join(" ")
+        )
+    })
+}
+
+/// Joins the marketplace index, runs the preflight, and reports the heartbeat.
+/// Every step is best-effort: an unreachable server leaves the cached catalog
+/// and installed packages usable.
+fn enrich_with_marketplace(
+    paths: &SystemPaths,
+    cache: &std::path::Path,
+    repositories: &[LoadedRepository],
+    state: &mut AppState,
+    updated_ids: &[String],
+) {
+    let Some(base_url) = crate::locator::marketplace_base_url() else {
+        return;
+    };
+    state.marketplace_url = Some(base_url.to_string());
+    let index = crate::marketplace::index_with_cache(cache);
+    if let Some(index) = &index {
+        super::project::apply_index(&mut state.items, index);
+    }
+    let catalog_age = crate::locator::default_catalog_locator()
+        .ok()
+        .flatten()
+        .and_then(|default| {
+            repositories
+                .iter()
+                .find(|repository| repository.definition.locator.same_identity(&default))
+        })
+        .and_then(|repository| {
+            repository.snapshot.as_ref().map(|_| {
+                if repository.refresh_failed {
+                    25 * 60 * 60
+                } else {
+                    0
+                }
+            })
+        });
+    let ledger_error = crate::executor::read_ledger(paths).err();
+    let (report, findings) = crate::preflight::run(&crate::preflight::PreflightInput {
+        paths,
+        startup: crate::STARTUP_REPORT.get(),
+        profiles: &state.agent_profiles,
+        items: &state.items,
+        catalog_age_seconds: catalog_age,
+        ledger_error,
+    });
+    report.write_cache(cache);
+    let identity = findings
+        .identity
+        .map(|me| crate::app_state::MarketplaceIdentity {
+            account: me.account,
+            namespace: me.namespace,
+            display_name: me.display_name,
+            admin: me.admin,
+            auth_mode: report.auth_mode.clone(),
+        });
+    super::project::write_identity_cache(cache, identity.as_ref());
+    state.identity = identity;
+    let checks = report.status_map();
+    state.preflight = Some(report);
+
+    let agents = super::items::enabled_agent_ids(paths);
+    let installed = state
+        .items
+        .iter()
+        .filter(|item| super::items::counts_as_installed(item.status))
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    let mut events = vec![crate::marketplace::ClientEvent::heartbeat(
+        agents.clone(),
+        installed,
+        checks,
+    )];
+    for id in updated_ids {
+        let version = index
+            .as_ref()
+            .and_then(|index| index.package(id))
+            .map(|package| package.version.clone());
+        events.push(crate::marketplace::ClientEvent::update(
+            id,
+            None,
+            version,
+            agents.clone(),
+        ));
+    }
+    crate::marketplace::send_events_background(events);
 }
 
 pub(super) fn ensure_default_catalog(

@@ -10,7 +10,7 @@ use std::path::Path;
 pub const REPOSITORY_MANIFEST_FILE: &str = "skill-manager-repository.json";
 pub const REPOSITORY_MANIFEST_VERSION: u8 = 1;
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
-const MAX_LISTED_SOURCES: usize = 200;
+const MAX_LISTED_SOURCES: usize = 5000;
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -18,7 +18,7 @@ pub struct RepositoryManifest {
     #[schemars(with = "i64", range(min = 1, max = 1))]
     pub version: u8,
     pub repository: RepositoryIdentity,
-    #[schemars(length(min = 1, max = 200))]
+    #[schemars(length(min = 0, max = 5000))]
     pub sources: Vec<ListedSource>,
 }
 
@@ -47,6 +47,17 @@ pub struct ListedSource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 2, max = 16))]
     pub source_id: Option<String>,
+    /// Marketplace listing: the publisher's display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 120))]
+    pub publisher: Option<String>,
+    /// Marketplace listing: how many packages the source currently publishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_count: Option<u32>,
+    /// Marketplace listing: when the source archive last changed (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 64))]
+    pub updated_at: Option<String>,
 }
 
 impl ListedSource {
@@ -107,11 +118,6 @@ impl RepositoryManifest {
             1,
             1024,
         )?;
-        if self.sources.is_empty() {
-            return Err(format!(
-                "{REPOSITORY_MANIFEST_FILE} does not list any sources."
-            ));
-        }
         if self.sources.len() > MAX_LISTED_SOURCES {
             return Err(format!(
                 "{REPOSITORY_MANIFEST_FILE} lists more than {MAX_LISTED_SOURCES} sources."
@@ -138,6 +144,12 @@ impl RepositoryManifest {
                     )
                 })?;
             }
+            if let Some(publisher) = &source.publisher {
+                validate_text(publisher, "sources[].publisher", 1, 120)?;
+            }
+            if let Some(updated_at) = &source.updated_at {
+                validate_text(updated_at, "sources[].updatedAt", 1, 64)?;
+            }
         }
         Ok(())
     }
@@ -152,6 +164,9 @@ impl RepositoryManifest {
                     description: source.description.clone(),
                     url: locator.url().to_string(),
                     source_id: source.source_id.clone(),
+                    publisher: source.publisher.clone(),
+                    package_count: source.package_count,
+                    updated_at: source.updated_at.clone(),
                 })
             })
             .collect()

@@ -8,9 +8,21 @@ import { AgentSetupNotice } from "./components/AgentSetupNotice";
 import { ManageSourcesDialog } from "./components/ManageSourcesDialog";
 import { Notice } from "./components/Notice";
 import { SourceGroup } from "./components/SourceGroup";
+import { CatalogToolbar, StatusButton, SyncMeta } from "./components/CatalogToolbar";
+import { overallStatus, SystemStatusDialog } from "./components/SystemStatusDialog";
 import { errorText, invokeParsed, SCHEDULED_SYNC_EVENT } from "./ipc/client";
-import { appStateSchema, bulkPlanSchema, bulkResultSchema, cachedStateSchema, operationOutcomeSchema, preparedSourceSchema, scheduledSyncSchema, sourceRemovalPlanSchema } from "./ipc/schemas";
-import type { AppState, BulkAction, CatalogItem, ListedSource, RepositoryState, SourceState } from "./ipc/schemas";
+import {
+  appStateSchema,
+  bulkPlanSchema,
+  bulkResultSchema,
+  cachedStateSchema,
+  operationOutcomeSchema,
+  preflightReportSchema,
+  preparedSourceSchema,
+  scheduledSyncSchema,
+  sourceRemovalPlanSchema
+} from "./ipc/schemas";
+import type { AppIdentity, AppState, BulkAction, CatalogItem, CheckStatus, ListedSource, PreflightReport, RepositoryState, SourceState } from "./ipc/schemas";
 import { commandForStatus, hasDetectedAgent, itemCommandArgs, reviewBulk, reviewReplace, reviewReset } from "./lib/status";
 import "./App.css";
 
@@ -25,6 +37,9 @@ export default function App(): JSX.Element {
   const [busyItems, setBusyItems] = useState<ReadonlySet<string>>(new Set());
   const [busySources, setBusySources] = useState<ReadonlySet<string>>(new Set());
   const [resetting, setResetting] = useState(false);
+  const [statusDialogOpen, setStatusDialogOpen] = useState(false);
+  const [preflightRunning, setPreflightRunning] = useState(false);
+  const [query, setQuery] = useState("");
 
   const applyState = useCallback((next: AppState): void => {
     startTransition(() => {
@@ -121,13 +136,59 @@ export default function App(): JSX.Element {
 
   const itemsBySource = useMemo(() => {
     const grouped = new Map<string, CatalogItem[]>();
+    const needle = query.trim().toLowerCase();
     for (const item of state?.items ?? []) {
+      if (needle.length > 0 && !matchesQuery(item, needle)) {
+        continue;
+      }
       const items = grouped.get(item.sourceKey) ?? [];
       items.push(item);
       grouped.set(item.sourceKey, items);
     }
     return grouped;
-  }, [state]);
+  }, [query, state]);
+
+  const visibleSources = useMemo(() => {
+    const sources = state?.sources ?? [];
+    if (query.trim().length === 0) {
+      return sources;
+    }
+    return sources.filter((source) => (itemsBySource.get(source.sourceKey) ?? []).length > 0);
+  }, [itemsBySource, query, state]);
+
+  async function rerunPreflight(): Promise<void> {
+    setPreflightRunning(true);
+    try {
+      const report = await invokeParsed("run_preflight", preflightReportSchema);
+      setState((current) => (current === null ? current : { ...current, preflight: report }));
+      setError(null);
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setPreflightRunning(false);
+    }
+  }
+
+  function handleStatusAction(action: string): void {
+    setStatusDialogOpen(false);
+    const handlers: Readonly<Record<string, () => void>> = {
+      sync: () => {
+        synchronize().catch((reason: unknown) => {
+          setError(errorText(reason));
+        });
+      },
+      showAgents: () => {
+        setAgentDialogOpen(true);
+      },
+      showDrift: () => {
+        setQuery("");
+      },
+      installPublishSkill: () => {
+        setQuery("official/publish");
+      }
+    };
+    handlers[action]?.();
+  }
 
   async function refreshCached(): Promise<void> {
     await loadCached();
@@ -248,6 +309,8 @@ export default function App(): JSX.Element {
   }
 
   const checked = state === null ? "Not checked yet" : new Date(state.checkedAtEpochSeconds * 1000).toLocaleString();
+  const view = marketplaceView(state);
+  const matchCount = [...itemsBySource.values()].reduce((total, items) => total + items.length, 0);
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -257,6 +320,14 @@ export default function App(): JSX.Element {
           </Heading>
         </div>
         <div className="catalog-actions">
+          <StatusButton
+            status={view.status}
+            identity={view.identity}
+            disabled={resetting}
+            onClick={() => {
+              setStatusDialogOpen(true);
+            }}
+          />
           <Button
             variant="soft"
             disabled={resetting}
@@ -293,11 +364,8 @@ export default function App(): JSX.Element {
           </Button>
         </div>
       </header>
-      <div className="sync-meta">
-        <Text color="gray" size="1">
-          Last checked: {checked}
-        </Text>
-      </div>
+      <SyncMeta checked={checked} marketplaceUrl={view.marketplaceUrl} blocked={view.blocked} />
+      <CatalogToolbar query={query} matches={matchCount} onQueryChange={setQuery} />
       <AgentSetupNotice
         visible={state !== null && !hasDetectedAgent(state.agentProfiles)}
         onChoose={() => {
@@ -318,7 +386,7 @@ export default function App(): JSX.Element {
         </div>
       ) : (
         <div className="sources-list">
-          {state.sources.map((source) => (
+          {visibleSources.map((source) => (
             <SourceGroup
               key={source.sourceKey}
               source={source}
@@ -343,6 +411,30 @@ export default function App(): JSX.Element {
         onError={setError}
       />
       <AgentProfilesDialog open={agentDialogOpen} profiles={state?.agentProfiles ?? []} onOpenChange={setAgentDialogOpen} />
+      <SystemStatusDialog
+        open={statusDialogOpen}
+        report={view.preflight}
+        identity={view.identity}
+        marketplaceUrl={view.marketplaceUrl}
+        running={preflightRunning}
+        onOpenChange={setStatusDialogOpen}
+        onRerun={() => {
+          rerunPreflight().catch((reason: unknown) => {
+            setError(errorText(reason));
+          });
+        }}
+        onAction={handleStatusAction}
+      />
     </main>
   );
+}
+
+function matchesQuery(item: CatalogItem, needle: string): boolean {
+  const haystack = [item.id, item.name, item.description, item.sourceName, item.marketplace?.publisher ?? "", ...(item.marketplace?.tags ?? [])].join(" ").toLowerCase();
+  return haystack.includes(needle);
+}
+
+function marketplaceView(state: AppState | null): Readonly<{ identity: AppIdentity | null; marketplaceUrl: string | null; preflight: PreflightReport | null; blocked: boolean; status: CheckStatus }> {
+  const preflight = state?.preflight ?? null;
+  return { identity: state?.identity ?? null, marketplaceUrl: state?.marketplaceUrl ?? null, preflight, blocked: preflight?.blocked === true, status: overallStatus(preflight) };
 }

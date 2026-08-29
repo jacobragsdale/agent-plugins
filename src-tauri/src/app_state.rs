@@ -34,6 +34,46 @@ pub(crate) struct CatalogItemState {
     pub(crate) compatibility: Vec<CompatibilityReport>,
     pub(crate) destination: Option<String>,
     pub(crate) status: ItemStatus,
+    /// Marketplace index metadata, when the package is listed there.
+    pub(crate) marketplace: Option<MarketplaceMeta>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MarketplaceMeta {
+    pub(crate) publisher: String,
+    pub(crate) publisher_account: String,
+    pub(crate) version: String,
+    pub(crate) lane: String,
+    pub(crate) tags: Vec<String>,
+    pub(crate) published_at: String,
+    pub(crate) installs: u64,
+    pub(crate) installed_base: u64,
+}
+
+impl MarketplaceMeta {
+    pub(crate) fn from_index(package: &crate::marketplace::IndexPackage) -> Self {
+        Self {
+            publisher: package.publisher.display_name.clone(),
+            publisher_account: package.publisher.account.clone(),
+            version: package.version.clone(),
+            lane: package.lane.clone(),
+            tags: package.tags.clone(),
+            published_at: package.published_at.clone(),
+            installs: package.installs,
+            installed_base: package.installed_base,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MarketplaceIdentity {
+    pub(crate) account: String,
+    pub(crate) namespace: String,
+    pub(crate) display_name: String,
+    pub(crate) admin: bool,
+    pub(crate) auth_mode: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -102,6 +142,9 @@ pub(crate) struct AppState {
     pub(crate) sources: Vec<SourceState>,
     pub(crate) items: Vec<CatalogItemState>,
     pub(crate) agent_profiles: Vec<AgentProfileState>,
+    pub(crate) marketplace_url: Option<String>,
+    pub(crate) identity: Option<MarketplaceIdentity>,
+    pub(crate) preflight: Option<crate::preflight::PreflightReport>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -253,8 +296,12 @@ mod tests {
                 compatibility: Vec::new(),
                 destination: None,
                 status: ItemStatus::Available,
+                marketplace: None,
             }],
             agent_profiles: Vec::new(),
+            marketplace_url: None,
+            identity: None,
+            preflight: None,
         };
         let value = serde_json::to_value(&state).expect("json");
         assert!(value

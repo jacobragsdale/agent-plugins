@@ -5,9 +5,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
-/// Company catalog JSON URL hosted on the raw Nexus `files` repository.
-pub(crate) const DEFAULT_CATALOG_URL: &str =
-    "https://repo.ragsdale.dev/repository/files/catalogs/skill-manager-repository.json";
+/// Marketplace server base URL. A build-time constant: the corporate build
+/// changes only this value, the SPN it implies, and nothing else. The catalog
+/// document lives at `/api/catalog` and namespace archives under
+/// `/api/sources/{namespace}/archive`. Empty disables the marketplace.
+pub(crate) const MARKETPLACE_URL: &str = "https://marketplace.ragsdale.dev";
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -43,12 +45,31 @@ impl Locator {
     }
 }
 
+/// The marketplace base URL without a trailing slash, or `None` when disabled.
+pub(crate) fn marketplace_base_url() -> Option<&'static str> {
+    let url = MARKETPLACE_URL.trim().trim_end_matches('/');
+    (!url.is_empty()).then_some(url)
+}
+
 pub(crate) fn default_catalog_locator() -> Result<Option<Locator>, String> {
-    let url = DEFAULT_CATALOG_URL.trim();
-    if url.is_empty() {
-        return Ok(None);
+    match marketplace_base_url() {
+        None => Ok(None),
+        Some(base) => Ok(Some(Locator::parse(&format!("{base}/api/catalog"))?)),
     }
-    Ok(Some(Locator::parse(url)?))
+}
+
+/// True when `url` is served by the marketplace server (same scheme, host, and port).
+pub(crate) fn is_marketplace_url(url: &str) -> bool {
+    let Some(base) = marketplace_base_url() else {
+        return false;
+    };
+    let (Ok(base), Ok(candidate)) = (url::Url::parse(base), url::Url::parse(url)) else {
+        return false;
+    };
+    base.scheme() == candidate.scheme()
+        && base.host_str().map(str::to_ascii_lowercase)
+            == candidate.host_str().map(str::to_ascii_lowercase)
+        && base.port_or_known_default() == candidate.port_or_known_default()
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -237,13 +258,17 @@ mod tests {
     }
 
     #[test]
-    fn default_catalog_url_is_the_live_nexus_catalog() {
+    fn default_catalog_is_the_marketplace_catalog_endpoint() {
         let locator = default_catalog_locator()
             .expect("default")
             .expect("configured");
-        assert_eq!(
-            locator.url(),
-            "https://repo.ragsdale.dev/repository/files/catalogs/skill-manager-repository.json"
-        );
+        assert_eq!(locator.url(), format!("{MARKETPLACE_URL}/api/catalog"));
+        assert!(is_marketplace_url(locator.url()));
+        assert!(is_marketplace_url(&format!(
+            "{MARKETPLACE_URL}/api/sources/jacob/archive"
+        )));
+        assert!(!is_marketplace_url(
+            "https://repo.ragsdale.dev/api/v1/repositories/files/download/x.zip"
+        ));
     }
 }

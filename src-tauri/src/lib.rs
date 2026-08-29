@@ -1,22 +1,30 @@
+#![cfg_attr(not(feature = "app"), allow(dead_code, unused_imports))]
+
 mod adapters;
 mod agent_profiles;
 mod app_state;
 mod application;
 mod artifact;
 mod catalog;
+#[cfg(feature = "app")]
+mod cli;
 mod digest;
 mod executor;
 mod fs_retry;
+mod host_identity;
 mod install;
+#[cfg(feature = "app")]
 mod ipc;
 mod ledger;
 mod locator;
 mod managed_documents;
 pub mod manifest;
+mod marketplace;
 mod mcp;
 mod parallel;
 mod paths;
 mod planner;
+mod preflight;
 mod process;
 mod qa_paths;
 pub mod repository;
@@ -25,6 +33,19 @@ mod source;
 mod sources;
 mod startup;
 
+/// The host preparation report from process start, for the preflight.
+pub(crate) static STARTUP_REPORT: std::sync::OnceLock<startup::StartupReport> =
+    std::sync::OnceLock::new();
+
+/// Runs host preparation once and remembers the report.
+pub(crate) fn prepare_host() -> &'static startup::StartupReport {
+    STARTUP_REPORT.get_or_init(|| {
+        let report = startup::prepare();
+        report.log();
+        report
+    })
+}
+
 pub use repository::{
     validate_source_repository, RepositoryValidationError, RepositoryValidationReport,
 };
@@ -32,12 +53,16 @@ pub use source::{
     validate_source, validate_source_locator, validate_source_repository_locator,
     SourceValidationError, SourceValidationReport,
 };
-#[cfg(desktop)]
+#[cfg(all(feature = "app", desktop))]
 mod tray;
 
+#[cfg(feature = "app")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    crate::startup::prepare().log();
+    if let Some(code) = cli::maybe_run() {
+        std::process::exit(code);
+    }
+    prepare_host();
     let runtime_state =
         application::RuntimeState::new().expect("could not initialize the Agent Plugins runtime");
     let builder = tauri::Builder::default();
@@ -85,6 +110,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ipc::load_cached_manifest_state,
+            ipc::run_preflight,
             ipc::sync_manifest_state,
             ipc::prepare_source,
             ipc::confirm_source,

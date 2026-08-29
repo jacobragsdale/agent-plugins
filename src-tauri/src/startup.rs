@@ -82,6 +82,25 @@ pub(crate) enum ProxyStatus {
     },
 }
 
+impl ProxyStatus {
+    /// One line for the preflight report.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            ProxyStatus::Unset => "No proxy is configured.".to_string(),
+            ProxyStatus::FromEnvironment { http, https } => {
+                format!("Proxy from the environment: HTTP {http}, HTTPS {https}.")
+            }
+            ProxyStatus::FromSystem { http, https } => {
+                format!("Proxy from the system settings: HTTP {http}, HTTPS {https}.")
+            }
+            ProxyStatus::Socks { url } => format!("SOCKS proxy {url}."),
+            ProxyStatus::PacOnly { url } => {
+                format!("Only a PAC script ({url}) is configured; direct connections are used.")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct StartupReport {
     pub(crate) tools: Vec<ToolStatus>,

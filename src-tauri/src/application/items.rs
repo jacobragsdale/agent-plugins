@@ -2,10 +2,63 @@ use super::RuntimeState;
 use crate::app_state::{BulkAction, BulkFailure, BulkPlan, BulkPlanEntry, BulkResult};
 use crate::catalog::CatalogItem;
 use crate::install::{self, ItemStatus, OperationOutcome, SourceRemovalPlan};
+use crate::marketplace::{self, ClientEvent};
 use crate::paths::SystemPaths;
 use crate::source::{self, ConfiguredSource, SourceSnapshot};
 use crate::sources::{cache_base_dir, config_base_dir};
 use std::io;
+
+/// Target IDs of the agents the app currently configures, for usage events.
+pub(super) fn enabled_agent_ids(paths: &SystemPaths) -> Vec<String> {
+    crate::agent_profiles::read(paths)
+        .map(|profiles| {
+            profiles
+                .into_iter()
+                .filter(|profile| profile.enabled)
+                .map(|profile| profile.target_id.as_str().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Statuses that mean the package is on this machine, for the installed set.
+pub(super) fn counts_as_installed(status: ItemStatus) -> bool {
+    matches!(
+        status,
+        ItemStatus::Installed
+            | ItemStatus::UpdateAvailable
+            | ItemStatus::Modified
+            | ItemStatus::PartiallyInstalled
+    )
+}
+
+fn marketplace_version(canonical_id: &str) -> Option<String> {
+    let cache = cache_base_dir().ok()?;
+    marketplace::read_cached_index(&cache)?
+        .package(canonical_id)
+        .map(|package| package.version.clone())
+}
+
+/// Reports a completed install or uninstall to the marketplace, best-effort.
+fn report_operation(kind: BulkAction, canonical_ids: &[String]) {
+    if canonical_ids.is_empty() {
+        return;
+    }
+    let Ok(paths) = SystemPaths::from_system() else {
+        return;
+    };
+    let agents = enabled_agent_ids(&paths);
+    let events = canonical_ids
+        .iter()
+        .map(|id| match kind {
+            BulkAction::Install | BulkAction::Replace => {
+                ClientEvent::install(id, marketplace_version(id), agents.clone())
+            }
+            BulkAction::Uninstall => ClientEvent::uninstall(id, agents.clone()),
+        })
+        .collect();
+    marketplace::send_events_background(events);
+}
 
 pub(crate) async fn install_item(
     runtime: &RuntimeState,
@@ -17,7 +70,7 @@ pub(crate) async fn install_item(
     let _guard = runtime.operation_lock.lock().await;
     let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
     let ids = requested_component_ids(&item, component_id)?;
-    match ids.as_deref() {
+    let outcome = match ids.as_deref() {
         None => install::install_item_approved(&paths, &source, &snapshot, &item, trust_approved),
         Some(ids) => install::install_item_components_approved(
             &paths,
@@ -27,7 +80,9 @@ pub(crate) async fn install_item(
             trust_approved,
             Some(ids),
         ),
-    }
+    }?;
+    report_operation(BulkAction::Install, std::slice::from_ref(&item.id));
+    Ok(outcome)
 }
 
 pub(crate) async fn replace_item(
@@ -40,7 +95,7 @@ pub(crate) async fn replace_item(
     let _guard = runtime.operation_lock.lock().await;
     let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
     let ids = requested_component_ids(&item, component_id)?;
-    match ids.as_deref() {
+    let outcome = match ids.as_deref() {
         None => install::replace_item_approved(&paths, &source, &snapshot, &item, trust_approved),
         Some(ids) => install::replace_item_components_approved(
             &paths,
@@ -50,7 +105,9 @@ pub(crate) async fn replace_item(
             trust_approved,
             Some(ids),
         ),
-    }
+    }?;
+    report_operation(BulkAction::Replace, std::slice::from_ref(&item.id));
+    Ok(outcome)
 }
 
 pub(crate) async fn preview_install(
@@ -90,13 +147,13 @@ pub(crate) async fn uninstall_item(
     let config = config_base_dir()?;
     let source = source::configured_source(&config, source_id)?;
     let ids = component_id.map(|component_id| vec![component_id.to_string()]);
-    install::uninstall_item_components(
-        &paths,
-        &source,
-        &format!("{source_id}/{local_id}"),
-        ids.as_deref(),
-        false,
-    )
+    let canonical_id = format!("{source_id}/{local_id}");
+    let outcome =
+        install::uninstall_item_components(&paths, &source, &canonical_id, ids.as_deref(), false)?;
+    if ids.is_none() {
+        report_operation(BulkAction::Uninstall, &[canonical_id]);
+    }
+    Ok(outcome)
 }
 
 pub(crate) async fn bulk_plan(
@@ -209,11 +266,18 @@ pub(crate) async fn bulk_run(
         ),
     };
     match result {
-        Ok(outcome) => Ok(BulkResult {
-            completed: entries.into_iter().map(|entry| entry.id).collect(),
-            failures: Vec::new(),
-            backup_paths: outcome.backup_paths,
-        }),
+        Ok(outcome) => {
+            let completed = entries
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>();
+            report_operation(action, &completed);
+            Ok(BulkResult {
+                completed,
+                failures: Vec::new(),
+                backup_paths: outcome.backup_paths,
+            })
+        }
         Err(message) => Ok(BulkResult {
             completed: Vec::new(),
             failures: entries
@@ -312,6 +376,7 @@ pub(crate) async fn remove_source(
         .retain(|configured| configured.source_key != source.source_key);
     source::write_sources_config(&config, &config_file)?;
     source::remove_source_cache(&cache, &source.source_key)?;
+    report_operation(BulkAction::Uninstall, &records);
     Ok(BulkResult {
         completed: records,
         failures: Vec::new(),
