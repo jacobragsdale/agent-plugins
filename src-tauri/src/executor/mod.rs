@@ -1132,7 +1132,7 @@ mod tests {
         )
         .expect("skill");
         fs::write(
-            source_root.join("skill-manager.json"),
+            source_root.join("agent-plugins.json"),
             r#"{"version":2,"source":{"id":"acme","name":"Acme","description":"Test"},"packages":[{"id":"review","components":[{"kind":"skill","path":"skills/review"}]}]}"#,
         )
         .expect("manifest");
@@ -1169,7 +1169,7 @@ mod tests {
             .expect("skill file");
         }
         fs::write(
-            source_root.join("skill-manager.json"),
+            source_root.join("agent-plugins.json"),
             r#"{"version":2,"source":{"id":"acme","name":"Acme","description":"Test"},"packages":[{"id":"review","components":[{"kind":"skill","id":"review","path":"skills/review"}]},{"id":"debug","components":[{"kind":"skill","id":"debug","path":"skills/debug"}]}]}"#,
         )
         .expect("manifest");
@@ -1359,7 +1359,7 @@ mod tests {
             .expect("skill file");
         }
         fs::write(
-            source_root.join("skill-manager.json"),
+            source_root.join("agent-plugins.json"),
             r#"{
               "version":2,
               "source":{"id":"acme","name":"Acme","description":"Test"},
@@ -1416,7 +1416,7 @@ mod tests {
         )
         .expect("other skill file");
         fs::write(
-            other_root.join("skill-manager.json"),
+            other_root.join("agent-plugins.json"),
             r#"{"version":2,"source":{"id":"other","name":"Other","description":"Keep"},"packages":[{"id":"keep","components":[{"kind":"skill","path":"skills/keep"}]}]}"#,
         )
         .expect("other manifest");
@@ -1500,7 +1500,7 @@ mod tests {
         install(&paths, &source, &snapshot, &item, false, false).expect("install");
         let mut ledger = read_ledger(&paths).expect("ledger");
         let binding_id = ledger.items[&item.id].binding_ids[0].clone();
-        let poison = paths.data.join("skill-manager/poison.toml");
+        let poison = paths.data.join("agent-plugins/poison.toml");
         let resource_id = "resource-poison00000000000000".to_string();
         ledger.resources.insert(
             resource_id.clone(),
@@ -1567,7 +1567,7 @@ mod tests {
         )
         .expect("other skill file");
         fs::write(
-            other_root.join("skill-manager.json"),
+            other_root.join("agent-plugins.json"),
             r#"{"version":2,"source":{"id":"other","name":"Other","description":"Keep"},"packages":[{"id":"keep","components":[{"kind":"skill","path":"skills/keep"}]}]}"#,
         )
         .expect("other manifest");
@@ -1656,7 +1656,7 @@ mod tests {
         )
         .expect("mcp config");
         fs::write(
-            source_root.join("skill-manager.json"),
+            source_root.join("agent-plugins.json"),
             r#"{
               "version":2,
               "source":{"id":"acme","name":"Acme","description":"Test"},
@@ -1724,7 +1724,7 @@ mod tests {
         )
         .expect("mcp");
         fs::write(
-            source_root.join("skill-manager.json"),
+            source_root.join("agent-plugins.json"),
             r#"{
               "version":2,
               "source":{"id":"acme","name":"Acme","description":"Test"},

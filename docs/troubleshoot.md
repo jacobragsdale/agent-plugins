@@ -41,7 +41,7 @@ The message names the reason. Match it here.
 
 | Message                                                                   | Cause                                                                                | Fix                                                                                                             |
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| `… requires explicit Tier 3 approval`                                     | The package installs an MCP server and the approval was declined or never asked for. | Install it from the app and select **Approve and Install**, or pass `--approve-mcp` to `skill-manager install`. |
+| `… requires explicit Tier 3 approval`                                     | The package installs an MCP server and the approval was declined or never asked for. | Install it from the app and select **Approve and Install**, or pass `--approve-mcp` to `agent-plugins install`. |
 | `… contains local changes`                                                | An owned file was edited outside the app.                                            | See _Local Changes_ above.                                                                                      |
 | `… is owned by a different source`                                        | Another source already installed a package with this ID.                             | Uninstall the other copy, or remove the source that owns it, then install again.                                |
 | `… conflicts with another package in this batch`                          | Two packages in one **Install all** declare `conflictsWith` each other.              | Install them individually and keep only one.                                                                    |
@@ -77,7 +77,7 @@ Three checks can stop the app from planning, installing, or syncing at all:
 
 | Check                  | Meaning                                                    | Fix                                                                             |
 | ---------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `host.homeDirs`        | A skill directory or the app data directory is unwritable. | Fix the permissions on `~/.agents`, `~/.claude`, and `%APPDATA%\skill-manager`. |
+| `host.homeDirs`        | A skill directory or the app data directory is unwritable. | Fix the permissions on `~/.agents`, `~/.claude`, and `%APPDATA%\agent-plugins`. |
 | `agents.ledger`        | `installations.json` is unreadable or too new.             | Restore `installations.json.previous` beside it, or **Reset**.                  |
 | `server.clientVersion` | The client is below the server's minimum.                  | Update the app.                                                                 |
 
@@ -94,7 +94,7 @@ Close the app and start it again. On launch it reads the recovery journal: a tra
 Collect this before asking for help:
 
 ```powershell
-skill-manager whoami
+agent-plugins whoami
 ```
 
 plus the failing check IDs from **System status**, the exact error text, and the package ID. The report behind the status button is the same one the app sends with its heartbeat, so quoting check IDs lets someone match your machine to what the server already sees.

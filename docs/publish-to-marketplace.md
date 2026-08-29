@@ -4,7 +4,7 @@ This tutorial publishes a skill you already have on your machine to the company 
 
 ## From an agent
 
-Install the official `publish` skill from the marketplace (search for `official/publish` in Agent Plugins, or run `skill-manager install official/publish`). Then tell your agent:
+Install the official `publish` skill from the marketplace (search for `official/publish` in Agent Plugins, or run `agent-plugins install official/publish`). Then tell your agent:
 
 > Publish my `review` skill to the marketplace.
 
@@ -12,12 +12,12 @@ The skill validates the package, proposes a better description and tags, runs a 
 
 ## From a terminal
 
-`skill-manager` is the Agent Plugins executable. It is on PATH after the app's first run; otherwise use `"%LOCALAPPDATA%\Programs\Agent Plugins\skill-manager.exe"`.
+`agent-plugins` is the Agent Plugins executable. It is on PATH after the app's first run; otherwise use `"%LOCALAPPDATA%\Programs\Agent Plugins\agent-plugins.exe"`.
 
 1. Check who you are:
 
    ```
-   skill-manager whoami
+   agent-plugins whoami
    ```
 
    The `namespace` line is where your packages publish: your lowercase account name.
@@ -25,7 +25,7 @@ The skill validates the package, proposes a better description and tags, runs a 
 2. Point at the skill directory (it contains `SKILL.md`):
 
    ```
-   skill-manager publish %USERPROFILE%\.claude\skills\review --version 1.0.0 --tags review,git --changelog "First release."
+   agent-plugins publish %USERPROFILE%\.claude\skills\review --version 1.0.0 --tags review,git --changelog "First release."
    ```
 
    The CLI stages a one-package source tree, refuses files that look like credentials, validates it with the same rules the server applies, and prints a summary:
@@ -56,7 +56,7 @@ The skill validates the package, proposes a better description and tags, runs a 
 | --------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | A directory with `SKILL.md`             | One `skill` package. The package ID is the frontmatter `name` (a `yourname-` prefix is dropped). |
 | An MCP document in the `mcp.json` shape | One `mcpServer` package named after the file.                                                    |
-| A tree with `skill-manager.json`        | The single package it declares; `source.id` must equal your namespace.                           |
+| A tree with `agent-plugins.json`        | The single package it declares; `source.id` must equal your namespace.                           |
 
 `--package-id` overrides the package ID. `--namespace official` publishes to the official lane when your account is allowlisted.
 

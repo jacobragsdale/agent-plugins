@@ -4,7 +4,7 @@ use schemars::{generate::SchemaSettings, JsonSchema};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const SOURCE_MANIFEST_FILE: &str = "skill-manager.json";
+pub const SOURCE_MANIFEST_FILE: &str = "agent-plugins.json";
 pub const SOURCE_MANIFEST_VERSION: u8 = 2;
 pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 
@@ -90,27 +90,27 @@ impl ManifestComponent {
 impl SourceManifest {
     pub fn from_slice(contents: &[u8]) -> Result<Self, String> {
         if contents.len() > MAX_MANIFEST_BYTES {
-            return Err("skill-manager.json is larger than the 1 MB limit.".to_string());
+            return Err("agent-plugins.json is larger than the 1 MB limit.".to_string());
         }
         let value = serde_json::from_slice::<serde_json::Value>(contents)
-            .map_err(|error| format!("Could not parse skill-manager.json: {error}"))?;
+            .map_err(|error| format!("Could not parse agent-plugins.json: {error}"))?;
         let version = value.get("version").and_then(serde_json::Value::as_u64);
         let manifest = match version {
             Some(1) => {
                 return Err(
-                    "skill-manager.json version 1 generic file installs are no longer supported. Publish version 2 packages."
+                    "agent-plugins.json version 1 generic file installs are no longer supported. Publish version 2 packages."
                         .to_string(),
                 );
             }
             Some(2) => serde_json::from_value::<ManifestV2>(value)
                 .map(Self::V2)
-                .map_err(|error| format!("Could not parse skill-manager.json: {error}"))?,
+                .map_err(|error| format!("Could not parse agent-plugins.json: {error}"))?,
             Some(version) => {
                 return Err(format!(
-                    "skill-manager.json uses unsupported version {version}."
+                    "agent-plugins.json uses unsupported version {version}."
                 ));
             }
-            None => return Err("skill-manager.json has no valid version.".to_string()),
+            None => return Err("agent-plugins.json has no valid version.".to_string()),
         };
         manifest.validate()?;
         Ok(manifest)
@@ -123,7 +123,7 @@ impl SourceManifest {
         validate_text(&source.description, "source.description", 1, 1024)?;
         let Self::V2(manifest) = self;
         if manifest.version != SOURCE_MANIFEST_VERSION || manifest.packages.is_empty() {
-            return Err("skill-manager.json does not publish any packages.".to_string());
+            return Err("agent-plugins.json does not publish any packages.".to_string());
         }
         let mut ids = BTreeSet::new();
         for package in &manifest.packages {

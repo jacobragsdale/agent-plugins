@@ -14,7 +14,7 @@ public sealed record InspectedArchive(
     IReadOnlyList<string> ComponentKinds,
     /// <summary>Entry names relative to the source root, in archive order.</summary>
     IReadOnlyList<string> Entries,
-    /// <summary>The archive's root prefix, empty when <c>skill-manager.json</c> is at the top level.</summary>
+    /// <summary>The archive's root prefix, empty when <c>agent-plugins.json</c> is at the top level.</summary>
     string RootPrefix);
 
 /// <summary>
@@ -23,7 +23,7 @@ public sealed record InspectedArchive(
 /// </summary>
 public static class ArchiveInspector
 {
-    public const string ManifestFile = "skill-manager.json";
+    public const string ManifestFile = "agent-plugins.json";
     public const long MaxArchiveBytes = 50L * 1024 * 1024;
     public const long MaxUncompressedBytes = 200L * 1024 * 1024;
     public const int MaxEntries = 5000;

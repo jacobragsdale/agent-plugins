@@ -142,9 +142,9 @@ public sealed class PermissiveValidator : IPackageValidator
 {
     public Task<ValidationOutcome> ValidateAsync(string sourceDirectory, CancellationToken cancellationToken)
     {
-        var manifest = Path.Combine(sourceDirectory, "skill-manager.json");
+        var manifest = Path.Combine(sourceDirectory, "agent-plugins.json");
         return Task.FromResult(File.Exists(manifest)
             ? new ValidationOutcome(true, "fake", 1, [])
-            : ValidationOutcome.Fatal("skill-manager.json is missing."));
+            : ValidationOutcome.Fatal("agent-plugins.json is missing."));
     }
 }

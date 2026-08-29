@@ -1,6 +1,6 @@
 # Source repository reference
 
-A source repository is a catalog document that lists sources. It is not installable and does not contribute packages. The conventional filename is `skill-manager-repository.json`; an artifact catalog is the JSON document at the URL, not an archive. Unknown fields are rejected. The generated schema is [`schemas/v1/source-repository.schema.json`](../schemas/v1/source-repository.schema.json).
+A source repository is a catalog document that lists sources. It is not installable and does not contribute packages. The conventional filename is `agent-plugins-repository.json`; an artifact catalog is the JSON document at the URL, not an archive. Unknown fields are rejected. The generated schema is [`schemas/v1/source-repository.schema.json`](../schemas/v1/source-repository.schema.json).
 
 ## Document
 
@@ -22,7 +22,7 @@ A source repository is a catalog document that lists sources. It is not installa
 | `sources[].name`         | 1–120 characters. Display only.                                                                                                           |
 | `sources[].description`  | 1–1,024 characters. Display only.                                                                                                         |
 | `sources[].url`          | HTTPS artifact URL of a source archive. No credentials. Query strings are kept.                                                           |
-| `sources[].sourceId`     | Optional hint, same charset as `source.id`. After opt-in, the fetched `skill-manager.json` is authoritative. A disagreement fails opt-in. |
+| `sources[].sourceId`     | Optional hint, same charset as `source.id`. After opt-in, the fetched `agent-plugins.json` is authoritative. A disagreement fails opt-in. |
 | `sources[].publisher`    | Optional marketplace listing field: the publisher's display name, 1–120 characters.                                                       |
 | `sources[].packageCount` | Optional marketplace listing field: how many packages the source currently publishes.                                                     |
 | `sources[].updatedAt`    | Optional marketplace listing field: RFC 3339 time the archive last changed.                                                               |

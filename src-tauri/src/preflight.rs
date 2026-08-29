@@ -932,7 +932,7 @@ fn agent_checks(out: &mut Collector, input: &PreflightInput<'_>) {
     let journal = input
         .paths
         .data
-        .join("skill-manager")
+        .join("agent-plugins")
         .join("resource-transaction.json");
     if journal.exists() {
         out.push(
@@ -1166,8 +1166,8 @@ fn home_directories(paths: &SystemPaths) -> Vec<PathBuf> {
     vec![
         paths.home.join(".agents").join("skills"),
         paths.home.join(".claude").join("skills"),
-        paths.data.join("skill-manager"),
-        paths.cache.join("skill-manager"),
+        paths.data.join("agent-plugins"),
+        paths.cache.join("agent-plugins"),
     ]
 }
 

@@ -1,6 +1,6 @@
 //! Command-line entry points in the application binary.
 //!
-//! `skill-manager validate|publish|search|install|whoami` run without the
+//! `agent-plugins validate|publish|search|install|whoami` run without the
 //! window so an agent can drive them. They share the crate's validator,
 //! locator, identity, and installer, so a CLI publish is the same operation as
 //! one from the app and authenticates the same way (ADR 0004).
@@ -57,13 +57,13 @@ fn usage() -> String {
     format!(
         "Agent Plugins {}\n\n\
 usage:\n  \
-skill-manager whoami\n  \
-skill-manager validate <path>\n  \
-skill-manager search [query]\n  \
-skill-manager publish <path> --version <semver> [--namespace <ns>] [--package-id <id>] [--tags a,b] [--changelog <text>] [--yes]\n  \
-skill-manager install <namespace>/<package> [--approve-mcp]\n\n\
+agent-plugins whoami\n  \
+agent-plugins validate <path>\n  \
+agent-plugins search [query]\n  \
+agent-plugins publish <path> --version <semver> [--namespace <ns>] [--package-id <id>] [--tags a,b] [--changelog <text>] [--yes]\n  \
+agent-plugins install <namespace>/<package> [--approve-mcp]\n\n\
 <path> for publish is a skill directory containing SKILL.md, an MCP document\n\
-(mcp.json shape), or a source tree with skill-manager.json declaring one package.\n",
+(mcp.json shape), or a source tree with agent-plugins.json declaring one package.\n",
         marketplace::CLIENT_VERSION
     )
 }
@@ -209,7 +209,7 @@ fn parse_publish_args(args: &[String]) -> Result<PublishArgs, String> {
     Ok(parsed)
 }
 
-/// A source tree staged for upload: `skill-manager.json` at the root and one package.
+/// A source tree staged for upload: `agent-plugins.json` at the root and one package.
 struct StagedPackage {
     root: PathBuf,
     package_id: String,
@@ -454,7 +454,7 @@ fn stage_tree(
         id
     } else {
         return Err(format!(
-            "{} is not a skill directory (SKILL.md), an MCP document (.json), or a source tree (skill-manager.json).",
+            "{} is not a skill directory (SKILL.md), an MCP document (.json), or a source tree (agent-plugins.json).",
             input.display()
         ));
     };
@@ -757,7 +757,7 @@ fn install(args: &[String]) -> Result<(), String> {
         let app = application::sync_app_state(&state).await?;
         let item =
             app.items.iter().find(|item| item.id == id).ok_or_else(|| {
-                format!("{id} is not in the catalog. Try `skill-manager search`.")
+                format!("{id} is not in the catalog. Try `agent-plugins search`.")
             })?;
         let outcome =
             application::install_item(&state, source_id, local_id, approve_mcp, None).await?;
@@ -787,7 +787,7 @@ mod tests {
         let staged = stage_tree(&skill, "jacob", None, &staging).expect("stage");
         assert_eq!(staged.package_id, "review");
         let manifest =
-            std::fs::read_to_string(staged.root.join("skill-manager.json")).expect("manifest");
+            std::fs::read_to_string(staged.root.join("agent-plugins.json")).expect("manifest");
         assert!(manifest.contains("\"id\": \"jacob\""));
         assert!(manifest.contains("skills/review"));
         let rewritten =

@@ -2,11 +2,11 @@
 
 Agent Plugins is a desktop app and an internal marketplace. People publish Agent Skills and MCP server configurations under their own namespace; anyone can find them, read them, and install them onto the coding agents on their machine: Cursor, Claude Code, Codex, OpenCode, Grok Build, and GitHub Copilot.
 
-A **source** is an HTTPS archive with `skill-manager.json` at its root. That file is the source manifest: it names the source and lists packages of skills and MCP servers. The **marketplace server** publishes one source per publisher namespace and a catalog that lists them; the app subscribes to that catalog, so every published package appears without configuration. Identity is the Windows logon. The server records installs and heartbeats so publishers see how many people use their packages.
+A **source** is an HTTPS archive with `agent-plugins.json` at its root. That file is the source manifest: it names the source and lists packages of skills and MCP servers. The **marketplace server** publishes one source per publisher namespace and a catalog that lists them; the app subscribes to that catalog, so every published package appears without configuration. Identity is the Windows logon. The server records installs and heartbeats so publishers see how many people use their packages.
 
 The app plans the files and config each detected agent needs, shows compatibility and trust, then applies the change in one recovery journal and ownership-ledger commit. It never executes source content.
 
-The `skill-manager` command line (`validate`, `publish`, `search`, `install`, `whoami`) does the same work from a terminal or from an agent; the official `publish` and `marketplace` skills wrap it.
+The `agent-plugins` command line (`validate`, `publish`, `search`, `install`, `whoami`) does the same work from a terminal or from an agent; the official `publish` and `marketplace` skills wrap it.
 
 ## Learn
 
@@ -27,7 +27,7 @@ The `skill-manager` command line (`validate`, `publish`, `search`, `install`, `w
 - [CLI reference](docs/cli-reference.md) — `validate`, `publish`, `search`, `install`, `whoami`.
 - [Marketplace API](docs/marketplace-api.md) — endpoints, events, and configuration; [`server/openapi.json`](server/openapi.json) is generated.
 - [Preflight checks](docs/preflight-reference.md) — every startup check, its status rules, and remediation.
-- [Source manifest](docs/manifest-reference.md) — `skill-manager.json`, `SKILL.md`, and MCP document fields.
+- [Source manifest](docs/manifest-reference.md) — `agent-plugins.json`, `SKILL.md`, and MCP document fields.
 - [Source repository](docs/source-repository-reference.md) — catalog document, locators, and identity.
 - [Target adapter contract](docs/adapter-contract.md) — pinned target mappings.
 - [Codebase map](docs/codebase-map.md) — what lives where, in Rust, React, and the server.
@@ -61,4 +61,4 @@ cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 
 `pnpm install` also configures the tracked pre-commit hook, which runs both formatting checks before each commit.
 
-[How to work on Agent Plugins](docs/development.md) covers the rest: throwaway state with `SKILL_MANAGER_QA_ROOT`, adding a target adapter, changing the manifest contract, regenerating the schemas, and building and testing the marketplace server in `server/`.
+[How to work on Agent Plugins](docs/development.md) covers the rest: throwaway state with `AGENT_PLUGINS_QA_ROOT`, adding a target adapter, changing the manifest contract, regenerating the schemas, and building and testing the marketplace server in `server/`.

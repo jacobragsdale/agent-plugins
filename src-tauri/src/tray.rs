@@ -13,7 +13,7 @@ use tauri_plugin_autostart::ManagerExt;
 
 pub(crate) const BACKGROUND_ARG: &str = "--background";
 
-const TRAY_ID: &str = "skill-manager";
+const TRAY_ID: &str = "agent-plugins";
 const OPEN_MENU_ID: &str = "open";
 const CHECK_NOW_MENU_ID: &str = "check-now";
 const LAUNCH_AT_LOGIN_MENU_ID: &str = "launch-at-login";
@@ -189,9 +189,9 @@ mod tests {
 
     #[test]
     fn recognizes_background_launch_argument() {
-        assert!(has_background_arg(["skill-manager", BACKGROUND_ARG]));
+        assert!(has_background_arg(["agent-plugins", BACKGROUND_ARG]));
         assert!(has_background_arg([
-            "skill-manager",
+            "agent-plugins",
             "--other",
             BACKGROUND_ARG
         ]));
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn ignores_other_launch_arguments() {
-        assert!(!has_background_arg(["skill-manager"]));
-        assert!(!has_background_arg(["skill-manager", "--background-task"]));
+        assert!(!has_background_arg(["agent-plugins"]));
+        assert!(!has_background_arg(["agent-plugins", "--background-task"]));
     }
 }

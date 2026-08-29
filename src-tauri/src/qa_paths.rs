@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 #[cfg(debug_assertions)]
-const QA_ROOT_ENV: &str = "SKILL_MANAGER_QA_ROOT";
+const QA_ROOT_ENV: &str = "AGENT_PLUGINS_QA_ROOT";
 
 pub(crate) fn root() -> Result<Option<PathBuf>, String> {
     #[cfg(not(debug_assertions))]

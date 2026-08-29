@@ -13,7 +13,7 @@ pnpm tauri dev
 
 `pnpm install` also configures the tracked pre-commit hook, which runs `prettier --check` and `cargo fmt --check` before every commit.
 
-The desktop app is the default `skill-manager` binary. Passing a CLI verb as the first argument runs headless instead, so `cargo run --bin skill-manager -- search` exercises the CLI without a window.
+The desktop app is the default `agent-plugins` binary. Passing a CLI verb as the first argument runs headless instead, so `cargo run --bin agent-plugins -- search` exercises the CLI without a window.
 
 Work on the server needs the .NET 10 SDK and Docker; see [`server/README.md`](../server/README.md).
 
@@ -37,10 +37,10 @@ Rust tests build real trees in `tempfile` directories and drive the actual plann
 
 ## Run the app against throwaway state
 
-A debug build honours `SKILL_MANAGER_QA_ROOT`, which relocates the home, config, data, and cache roots. It must be an absolute path strictly beneath the system temp directory — anything else is refused, so a mistake cannot point the app at a real home.
+A debug build honours `AGENT_PLUGINS_QA_ROOT`, which relocates the home, config, data, and cache roots. It must be an absolute path strictly beneath the system temp directory — anything else is refused, so a mistake cannot point the app at a real home.
 
 ```bash
-SKILL_MANAGER_QA_ROOT="$TMPDIR/agent-plugins-qa" pnpm tauri dev
+AGENT_PLUGINS_QA_ROOT="$TMPDIR/agent-plugins-qa" pnpm tauri dev
 ```
 
 Release builds ignore it. Use it whenever a change writes files: it is the only way to exercise install, drift, rollback, and reset without touching your own agents.

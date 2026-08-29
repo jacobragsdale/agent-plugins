@@ -177,7 +177,7 @@ mod tests {
         write_skill(&source_root, "review");
         write_skill(&source_root, "docs");
         fs::write(
-            source_root.join("skill-manager.json"),
+            source_root.join("agent-plugins.json"),
             r#"{
               "version": 2,
               "source": { "id": "skillbook", "name": "Skillbook", "description": "Skills" },

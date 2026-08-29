@@ -38,33 +38,33 @@ impl SystemPaths {
     }
 
     pub(crate) fn app_data(&self) -> PathBuf {
-        self.data.join("skill-manager")
+        self.data.join("agent-plugins")
     }
 
     pub(crate) fn state_roots(&self) -> [PathBuf; 4] {
         [
-            self.config.join("skill-manager"),
-            self.data.join("skill-manager"),
-            self.local_data.join("skill-manager"),
-            self.cache.join("skill-manager"),
+            self.config.join("agent-plugins"),
+            self.data.join("agent-plugins"),
+            self.local_data.join("agent-plugins"),
+            self.cache.join("agent-plugins"),
         ]
     }
 
     pub(crate) fn cache_base() -> Result<PathBuf, String> {
         if let Some(root) = crate::qa_paths::root()? {
-            return Ok(root.join("cache/skill-manager"));
+            return Ok(root.join("cache/agent-plugins"));
         }
         dirs::cache_dir()
-            .map(|directory| directory.join("skill-manager"))
+            .map(|directory| directory.join("agent-plugins"))
             .ok_or_else(|| "Could not find your cache directory.".to_string())
     }
 
     pub(crate) fn config_base() -> Result<PathBuf, String> {
         if let Some(root) = crate::qa_paths::root()? {
-            return Ok(root.join("config/skill-manager"));
+            return Ok(root.join("config/agent-plugins"));
         }
         dirs::config_dir()
-            .map(|directory| directory.join("skill-manager"))
+            .map(|directory| directory.join("agent-plugins"))
             .ok_or_else(|| "Could not find your configuration directory.".to_string())
     }
 

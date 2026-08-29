@@ -1,9 +1,9 @@
 fn main() {
     match parse_args(std::env::args().skip(1).collect()) {
         Ok(input) => finish(if input.starts_with("https://") {
-            skill_manager_lib::validate_source_repository_locator(&input)
+            agent_plugins_lib::validate_source_repository_locator(&input)
         } else {
-            skill_manager_lib::validate_source_repository(&input)
+            agent_plugins_lib::validate_source_repository(&input)
         }),
         Err(()) => usage(),
     }
@@ -16,7 +16,7 @@ fn parse_args(args: Vec<String>) -> Result<String, ()> {
     }
 }
 
-fn finish(result: Result<skill_manager_lib::RepositoryValidationReport, String>) {
+fn finish(result: Result<agent_plugins_lib::RepositoryValidationReport, String>) {
     match result {
         Ok(report) => {
             println!(

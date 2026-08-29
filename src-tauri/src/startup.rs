@@ -820,7 +820,7 @@ fn push_python_script_dirs(roots: &mut Vec<PathBuf>, python_root: &Path) {
 fn live_managed_tools_root() -> Option<PathBuf> {
     crate::paths::SystemPaths::from_system()
         .ok()
-        .map(|paths| paths.local_data.join("skill-manager").join("tools"))
+        .map(|paths| paths.local_data.join("agent-plugins").join("tools"))
 }
 
 fn live_executable_extensions() -> Vec<String> {
@@ -2052,7 +2052,7 @@ mod tests {
 
     #[test]
     fn installs_missing_uv_into_the_user_tools_directory() {
-        let uv_dir = PathBuf::from("/home/user/.local/share/skill-manager/tools").join("uv");
+        let uv_dir = PathBuf::from("/home/user/.local/share/agent-plugins/tools").join("uv");
         let mut host = FakeHost::new()
             .with_path("/usr/bin")
             .with_managed_root(uv_dir.parent().expect("tools root").to_str().expect("utf8"));

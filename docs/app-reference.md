@@ -58,7 +58,7 @@ An update applies only the components already installed on that package. Install
 
 A skill directory is named `<sourceId>-<skillName>`. Every target except Claude Code shares one copy under `~/.agents/skills`; the ledger records each target as a consumer, and the directory is deleted only when the last one goes away. Shared configuration files are edited in place, preserving comments where the format allows, and untouched keys stay untouched.
 
-Replacing an unmanaged destination, or force-removing modified content, first copies the original to `~/.agents/.skill-manager-backups`. The app reports the backup path when it makes one.
+Replacing an unmanaged destination, or force-removing modified content, first copies the original to `~/.agents/.agent-plugins-backups`. The app reports the backup path when it makes one.
 
 ## Approvals and confirmations
 
@@ -84,11 +84,11 @@ MCP approval is per operation and is never inferred. A background update that wo
 
 | Path                                                | Contents                                                                               |
 | --------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `%APPDATA%\skill-manager\sources.json`              | Configured catalogs and sources, version 6.                                            |
-| `%APPDATA%\skill-manager\agent-profiles.json`       | Detected agent profiles.                                                               |
-| `%APPDATA%\skill-manager\installations.json`        | The ownership ledger, version 4.                                                       |
-| `%APPDATA%\skill-manager\resource-transaction.json` | The recovery journal. Present only while a transaction is in flight.                   |
-| `%LOCALAPPDATA%\skill-manager\`                     | Source snapshots, the marketplace index, the preflight report, and the last sync time. |
+| `%APPDATA%\agent-plugins\sources.json`              | Configured catalogs and sources, version 6.                                            |
+| `%APPDATA%\agent-plugins\agent-profiles.json`       | Detected agent profiles.                                                               |
+| `%APPDATA%\agent-plugins\installations.json`        | The ownership ledger, version 4.                                                       |
+| `%APPDATA%\agent-plugins\resource-transaction.json` | The recovery journal. Present only while a transaction is in flight.                   |
+| `%LOCALAPPDATA%\agent-plugins\`                     | Source snapshots, the marketplace index, the preflight report, and the last sync time. |
 
 Each of `sources.json`, `agent-profiles.json`, and `installations.json` keeps a `.previous` copy. On launch, a journal whose transaction is absent from the ledger is rolled back; one already committed is cleaned up.
 

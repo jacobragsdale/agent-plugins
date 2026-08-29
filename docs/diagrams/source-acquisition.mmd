@@ -9,6 +9,6 @@ flowchart TB
   CatalogFetch --> CatalogSnap[Source repository snapshot]
   CatalogSnap --> Browse[Browse name and description]
   Browse -->|opt in| SourceFetch[GET listed HTTPS archive]
-  SourceFetch --> Validate[Validate tree and skill-manager.json]
+  SourceFetch --> Validate[Validate tree and agent-plugins.json]
   Validate --> SourceSnap[Source snapshot]
   SourceSnap --> Packages[Packages in the main catalog]

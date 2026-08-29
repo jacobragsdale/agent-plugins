@@ -36,7 +36,7 @@ A source becomes files on disk in one direction. Each stage may use the stage ab
 | `agent_profiles.rs`    | Detection is the configuration set. Results are cached for 60 seconds; a sync clears the cache.                                                                                              |
 | `managed_documents.rs` | Comment-preserving JSONC and TOML edits. Why installing an MCP server does not destroy a user's own config.                                                                                  |
 | `preflight.rs`         | Declarative checks with stable IDs. IDs are retired, never renamed.                                                                                                                          |
-| `qa_paths.rs`          | Debug-only. `SKILL_MANAGER_QA_ROOT` relocates every root beneath the temp directory.                                                                                                         |
+| `qa_paths.rs`          | Debug-only. `AGENT_PLUGINS_QA_ROOT` relocates every root beneath the temp directory.                                                                                                         |
 
 ### `application/`
 
@@ -55,7 +55,7 @@ The use-case layer. Mutations serialize on one operation lock; refresh uses a se
 
 | Binary                       | Purpose                                                                               |
 | ---------------------------- | ------------------------------------------------------------------------------------- |
-| `skill-manager`              | The app. A recognized first argument runs a CLI verb headless instead (`cli.rs`).     |
+| `agent-plugins`              | The app. A recognized first argument runs a CLI verb headless instead (`cli.rs`).     |
 | `validate-source`            | Validates a source tree or archive. The marketplace server shells out to this binary. |
 | `validate-source-repository` | Validates a catalog document.                                                         |
 | `generate-schema`            | Regenerates the checked-in JSON Schemas from the Rust types.                          |

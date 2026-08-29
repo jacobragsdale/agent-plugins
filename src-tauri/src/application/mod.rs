@@ -127,11 +127,11 @@ mod live_nexus_tests {
     use crate::install::ItemStatus;
 
     #[test]
-    #[ignore = "hits the live Nexus catalog; run with SKILL_MANAGER_QA_ROOT set"]
+    #[ignore = "hits the live Nexus catalog; run with AGENT_PLUGINS_QA_ROOT set"]
     fn live_nexus_catalog_round_trip() {
         assert!(
             crate::qa_paths::root().expect("qa root").is_some(),
-            "SKILL_MANAGER_QA_ROOT must name a directory under the process temp dir"
+            "AGENT_PLUGINS_QA_ROOT must name a directory under the process temp dir"
         );
         let tokio_runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
         tokio_runtime.block_on(async {
@@ -207,7 +207,7 @@ mod live_nexus_tests {
     }
 
     fn live_step() -> String {
-        std::env::var("SKILL_MANAGER_LIVE_STEP").unwrap_or_else(|_| "all".to_string())
+        std::env::var("AGENT_PLUGINS_LIVE_STEP").unwrap_or_else(|_| "all".to_string())
     }
 
     async fn add_listed_skillbook(runtime: &RuntimeState) -> Result<AppState, String> {

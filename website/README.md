@@ -8,7 +8,7 @@ This directory contains the standalone Agent Plugins download site. It serves a 
 docker compose -f website/compose.yml up -d --build
 ```
 
-Open <http://127.0.0.1:8080>. Set `SKILL_MANAGER_SITE_PORT` before starting Compose to use another port.
+Open <http://127.0.0.1:8080>. Set `AGENT_PLUGINS_SITE_PORT` before starting Compose to use another port.
 
 ## Publish files manually
 

@@ -14,7 +14,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub(crate) const DEV_USER_ENV: &str = "SKILL_MANAGER_DEV_USER";
+pub(crate) const DEV_USER_ENV: &str = "AGENT_PLUGINS_DEV_USER";
 const INDEX_CACHE_FILE: &str = "marketplace-index.json";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -105,7 +105,7 @@ impl AuthMode {
     }
 }
 
-/// Picks the identity mechanism for this host. The `SKILL_MANAGER_DEV_USER`
+/// Picks the identity mechanism for this host. The `AGENT_PLUGINS_DEV_USER`
 /// environment variable forces the development header with that account.
 pub(crate) fn auth_mode() -> AuthMode {
     if let Ok(account) = std::env::var(DEV_USER_ENV) {

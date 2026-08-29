@@ -34,7 +34,7 @@ public static class SamplePackages
             """;
         var files = new Dictionary<string, string>
         {
-            ["skill-manager.json"] = manifest,
+            ["agent-plugins.json"] = manifest,
             [$"skills/{packageId}/SKILL.md"] = skill,
         };
         if (extraFile is not null)

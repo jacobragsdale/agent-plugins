@@ -6,7 +6,7 @@ You need this only when you run your own distribution outside the marketplace se
 
 ## Create the catalog document
 
-Create `skill-manager-repository.json`:
+Create `agent-plugins-repository.json`:
 
 ```json
 {
@@ -26,23 +26,23 @@ The document lists HTTPS archive URLs. It is not installable and does not contri
 Validate the JSON shape against the checked-in schema:
 
 ```bash
-jq empty skill-manager-repository.json
+jq empty agent-plugins-repository.json
 npx ajv-cli validate --spec=draft2020 --strict=false \
-  -s https://raw.githubusercontent.com/jacobragsdale/skill-manager/main/schemas/v1/source-repository.schema.json \
-  -d skill-manager-repository.json
+  -s https://raw.githubusercontent.com/jacobragsdale/agent-plugins/main/schemas/v1/source-repository.schema.json \
+  -d agent-plugins-repository.json
 ```
 
 Then run the catalog validator:
 
 ```bash
-cargo run --manifest-path /path/to/skill-manager/src-tauri/Cargo.toml \
-  --bin validate-source-repository -- /path/to/skill-manager-repository.json
+cargo run --manifest-path /path/to/agent-plugins/src-tauri/Cargo.toml \
+  --bin validate-source-repository -- /path/to/agent-plugins-repository.json
 ```
 
 You can also validate a published HTTPS JSON URL:
 
 ```bash
-cargo run --manifest-path /path/to/skill-manager/src-tauri/Cargo.toml \
+cargo run --manifest-path /path/to/agent-plugins/src-tauri/Cargo.toml \
   --bin validate-source-repository -- \
   https://nexus.example.com/repository/raw/catalogs/acme.json
 ```
@@ -53,7 +53,7 @@ Serve the JSON at `{MARKETPLACE_URL}/api/catalog`, where `MARKETPLACE_URL` is th
 
 1. Open **Manage Sources**. The catalog's listed sources appear by name and description.
 2. Select **Add** on one listed source.
-3. Confirm. Its `skill-manager.json` source manifest owns the namespace and packages. Nothing is installed until you install a package.
+3. Confirm. Its `agent-plugins.json` source manifest owns the namespace and packages. Nothing is installed until you install a package.
 
 Need a source that is not listed? Ask the catalog owner to add it.
 

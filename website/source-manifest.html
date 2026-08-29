@@ -4,10 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#d4d0c8" />
-    <meta name="description" content="How to write skill-manager.json, the Agent Plugins source manifest for a portable HTTPS archive." />
+    <meta name="description" content="How to write agent-plugins.json, the Agent Plugins source manifest for a portable HTTPS archive." />
     <link rel="icon" href="/assets/icon.png" />
     <link rel="stylesheet" href="/styles.css" />
-    <title>Source manifest — skill-manager.json</title>
+    <title>Source manifest — agent-plugins.json</title>
   </head>
   <body class="spec-page">
     <a class="skip-link" href="#content">Skip to content</a>
@@ -16,7 +16,7 @@
       <header>
         <h1>Source manifest</h1>
         <p class="spec-intro">
-          The source manifest is a file named <code>skill-manager.json</code> at the root of a source archive. Agent Plugins reads that file to learn the source identity and the packages it can
+          The source manifest is a file named <code>agent-plugins.json</code> at the root of a source archive. Agent Plugins reads that file to learn the source identity and the packages it can
           install. Publish the tree as a zip, tar, or tar.gz at a raw HTTPS URL. A <a href="/source-repository.html">source repository</a> is a separate catalog that lists those archives.
         </p>
       </header>
@@ -27,11 +27,11 @@
           <li>
             <h2>Make the source tree</h2>
             <p>
-              Put <code>skill-manager.json</code> at the top level. Host a zip, tar, or tar.gz of that tree at an <code>https://</code> artifact URL. Artifact URLs may include a query string and must
+              Put <code>agent-plugins.json</code> at the top level. Host a zip, tar, or tar.gz of that tree at an <code>https://</code> artifact URL. Artifact URLs may include a query string and must
               not include credentials.
             </p>
             <pre><code>example-source/
-├── skill-manager.json
+├── agent-plugins.json
 ├── mcp/
 │   └── database.json
 └── skills/
@@ -220,11 +220,11 @@ Follow the repository's review workflow.</code></pre>
           <li>
             <h2>Validate and publish</h2>
             <p>Check the JSON before committing it:</p>
-            <pre><code>jq empty skill-manager.json</code></pre>
+            <pre><code>jq empty agent-plugins.json</code></pre>
             <p>For structural validation, save the <a href="/schema/v2/source-manifest.schema.json">v2 JSON Schema</a> beside the manifest and run:</p>
             <pre><code>npx ajv-cli validate --spec=draft2020 --strict=false \
   -s source-manifest.schema.json \
-  -d skill-manager.json</code></pre>
+  -d agent-plugins.json</code></pre>
             <p>
               Upload an archive of the tree with every referenced path. List that HTTPS URL in a
               <a href="/source-repository.html">source repository</a>. In Agent Plugins, add the listed source from Manage Sources. Adding a source validates the tree and makes packages available; it

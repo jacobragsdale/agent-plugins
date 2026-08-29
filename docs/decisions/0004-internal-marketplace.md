@@ -18,7 +18,7 @@ Clients run only on corporate Windows 11 virtual machines joined to Active Direc
 
 A .NET 10 API (`server/`) runs in Docker and owns the index, identity, metrics, and publishing. Artifact Keeper stays behind the server as immutable blob storage reached with one service credential. Users never hold Artifact Keeper accounts, and the host can be replaced without touching clients.
 
-The client keeps fetching HTTPS artifacts exactly as ADR 0003 describes; the URLs now point at the server. The build-time constant is the marketplace base URL. The server publishes the catalog at `/api/catalog` in the existing `skill-manager-repository.json` shape and each namespace archive at `/api/sources/{namespace}/archive`. Locator canonicalization, `sourceKey`, digest revisions, and validator refresh are unchanged.
+The client keeps fetching HTTPS artifacts exactly as ADR 0003 describes; the URLs now point at the server. The build-time constant is the marketplace base URL. The server publishes the catalog at `/api/catalog` in the existing `agent-plugins-repository.json` shape and each namespace archive at `/api/sources/{namespace}/archive`. Locator canonicalization, `sourceKey`, digest revisions, and validator refresh are unchanged.
 
 ### Identity is the Windows logon
 
@@ -30,7 +30,7 @@ A `DevHeader` scheme that trusts `X-Dev-User` exists for the home lab, whose tes
 
 ### A person publishes a package; the server materializes a namespace source
 
-The unit a person publishes is one manifest v2 package: a skill or an MCP document plus its metadata. The server validates it, stores each version immutably in Artifact Keeper under `marketplace/{namespace}/{package}/{version}.zip`, and regenerates that namespace's source archive: one zip whose `skill-manager.json` carries `source.id = namespace` and the latest version of every non-yanked package. The client therefore sees each publisher as one source and each of their skills as one package, which is the existing catalog model.
+The unit a person publishes is one manifest v2 package: a skill or an MCP document plus its metadata. The server validates it, stores each version immutably in Artifact Keeper under `marketplace/{namespace}/{package}/{version}.zip`, and regenerates that namespace's source archive: one zip whose `agent-plugins.json` carries `source.id = namespace` and the latest version of every non-yanked package. The client therefore sees each publisher as one source and each of their skills as one package, which is the existing catalog model.
 
 `source.id` in an uploaded manifest must equal the authenticated namespace; the server rejects a mismatch. Authorship is stamped from identity, never self-declared.
 

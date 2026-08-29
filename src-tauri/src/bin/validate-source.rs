@@ -2,9 +2,9 @@ fn main() {
     match parse_args(std::env::args().skip(1).collect()) {
         Ok(Arguments { input, json }) => finish(
             if input.starts_with("https://") {
-                skill_manager_lib::validate_source_locator(&input)
+                agent_plugins_lib::validate_source_locator(&input)
             } else {
-                skill_manager_lib::validate_source(&input)
+                agent_plugins_lib::validate_source(&input)
             },
             json,
         ),
@@ -31,7 +31,7 @@ fn parse_args(args: Vec<String>) -> Result<Arguments, ()> {
     }
 }
 
-fn finish(result: Result<skill_manager_lib::SourceValidationReport, String>, json: bool) {
+fn finish(result: Result<agent_plugins_lib::SourceValidationReport, String>, json: bool) {
     match result {
         Ok(report) if json => {
             println!("{}", report_json(&report));
@@ -60,7 +60,7 @@ fn finish(result: Result<skill_manager_lib::SourceValidationReport, String>, jso
 
 /// The marketplace server parses this document, so its shape is a contract:
 /// `sourceId`, `validInstalls`, and `errors[]` of `{ path, message }`.
-fn report_json(report: &skill_manager_lib::SourceValidationReport) -> String {
+fn report_json(report: &agent_plugins_lib::SourceValidationReport) -> String {
     let errors = report
         .errors
         .iter()

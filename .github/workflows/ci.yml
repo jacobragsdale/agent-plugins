@@ -73,7 +73,7 @@ jobs:
         with:
           name: windows-native-qa-tests
           path: |
-            src-tauri/target/debug/deps/skill_manager_lib-*.exe
+            src-tauri/target/debug/deps/agent_plugins_lib-*.exe
             src-tauri/target/debug/WebView2Loader.dll
           if-no-files-found: error
           retention-days: 7

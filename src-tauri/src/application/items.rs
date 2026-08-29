@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn wipe_app_state_removes_every_skill_manager_state_root() {
+    fn wipe_app_state_removes_every_agent_plugins_state_root() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
         for directory in paths.state_roots() {
