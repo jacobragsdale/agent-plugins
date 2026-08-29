@@ -100,7 +100,7 @@ IPC returns plain data. Filesystem and manifest policy stays in Rust — React m
 
 ```bash
 cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin validate-source
-dotnet build server/Marketplace.sln
+dotnet build server/Marketplace.slnx
 dotnet run --project server/tests/Marketplace.Api.Tests
 ```
 
