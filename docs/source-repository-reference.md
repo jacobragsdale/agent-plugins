@@ -18,11 +18,14 @@ A source repository is a catalog document that lists sources. It is not installa
 | `repository.id`          | 2–32 lowercase ASCII letters, digits, or single hyphens; starts with a letter. Does not namespace packages.                               |
 | `repository.name`        | 1–120 characters.                                                                                                                         |
 | `repository.description` | 1–1,024 characters.                                                                                                                       |
-| `sources`                | 1–200 entries. Duplicate URLs after canonicalization are fatal.                                                                           |
+| `sources`                | 0–5,000 entries. Duplicate URLs after canonicalization are fatal. An empty list is a valid, empty marketplace.                            |
 | `sources[].name`         | 1–120 characters. Display only.                                                                                                           |
 | `sources[].description`  | 1–1,024 characters. Display only.                                                                                                         |
 | `sources[].url`          | HTTPS artifact URL of a source archive. No credentials. Query strings are kept.                                                           |
 | `sources[].sourceId`     | Optional hint, same charset as `source.id`. After opt-in, the fetched `skill-manager.json` is authoritative. A disagreement fails opt-in. |
+| `sources[].publisher`    | Optional marketplace listing field: the publisher's display name, 1–120 characters.                                                       |
+| `sources[].packageCount` | Optional marketplace listing field: how many packages the source currently publishes.                                                     |
+| `sources[].updatedAt`    | Optional marketplace listing field: RFC 3339 time the archive last changed.                                                               |
 
 Listing metadata is display-only. Installed names, conflicts, and `sourceKey` come from the opted-in source. Nested catalogs are not accepted.
 
@@ -48,6 +51,6 @@ Refresh of an artifact uses `HEAD` `ETag` and `Last-Modified` when both match th
 
 `repositoryKey` on a source is optional provenance for the UI. Removing a repository drops its config and cache only; opted-in sources stay.
 
-The company catalog URL is a build-time constant. When it is set, sync adds that catalog if it is missing. Users add and remove listed sources from Manage Sources; they do not paste URLs.
+The marketplace URL is a build-time constant and its catalog is `{marketplace}/api/catalog`. Sync adds that catalog if it is missing and then adds every source it lists, so marketplace packages need no Manage Sources step. Users can still add and remove listed sources from Manage Sources; they do not paste URLs. Requests to the marketplace origin carry the caller's identity (see [ADR 0004](decisions/0004-internal-marketplace.md)).
 
 See [the source manifest reference](manifest-reference.md) for package fields and [architecture](architecture.md) for acquisition.

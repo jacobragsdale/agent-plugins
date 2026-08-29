@@ -56,6 +56,14 @@ Hooks, monitors, in-process plugins, background services, LSP servers, and nativ
 
 See [ADR 0001](decisions/0001-multi-agent-desired-state.md) for the product decisions and [the adapter contract](adapter-contract.md) for the pinned target matrix.
 
+## Marketplace
+
+The marketplace server (`server/`, .NET 10) is the only endpoint the app talks to. It publishes the catalog at `/api/catalog` in the source-repository shape, one listed source per publisher namespace, and each namespace archive at `/api/sources/{namespace}/archive`; the acquisition path above is unchanged. Artifact Keeper stores every published version immutably behind the server. See [ADR 0004](decisions/0004-internal-marketplace.md) and [the API reference](marketplace-api.md).
+
+`locator.rs` holds the build-time marketplace URL. `marketplace.rs` attaches identity to every request for that origin: a Kerberos `Negotiate` token from SSPI (`host_identity.rs`) on a domain-joined Windows host, otherwise the `X-Dev-User` header that only a Development server trusts. Sync auto-subscribes to every source the marketplace catalog lists, joins `/api/index` metadata (publisher, version, tags, installs, installed base) onto catalog items, and posts a `heartbeat` event; item operations post `install`, `update`, and `uninstall` events from a background thread. Usage reporting never blocks or fails an operation.
+
+`preflight.rs` runs the checks in [the preflight reference](preflight-reference.md) during sync and on demand. The report is cached, shown in the System Status dialog, and summarized in the heartbeat. `cli.rs` adds `validate`, `publish`, `search`, `install`, and `whoami` to the application binary; `publish` stages a bare skill directory or MCP document into a one-package source tree, scans it for credentials, validates it with the same code as the app, and uploads it with the same identity.
+
 ## Application and UI
 
 On launch, `startup.rs` repairs the host environment before any catalog work: it locates `uv`/`uvx` on the process PATH, the user's login Path, and Windows App Paths, and installs `uv` only when it is still missing. Agents launch MCP servers themselves, so Node is not installed or required. Found `uv` directories go on PATH, corporate proxy variables are normalized, and `UV_NATIVE_TLS` is set so `uv` uses the platform certificate store. Windows writes PATH/proxy to the user `Environment` key (never the machine Path). On macOS the same values are published with `launchctl setenv`.
