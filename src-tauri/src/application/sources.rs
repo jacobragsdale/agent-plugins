@@ -1,7 +1,7 @@
 use super::{current_epoch_seconds, run_blocking, RuntimeState};
-use crate::app_state::{AppState, PreparedRepository, PreparedSource};
+use crate::app_state::{AppState, PreparedSource};
 use crate::locator::Locator;
-use crate::source::{self, RepositoryCandidate, SourceCandidate};
+use crate::source::{self, SourceCandidate};
 use crate::sources::{cache_base_dir, config_base_dir};
 use sha2::{Digest, Sha256};
 
@@ -129,131 +129,8 @@ pub(crate) async fn cancel_prepared_source(
     Ok(())
 }
 
-pub(crate) async fn prepare_source_repository(
-    runtime: &RuntimeState,
-    url: &str,
-) -> Result<PreparedRepository, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let locator = Locator::parse(url)?;
-    let cache = cache_base_dir()?;
-    let config = config_base_dir()?;
-    let configured = source::read_sources_config(&config)?;
-    let candidate = run_blocking("Source repository preparation", move || {
-        source::prepare_new_repository(&locator, &cache)
-    })
-    .await?;
-    if configured.repositories.iter().any(|repository| {
-        repository.repository_key == candidate.definition.repository_key
-            || repository.repository_id == candidate.definition.repository_id
-            || repository
-                .locator
-                .same_identity(&candidate.definition.locator)
-    }) {
-        source::discard_repository(&candidate);
-        return Err(format!(
-            "{} is already configured.",
-            candidate.definition.url()
-        ));
-    }
-    let token = prepared_repository_token(&candidate);
-    let preview = PreparedRepository {
-        token: token.clone(),
-        repository_id: candidate.definition.repository_id.clone(),
-        repository_key: candidate.definition.repository_key.clone(),
-        name: candidate.definition.name.clone(),
-        description: candidate.definition.description.clone(),
-        url: candidate.definition.url().to_string(),
-        revision: candidate.revision.clone(),
-        source_count: candidate.manifest.sources.len(),
-    };
-    runtime
-        .pending_repositories
-        .lock()
-        .await
-        .insert(token, candidate);
-    Ok(preview)
-}
-
-pub(crate) async fn confirm_source_repository(
-    runtime: &RuntimeState,
-    token: &str,
-) -> Result<AppState, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let candidate = runtime
-        .pending_repositories
-        .lock()
-        .await
-        .remove(token)
-        .ok_or_else(|| {
-            "The prepared source repository is no longer available. Prepare it again.".to_string()
-        })?;
-    let cache = cache_base_dir()?;
-    let config = config_base_dir()?;
-    let snapshot = run_blocking("Prepared source repository activation", move || {
-        source::activate_repository(&cache, candidate)
-    })
-    .await?;
-    let mut config_file = source::read_sources_config(&config)?;
-    if config_file.repositories.iter().any(|repository| {
-        repository.repository_key == snapshot.definition.repository_key
-            || repository.repository_id == snapshot.definition.repository_id
-            || repository
-                .locator
-                .same_identity(&snapshot.definition.locator)
-    }) {
-        return Err(
-            "The source repository was configured while confirmation was open.".to_string(),
-        );
-    }
-    config_file.repositories.push(snapshot.definition);
-    config_file.repositories.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then_with(|| left.repository_id.cmp(&right.repository_id))
-    });
-    source::write_sources_config(&config, &config_file)?;
-    super::project::cached_state_now()
-}
-
-pub(crate) async fn cancel_prepared_source_repository(
-    runtime: &RuntimeState,
-    token: &str,
-) -> Result<(), String> {
-    if let Some(candidate) = runtime.pending_repositories.lock().await.remove(token) {
-        source::discard_repository(&candidate);
-    }
-    Ok(())
-}
-
-pub(crate) async fn remove_source_repository(
-    runtime: &RuntimeState,
-    repository_key: &str,
-) -> Result<AppState, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let cache = cache_base_dir()?;
-    let config = config_base_dir()?;
-    let mut config_file = source::read_sources_config(&config)?;
-    if !config_file
-        .repositories
-        .iter()
-        .any(|repository| repository.repository_key == repository_key)
-    {
-        return Err("Unknown source repository.".to_string());
-    }
-    config_file
-        .repositories
-        .retain(|repository| repository.repository_key != repository_key);
-    source::write_sources_config(&config, &config_file)?;
-    source::remove_repository_cache(&cache, repository_key)?;
-    super::project::cached_state_now()
-}
-
 pub(super) fn prepared_token(candidate: &SourceCandidate) -> String {
     hash_token(&candidate.definition.source_key, &candidate.commit)
-}
-
-pub(super) fn prepared_repository_token(candidate: &RepositoryCandidate) -> String {
-    hash_token(&candidate.definition.repository_key, &candidate.revision)
 }
 
 pub(super) fn hash_token(key: &str, revision: &str) -> String {

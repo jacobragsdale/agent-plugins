@@ -1,9 +1,8 @@
 //! Application and IPC DTOs. Commands serialize these; they do not own use-case logic.
 
-use crate::agent_profiles::{AgentProfileState, TargetId};
+use crate::agent_profiles::AgentProfileState;
 use crate::catalog::CatalogError;
 use crate::install::ItemStatus;
-use crate::planner::InstallPreview;
 use crate::resource::CompatibilityReport;
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +33,11 @@ pub(crate) struct CatalogItemState {
     pub(crate) compatibility: Vec<CompatibilityReport>,
     pub(crate) destination: Option<String>,
     pub(crate) status: ItemStatus,
+    /// True when installing this package runs an MCP server and needs the
+    /// Tier 3 approval. The app asks before it installs.
+    pub(crate) requires_approval: bool,
+    /// One line per MCP server: what it runs, so a person can decide.
+    pub(crate) risk_details: Vec<String>,
     /// Marketplace index metadata, when the package is listed there.
     pub(crate) marketplace: Option<MarketplaceMeta>,
 }
@@ -84,13 +88,7 @@ pub(crate) struct ComponentState {
     pub(crate) description: String,
     pub(crate) manual_invocation: bool,
     pub(crate) status: ItemStatus,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AgentEnablePreview {
-    pub(crate) target_id: TargetId,
-    pub(crate) packages: Vec<InstallPreview>,
+    pub(crate) requires_approval: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -143,6 +141,8 @@ pub(crate) struct AppState {
     pub(crate) items: Vec<CatalogItemState>,
     pub(crate) agent_profiles: Vec<AgentProfileState>,
     pub(crate) marketplace_url: Option<String>,
+    /// Where a person downloads a newer client, when the build configures one.
+    pub(crate) download_url: Option<String>,
     pub(crate) identity: Option<MarketplaceIdentity>,
     pub(crate) preflight: Option<crate::preflight::PreflightReport>,
 }
@@ -184,19 +184,6 @@ pub(crate) struct PreparedSource {
     pub(crate) url: String,
     pub(crate) commit: String,
     pub(crate) item_count: usize,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PreparedRepository {
-    pub(crate) token: String,
-    pub(crate) repository_id: String,
-    pub(crate) repository_key: String,
-    pub(crate) name: String,
-    pub(crate) description: String,
-    pub(crate) url: String,
-    pub(crate) revision: String,
-    pub(crate) source_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -292,14 +279,18 @@ mod tests {
                     description: "Python".to_string(),
                     manual_invocation: false,
                     status: ItemStatus::Available,
+                    requires_approval: false,
                 }],
                 compatibility: Vec::new(),
                 destination: None,
                 status: ItemStatus::Available,
+                requires_approval: false,
+                risk_details: Vec::new(),
                 marketplace: None,
             }],
             agent_profiles: Vec::new(),
             marketplace_url: None,
+            download_url: None,
             identity: None,
             preflight: None,
         };

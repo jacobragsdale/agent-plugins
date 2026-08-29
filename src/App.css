@@ -114,6 +114,12 @@ button {
   margin-bottom: 14px;
 }
 
+.notice {
+  position: sticky;
+  top: 0.5rem;
+  z-index: 5;
+}
+
 .app-callout.rt-CalloutRoot {
   border-color: color-mix(in srgb, currentColor 24%, transparent);
   background: color-mix(in srgb, currentColor 6%, var(--surface));
@@ -314,37 +320,6 @@ button {
   gap: 8px;
 }
 
-.agent-profiles {
-  display: grid;
-  gap: 10px;
-  max-height: 58vh;
-  margin-top: 20px;
-  overflow: auto;
-}
-
-.agent-profile.rt-Card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  box-shadow: none;
-}
-
-.agent-profile > .rt-CardInner {
-  display: contents;
-}
-
-.agent-profile-copy {
-  min-width: 0;
-}
-
-.agent-profile-copy p {
-  margin: 6px 0 0;
-  overflow-wrap: anywhere;
-}
-
 .dialog-actions {
   justify-content: flex-end;
   margin-top: 22px;
@@ -358,8 +333,7 @@ button {
   .app-header,
   .source-heading,
   .skill-card-main,
-  .component-row,
-  .agent-profile.rt-Card {
+  .component-row {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -417,19 +391,91 @@ button {
   gap: 0.4rem;
 }
 
-.status-meta {
+.status-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  flex: none;
+  border-radius: 50%;
+  background: var(--green-9);
+}
+
+.status-dot-problem {
+  background: var(--red-9);
+}
+
+.status-summary {
   display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 1rem 0 1.25rem;
+}
+
+.status-summary-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.status-summary-label {
+  flex: none;
+  width: 9.5rem;
+}
+
+.status-summary-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.status-details {
+  border-top: 1px solid var(--border);
+  padding: 0.6rem 0;
+}
+
+.status-details > summary {
+  color: var(--gray-11);
+  cursor: pointer;
+  font-size: var(--font-size-1);
+  list-style-position: inside;
+}
+
+.status-agents {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.6rem 0 0.2rem;
+}
+
+.status-agent p {
+  overflow-wrap: anywhere;
+}
+
+.status-footer {
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
-  margin: 0.5rem 0 0.75rem;
+}
+
+.status-footer-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.status-footer-actions {
+  display: flex;
+  gap: 0.5rem;
 }
 
 .status-groups {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  max-height: 60vh;
+  max-height: 45vh;
+  padding: 0.6rem 0 0.2rem;
   overflow-y: auto;
 }
 
@@ -448,14 +494,17 @@ button {
   gap: 0.6rem;
 }
 
-.status-row > .rt-Badge {
-  min-width: 4.5rem;
-  justify-content: center;
+.status-mark {
+  flex: none;
+  width: 4rem;
   margin-top: 0.1rem;
 }
 
 .status-copy {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 0.15rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }

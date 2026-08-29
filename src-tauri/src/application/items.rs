@@ -110,19 +110,6 @@ pub(crate) async fn replace_item(
     Ok(outcome)
 }
 
-pub(crate) async fn preview_install(
-    runtime: &RuntimeState,
-    source_id: &str,
-    local_id: &str,
-    component_id: Option<&str>,
-) -> Result<crate::planner::InstallPreview, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let (paths, _source, snapshot, item) = item_context(source_id, local_id)?;
-    let ids = requested_component_ids(&item, component_id)?;
-    let plan = crate::planner::plan(&paths, &snapshot, &item, None, ids.as_deref())?;
-    Ok(crate::planner::preview(&item, &plan))
-}
-
 pub(super) fn requested_component_ids(
     item: &CatalogItem,
     component_id: Option<&str>,
@@ -446,13 +433,6 @@ async fn discard_pending(runtime: &RuntimeState) {
     };
     for candidate in pending_sources.into_values() {
         source::discard_candidate(&candidate);
-    }
-    let pending_repositories = {
-        let mut pending = runtime.pending_repositories.lock().await;
-        std::mem::take(&mut *pending)
-    };
-    for candidate in pending_repositories.into_values() {
-        source::discard_repository(&candidate);
     }
 }
 

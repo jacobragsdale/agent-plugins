@@ -112,6 +112,7 @@ pub(super) fn build_app_state(
         items,
         agent_profiles: agent_profiles::states(paths)?,
         marketplace_url: None,
+        download_url: crate::locator::download_url().map(str::to_string),
         identity: None,
         preflight: None,
     })
@@ -221,6 +222,13 @@ pub(super) fn current_item_state(
     let record = ledger_state.items.get(&item.id);
     let status =
         super::status::refined_item_status(paths, ledger_state, snapshot, item, plan.as_ref());
+    let approval = plan.as_ref().map_or_else(
+        || (false, Vec::new()),
+        |plan| {
+            let preview = crate::planner::preview(item, plan);
+            (preview.requires_approval, preview.risk_details)
+        },
+    );
     Ok(CatalogItemState {
         id: item.id.clone(),
         local_id: item.local_id.clone(),
@@ -251,6 +259,7 @@ pub(super) fn current_item_state(
                     record,
                     status,
                 ),
+                requires_approval: crate::planner::requires_approval(item, &[component]),
             })
             .collect(),
         compatibility,
@@ -264,6 +273,8 @@ pub(super) fn current_item_state(
             None => None,
         },
         status,
+        requires_approval: approval.0,
+        risk_details: approval.1,
         marketplace: None,
     })
 }
@@ -297,6 +308,7 @@ pub(super) fn removed_item_state(
             description: record.description.clone(),
             manual_invocation: record.disable_model_invocation,
             status: super::status::item_status(paths, ledger_state, None, id),
+            requires_approval: false,
         }],
         compatibility: Vec::new(),
         destination: Some(
@@ -306,6 +318,9 @@ pub(super) fn removed_item_state(
                 .to_string(),
         ),
         status: super::status::item_status(paths, ledger_state, None, id),
+        // An uninstall never needs the Tier 3 approval.
+        requires_approval: false,
+        risk_details: Vec::new(),
         marketplace: None,
     })
 }
@@ -357,4 +372,97 @@ pub(super) fn cached_state_now() -> Result<AppState, String> {
     )?;
     apply_cached_marketplace(&mut state, &cache);
     Ok(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::read_manifest_catalog;
+    use crate::source::TEST_SOURCE_KEY;
+    use std::fs;
+    use std::path::Path;
+
+    fn paths(root: &Path) -> SystemPaths {
+        SystemPaths {
+            home: root.join("home"),
+            config: root.join("config"),
+            data: root.join("data"),
+            local_data: root.join("local-data"),
+            cache: root.join("cache"),
+        }
+    }
+
+    /// The app asks before installing an MCP server, so the state has to say
+    /// which packages need that approval and what they would run.
+    #[test]
+    fn item_state_reports_the_mcp_approval_and_what_it_runs() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
+        let source_root = root.path().join("source");
+        fs::create_dir_all(source_root.join("skills/review")).expect("skill");
+        fs::write(
+            source_root.join("skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review code\n---\nBody\n",
+        )
+        .expect("skill");
+        fs::create_dir_all(source_root.join("mcp")).expect("mcp");
+        fs::write(
+            source_root.join("mcp/database.json"),
+            r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"database":{"type":"stdio","command":"node","args":["server.js"]}}}"#,
+        )
+        .expect("mcp");
+        fs::write(
+            source_root.join("skill-manager.json"),
+            r#"{
+              "version":2,
+              "source":{"id":"acme","name":"Acme","description":"Shared config."},
+              "packages":[{
+                "id":"tools",
+                "components":[
+                  {"kind":"skill","id":"review","path":"skills/review"},
+                  {"kind":"mcpServer","id":"database","path":"mcp/database.json"}
+                ]
+              }]
+            }"#,
+        )
+        .expect("manifest");
+        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
+        let item = catalog.items["tools"].clone();
+        let mut source = ConfiguredSource::test_fixture(
+            "acme",
+            "https://nexus.example.com/repository/raw/sources/acme-latest.zip",
+        );
+        source.source_key = TEST_SOURCE_KEY.to_string();
+        let snapshot = SourceSnapshot {
+            definition: source.clone(),
+            commit: "a".repeat(40),
+            path: source_root,
+            catalog,
+        };
+        let ledger_state = crate::executor::read_ledger(&paths).expect("ledger");
+
+        let state =
+            current_item_state(&paths, &ledger_state, &source, &snapshot, &item).expect("state");
+
+        assert!(state.requires_approval);
+        assert!(
+            state
+                .risk_details
+                .iter()
+                .any(|detail| detail.contains("node")),
+            "the approval prompt needs the command it would run: {:?}",
+            state.risk_details
+        );
+        let component = |id: &str| {
+            state
+                .components
+                .iter()
+                .find(|component| component.id == id)
+                .expect("component")
+        };
+        assert!(component("database").requires_approval);
+        assert!(!component("review").requires_approval);
+    }
 }

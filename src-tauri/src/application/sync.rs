@@ -15,67 +15,79 @@ pub(crate) async fn load_cached_app_state(
     let _guard = runtime.operation_lock.lock().await;
     run_blocking("Cached source load", || {
         let paths = SystemPaths::from_system()?;
-        retire_unsupported_legacy_installs(&paths)?;
-        agent_profiles::apply_detected_defaults(&paths)?;
         let cache = cache_base_dir()?;
         let config = config_base_dir()?;
-        let checked = current_epoch_seconds();
-        let config_file = source::read_sources_config(&config)?;
-        let repositories = config_file
-            .repositories
-            .into_iter()
-            .map(
-                |definition| match source::load_current_repository(&cache, &definition) {
-                    Ok(snapshot) => LoadedRepository {
-                        definition,
-                        snapshot,
-                        status: SourceStatus::Cached,
-                        refresh_failed: false,
-                        message: None,
-                    },
-                    Err(message) => LoadedRepository {
-                        definition,
-                        snapshot: None,
-                        status: SourceStatus::Error,
-                        refresh_failed: true,
-                        message: Some(message),
-                    },
-                },
-            )
-            .collect::<Vec<_>>();
-        let loaded = config_file
-            .sources
-            .into_iter()
-            .map(
-                |definition| match source::load_current(&cache, &definition) {
-                    Ok(snapshot) => LoadedSource {
-                        definition,
-                        snapshot,
-                        status: SourceStatus::Cached,
-                        refresh_failed: false,
-                        message: None,
-                    },
-                    Err(message) => LoadedSource {
-                        definition,
-                        snapshot: None,
-                        status: SourceStatus::Error,
-                        refresh_failed: true,
-                        message: Some(message),
-                    },
-                },
-            )
-            .collect::<Vec<_>>();
-        super::project::build_app_state(
-            &paths,
-            &repositories,
-            &loaded,
-            checked,
-            AutoUpdateReport::default(),
-            None,
-        )
-        .map(Some)
+        cached_app_state(&paths, &cache, &config).map(Some)
     })
     .await
+}
+
+/// The state the window reloads after every operation. It carries what the
+/// last sync learned - the identity, the preflight, and the marketplace
+/// index - because dropping those would blank the header and the badges.
+fn cached_app_state(
+    paths: &SystemPaths,
+    cache: &std::path::Path,
+    config: &std::path::Path,
+) -> Result<AppState, String> {
+    retire_unsupported_legacy_installs(paths)?;
+    agent_profiles::apply_detected_defaults(paths)?;
+    let checked = read_last_sync(cache).unwrap_or_else(current_epoch_seconds);
+    let config_file = source::read_sources_config(config)?;
+    let repositories = config_file
+        .repositories
+        .into_iter()
+        .map(
+            |definition| match source::load_current_repository(cache, &definition) {
+                Ok(snapshot) => LoadedRepository {
+                    definition,
+                    snapshot,
+                    status: SourceStatus::Cached,
+                    refresh_failed: false,
+                    message: None,
+                },
+                Err(message) => LoadedRepository {
+                    definition,
+                    snapshot: None,
+                    status: SourceStatus::Error,
+                    refresh_failed: true,
+                    message: Some(message),
+                },
+            },
+        )
+        .collect::<Vec<_>>();
+    let loaded = config_file
+        .sources
+        .into_iter()
+        .map(
+            |definition| match source::load_current(cache, &definition) {
+                Ok(snapshot) => LoadedSource {
+                    definition,
+                    snapshot,
+                    status: SourceStatus::Cached,
+                    refresh_failed: false,
+                    message: None,
+                },
+                Err(message) => LoadedSource {
+                    definition,
+                    snapshot: None,
+                    status: SourceStatus::Error,
+                    refresh_failed: true,
+                    message: Some(message),
+                },
+            },
+        )
+        .collect::<Vec<_>>();
+    let mut state = super::project::build_app_state(
+        paths,
+        &repositories,
+        &loaded,
+        checked,
+        AutoUpdateReport::default(),
+        None,
+    )?;
+    super::project::apply_cached_marketplace(&mut state, cache);
+    Ok(state)
 }
 
 /// Re-runs the preflight on demand against the cached state.
@@ -84,6 +96,7 @@ pub(crate) async fn run_preflight(
 ) -> Result<crate::preflight::PreflightReport, String> {
     let _sync_guard = runtime.sync_lock.lock().await;
     run_blocking("Preflight", || {
+        agent_profiles::clear_detection_cache();
         let paths = SystemPaths::from_system()?;
         let cache = cache_base_dir()?;
         let state = super::project::cached_state_now()?;
@@ -131,6 +144,8 @@ pub(crate) async fn sync_app_state(runtime: &RuntimeState) -> Result<AppState, S
 }
 
 pub(super) fn synchronize() -> Result<AppState, String> {
+    // A sync is the app looking at the machine again, agents included.
+    agent_profiles::clear_detection_cache();
     let paths = SystemPaths::from_system()?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
@@ -194,7 +209,25 @@ pub(super) fn synchronize() -> Result<AppState, String> {
         &mut state,
         &updated_ids,
     );
+    write_last_sync(&cache, checked);
     Ok(state)
+}
+
+const LAST_SYNC_FILE: &str = "last-sync.json";
+
+/// The header says when the app last reached the sources. Cached loads happen
+/// after every operation, so they read this instead of claiming "just now".
+fn write_last_sync(cache: &std::path::Path, checked: u64) {
+    let _ = std::fs::create_dir_all(cache);
+    let _ = std::fs::write(cache.join(LAST_SYNC_FILE), checked.to_string());
+}
+
+fn read_last_sync(cache: &std::path::Path) -> Option<u64> {
+    std::fs::read_to_string(cache.join(LAST_SYNC_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Adds every source the marketplace catalog lists that is not configured yet.
@@ -907,6 +940,32 @@ mod tests {
             local_data: root.join("local-data"),
             cache: root.join("cache"),
         }
+    }
+
+    #[test]
+    fn cached_state_keeps_what_the_last_sync_learned() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let cache = root.path().join("cache-base");
+        let config = root.path().join("config-base");
+        fs::create_dir_all(&cache).expect("cache");
+        fs::create_dir_all(&config).expect("config");
+        let identity = crate::app_state::MarketplaceIdentity {
+            account: "CORP\\jacob".to_string(),
+            namespace: "jacob".to_string(),
+            display_name: "Jacob".to_string(),
+            admin: false,
+            auth_mode: "Negotiate".to_string(),
+        };
+        super::super::project::write_identity_cache(&cache, Some(&identity));
+
+        let state = cached_app_state(&paths, &cache, &config).expect("cached state");
+
+        assert_eq!(
+            state.identity.map(|identity| identity.namespace),
+            crate::locator::marketplace_base_url().map(|_| "jacob".to_string()),
+            "a cached load must carry the identity the last sync stored"
+        );
     }
 
     fn snapshot(root: &Path, body: &str, commit: char) -> (ConfiguredSource, SourceSnapshot) {

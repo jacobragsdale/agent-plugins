@@ -891,7 +891,7 @@ fn agent_checks(out: &mut Collector, input: &PreflightInput<'_>) {
             "Detected agents",
             CheckStatus::Warn,
             "No supported coding agent was found on this machine.",
-            action("showAgents"),
+            manual("Install Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then refresh."),
             false,
         );
     } else {

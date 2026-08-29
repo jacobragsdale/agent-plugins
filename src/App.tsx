@@ -3,13 +3,13 @@ import type { JSX } from "react";
 import { Button, Heading, Spinner, Text } from "@radix-ui/themes";
 import { listen } from "@tauri-apps/api/event";
 import { message } from "@tauri-apps/plugin-dialog";
-import { AgentProfilesDialog } from "./components/AgentProfilesDialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { AgentSetupNotice } from "./components/AgentSetupNotice";
 import { ManageSourcesDialog } from "./components/ManageSourcesDialog";
 import { Notice } from "./components/Notice";
 import { SourceGroup } from "./components/SourceGroup";
 import { CatalogToolbar, StatusButton, SyncMeta } from "./components/CatalogToolbar";
-import { overallStatus, SystemStatusDialog } from "./components/SystemStatusDialog";
+import { diagnosticsFailure, diagnosticsResult, seriousProblems, SystemStatusDialog } from "./components/SystemStatusDialog";
 import { errorText, invokeParsed, SCHEDULED_SYNC_EVENT } from "./ipc/client";
 import {
   appStateSchema,
@@ -20,10 +20,12 @@ import {
   preflightReportSchema,
   preparedSourceSchema,
   scheduledSyncSchema,
-  sourceRemovalPlanSchema
+  sourceRemovalPlanSchema,
+  unitSchema
 } from "./ipc/schemas";
-import type { AppIdentity, AppState, BulkAction, CatalogItem, CheckStatus, ListedSource, PreflightReport, RepositoryState, SourceState } from "./ipc/schemas";
-import { commandForStatus, hasDetectedAgent, itemCommandArgs, reviewBulk, reviewReplace, reviewReset } from "./lib/status";
+import type { DiagnosticsResult } from "./components/SystemStatusDialog";
+import type { AppIdentity, AppState, BulkAction, CatalogItem, ListedSource, PreflightCheck, PreflightReport, RepositoryState, SourceState } from "./ipc/schemas";
+import { commandForStatus, hasDetectedAgent, itemCommandArgs, reviewApproval, reviewBulk, reviewBulkApproval, reviewReplace, reviewReset, reviewSourceRemoval } from "./lib/status";
 import "./App.css";
 
 export default function App(): JSX.Element {
@@ -32,14 +34,14 @@ export default function App(): JSX.Element {
   const [syncing, setSyncing] = useState(false);
   const [adding, setAdding] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
-  const [agentDialogOpen, setAgentDialogOpen] = useState(false);
-  const [agentSetupPrompted, setAgentSetupPrompted] = useState(false);
   const [busyItems, setBusyItems] = useState<ReadonlySet<string>>(new Set());
   const [busySources, setBusySources] = useState<ReadonlySet<string>>(new Set());
   const [resetting, setResetting] = useState(false);
   const [statusDialogOpen, setStatusDialogOpen] = useState(false);
   const [preflightRunning, setPreflightRunning] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [query, setQuery] = useState("");
+  const [driftOnly, setDriftOnly] = useState(false);
 
   const applyState = useCallback((next: AppState): void => {
     startTransition(() => {
@@ -120,20 +122,6 @@ export default function App(): JSX.Element {
     };
   }, [applyState, loadCached, synchronize]);
 
-  useEffect(() => {
-    if (state === null) {
-      return;
-    }
-    if (hasDetectedAgent(state.agentProfiles)) {
-      setAgentSetupPrompted(false);
-      return;
-    }
-    if (!agentSetupPrompted) {
-      setAgentDialogOpen(true);
-      setAgentSetupPrompted(true);
-    }
-  }, [agentSetupPrompted, state]);
-
   const itemsBySource = useMemo(() => {
     const grouped = new Map<string, CatalogItem[]>();
     const needle = query.trim().toLowerCase();
@@ -141,29 +129,41 @@ export default function App(): JSX.Element {
       if (needle.length > 0 && !matchesQuery(item, needle)) {
         continue;
       }
+      if (driftOnly && item.status !== "modified") {
+        continue;
+      }
       const items = grouped.get(item.sourceKey) ?? [];
       items.push(item);
       grouped.set(item.sourceKey, items);
     }
     return grouped;
-  }, [query, state]);
+  }, [driftOnly, query, state]);
+
+  const filtering = query.trim().length > 0 || driftOnly;
 
   const visibleSources = useMemo(() => {
     const sources = state?.sources ?? [];
-    if (query.trim().length === 0) {
+    if (!filtering) {
       return sources;
     }
     return sources.filter((source) => (itemsBySource.get(source.sourceKey) ?? []).length > 0);
-  }, [itemsBySource, query, state]);
+  }, [filtering, itemsBySource, state]);
 
   async function rerunPreflight(): Promise<void> {
     setPreflightRunning(true);
+    setDiagnostics(null);
     try {
       const report = await invokeParsed("run_preflight", preflightReportSchema);
+      // The run rewrites the identity and preflight caches, so reload before pinning the report:
+      // a machine with no marketplace configured loads neither back.
+      await loadCached();
       setState((current) => (current === null ? current : { ...current, preflight: report }));
+      setDiagnostics(diagnosticsResult(report));
       setError(null);
     } catch (reason) {
-      setError(errorText(reason));
+      const text = errorText(reason);
+      setDiagnostics(diagnosticsFailure(text));
+      setError(text);
     } finally {
       setPreflightRunning(false);
     }
@@ -177,22 +177,44 @@ export default function App(): JSX.Element {
           setError(errorText(reason));
         });
       },
-      showAgents: () => {
-        setAgentDialogOpen(true);
+      update: () => {
+        openDownloadSite().catch((reason: unknown) => {
+          setError(errorText(reason));
+        });
       },
       showDrift: () => {
         setQuery("");
+        setDriftOnly(true);
       },
       installPublishSkill: () => {
+        setDriftOnly(false);
         setQuery("official/publish");
       }
     };
     handlers[action]?.();
   }
 
-  async function refreshCached(): Promise<void> {
-    await loadCached();
-    setError(null);
+  async function openDownloadSite(): Promise<void> {
+    const url = state?.downloadUrl ?? null;
+    if (url === null) {
+      await message("This build has no download site configured. Ask your administrator where to get the current Agent Plugins, then install it over this one.", {
+        title: "Update Agent Plugins",
+        kind: "info"
+      });
+      return;
+    }
+    await openUrl(url);
+  }
+
+  // The view has to match the machine even when an operation failed: a stale
+  // card is what makes a failed click look like nothing happened. It never
+  // clears the error, so a failure raised by the operation survives here.
+  async function refreshAfterOperation(): Promise<void> {
+    try {
+      await loadCached();
+    } catch (reason) {
+      setError(errorText(reason));
+    }
   }
 
   async function changeItem(item: CatalogItem, componentId?: string): Promise<void> {
@@ -207,49 +229,60 @@ export default function App(): JSX.Element {
     if (command === "replace_item" && !(await reviewReplace())) {
       return;
     }
-    const trustApproved = command !== "uninstall_item";
+    setError(null);
+    // An MCP server runs a command on this machine, so it is installed only
+    // after the person says so. The backend refuses without this approval.
+    const trustApproved = command !== "uninstall_item" && (component === undefined ? item.requiresApproval : component.requiresApproval);
+    if (trustApproved && !(await reviewApproval(item.name, item.riskDetails))) {
+      return;
+    }
     setBusyItems((current) => new Set(current).add(item.id));
     try {
       const outcome = await invokeParsed(command, operationOutcomeSchema, itemCommandArgs(item, componentId, { trustApproved }));
       if (outcome.backupPaths.length > 0) {
         await message(`The previous destination was backed up at ${outcome.backupPaths.join(", ")}.`, { title: "Backup created", kind: "info" });
       }
-      await refreshCached();
     } finally {
       setBusyItems((current) => {
         const next = new Set(current);
         next.delete(item.id);
         return next;
       });
+      await refreshAfterOperation();
     }
   }
 
   async function runBulk(source: SourceState, action: BulkAction): Promise<void> {
+    setError(null);
     setBusySources((current) => new Set(current).add(source.sourceId));
     try {
       const plan = await invokeParsed("plan_bulk_items", bulkPlanSchema, { sourceId: source.sourceId, action });
-      const count = plan.entries.filter((entry) => entry.willRun).length;
-      if (count === 0) {
+      const eligible = plan.entries.filter((entry) => entry.willRun);
+      if (eligible.length === 0) {
         await message("No items are currently eligible for that action.", { title: "Nothing to do", kind: "info" });
         return;
       }
-      if (action === "replace" && !(await reviewBulk(source, action, plan))) {
+      if (action !== "install" && !(await reviewBulk(source, action, plan))) {
         return;
       }
-      const result = await invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action, trustApproved: action !== "uninstall" });
+      const approvals = action === "uninstall" ? [] : (state?.items ?? []).filter((item) => item.requiresApproval && eligible.some((entry) => entry.id === item.id)).map((item) => item.name);
+      if (approvals.length > 0 && !(await reviewBulkApproval(approvals))) {
+        return;
+      }
+      const result = await invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action, trustApproved: approvals.length > 0 });
       if (result.failures.length > 0) {
         setError(result.failures.map((failure) => `${failure.id}: ${failure.message}`).join("; "));
       }
       if (result.backupPaths.length > 0) {
         await message(`Previous destinations were backed up at ${result.backupPaths.join(", ")}.`, { title: "Backups created", kind: "info" });
       }
-      await loadCached();
     } finally {
       setBusySources((current) => {
         const next = new Set(current);
         next.delete(source.sourceId);
         return next;
       });
+      await refreshAfterOperation();
     }
   }
 
@@ -279,32 +312,47 @@ export default function App(): JSX.Element {
   }
 
   async function addListedSource(repository: RepositoryState, listed: ListedSource): Promise<void> {
+    setError(null);
     setAdding(true);
     try {
       const prepared = await invokeParsed("prepare_source", preparedSourceSchema, { url: listed.url, repositoryKey: repository.repositoryKey });
-      applyState(await invokeParsed("confirm_source", appStateSchema, { token: prepared.token }));
-      setError(null);
+      try {
+        applyState(await invokeParsed("confirm_source", appStateSchema, { token: prepared.token }));
+      } catch (reason) {
+        // Leave no staged candidate behind when the confirmation fails.
+        await invokeParsed("cancel_prepared_source", unitSchema, { token: prepared.token }).catch(() => undefined);
+        throw reason;
+      }
     } finally {
       setAdding(false);
     }
   }
 
   async function removeSource(source: SourceState): Promise<void> {
+    const plan = await invokeParsed("plan_source_removal", sourceRemovalPlanSchema, { sourceId: source.sourceId });
+    // Removing a source uninstalls everything it installed, and local edits go
+    // with it, so the person acknowledges both before anything is touched.
+    if (!(await reviewSourceRemoval(source, plan))) {
+      return;
+    }
+    const modified = plan.items.flatMap((item) => item.paths).filter((path) => path.modified);
+    setError(null);
     setBusySources((current) => new Set(current).add(source.sourceId));
     try {
-      const plan = await invokeParsed("plan_source_removal", sourceRemovalPlanSchema, { sourceId: source.sourceId });
-      const modified = plan.items.flatMap((item) => item.paths).filter((path) => path.modified);
       const result = await invokeParsed("remove_manifest_source", bulkResultSchema, { sourceId: source.sourceId, acknowledgeModifiedPaths: modified.length > 0 });
       if (result.failures.length > 0) {
         setError(result.failures.map((failure) => `${failure.id}: ${failure.message}`).join("; "));
       }
-      await loadCached();
+      if (result.backupPaths.length > 0) {
+        await message(`Removed files were backed up at ${result.backupPaths.join(", ")}.`, { title: "Backups created", kind: "info" });
+      }
     } finally {
       setBusySources((current) => {
         const next = new Set(current);
         next.delete(source.sourceId);
         return next;
       });
+      await refreshAfterOperation();
     }
   }
 
@@ -321,22 +369,13 @@ export default function App(): JSX.Element {
         </div>
         <div className="catalog-actions">
           <StatusButton
-            status={view.status}
+            problems={view.problems}
             identity={view.identity}
             disabled={resetting}
             onClick={() => {
               setStatusDialogOpen(true);
             }}
           />
-          <Button
-            variant="soft"
-            disabled={resetting}
-            onClick={() => {
-              setAgentDialogOpen(true);
-            }}
-          >
-            Detected Agents
-          </Button>
           <Button
             variant="soft"
             disabled={resetting}
@@ -364,12 +403,20 @@ export default function App(): JSX.Element {
           </Button>
         </div>
       </header>
-      <SyncMeta checked={checked} marketplaceUrl={view.marketplaceUrl} blocked={view.blocked} />
-      <CatalogToolbar query={query} matches={matchCount} onQueryChange={setQuery} />
+      <SyncMeta checked={checked} problems={view.problems} blocked={view.blocked} />
+      <CatalogToolbar
+        query={query}
+        matches={matchCount}
+        driftOnly={driftOnly}
+        onQueryChange={setQuery}
+        onClearDrift={() => {
+          setDriftOnly(false);
+        }}
+      />
       <AgentSetupNotice
         visible={state !== null && !hasDetectedAgent(state.agentProfiles)}
         onChoose={() => {
-          setAgentDialogOpen(true);
+          setStatusDialogOpen(true);
         }}
       />
       <Notice
@@ -393,6 +440,7 @@ export default function App(): JSX.Element {
               items={itemsBySource.get(source.sourceKey) ?? []}
               busyIds={busyItems}
               allBusy={resetting || busySources.has(source.sourceId)}
+              filtering={filtering}
               onItemChange={changeItem}
               onBulk={runBulk}
               onError={setError}
@@ -404,20 +452,27 @@ export default function App(): JSX.Element {
         open={sourceDialogOpen}
         state={state}
         adding={adding}
+        error={sourceDialogOpen ? error : null}
         removing={busySources}
         onOpenChange={setSourceDialogOpen}
         onAddListed={addListedSource}
         onRemove={removeSource}
         onError={setError}
       />
-      <AgentProfilesDialog open={agentDialogOpen} profiles={state?.agentProfiles ?? []} onOpenChange={setAgentDialogOpen} />
       <SystemStatusDialog
         open={statusDialogOpen}
         report={view.preflight}
         identity={view.identity}
         marketplaceUrl={view.marketplaceUrl}
+        profiles={state?.agentProfiles ?? []}
         running={preflightRunning}
-        onOpenChange={setStatusDialogOpen}
+        diagnostics={diagnostics}
+        onOpenChange={(open) => {
+          setStatusDialogOpen(open);
+          if (!open) {
+            setDiagnostics(null);
+          }
+        }}
         onRerun={() => {
           rerunPreflight().catch((reason: unknown) => {
             setError(errorText(reason));
@@ -434,7 +489,9 @@ function matchesQuery(item: CatalogItem, needle: string): boolean {
   return haystack.includes(needle);
 }
 
-function marketplaceView(state: AppState | null): Readonly<{ identity: AppIdentity | null; marketplaceUrl: string | null; preflight: PreflightReport | null; blocked: boolean; status: CheckStatus }> {
+function marketplaceView(
+  state: AppState | null
+): Readonly<{ identity: AppIdentity | null; marketplaceUrl: string | null; preflight: PreflightReport | null; blocked: boolean; problems: readonly PreflightCheck[] }> {
   const preflight = state?.preflight ?? null;
-  return { identity: state?.identity ?? null, marketplaceUrl: state?.marketplaceUrl ?? null, preflight, blocked: preflight?.blocked === true, status: overallStatus(preflight) };
+  return { identity: state?.identity ?? null, marketplaceUrl: state?.marketplaceUrl ?? null, preflight, blocked: preflight?.blocked === true, problems: seriousProblems(preflight) };
 }

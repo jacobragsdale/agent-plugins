@@ -1,6 +1,5 @@
 //! The only filesystem writer for planned package resources.
 
-use crate::agent_profiles::TargetId;
 use crate::catalog::{CatalogComponentKind, CatalogItem};
 use crate::fs_retry;
 use crate::install::OperationOutcome;
@@ -15,7 +14,6 @@ use crate::planner;
 use crate::resource::StructuredFormat;
 use crate::resource::{DesiredResource, OperationPlan};
 use crate::source::{ConfiguredSource, SourceSnapshot};
-use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,15 +33,6 @@ use stage::{mutation_backup, stage_changes, StageRequest};
 
 pub(crate) use journal::recover;
 pub(crate) use matching::{installation_matches, plan_satisfied, resource_matches};
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct TargetCleanupPreview {
-    pub(crate) target_id: TargetId,
-    pub(crate) binding_count: usize,
-    pub(crate) resources_removed: Vec<String>,
-    pub(crate) resources_retained: Vec<String>,
-}
 
 pub(crate) fn read_ledger(paths: &SystemPaths) -> Result<InstallationLedger, String> {
     recover(paths)?;
@@ -696,136 +685,6 @@ pub(crate) fn uninstall_components(
     })
 }
 
-pub(crate) fn preview_target_cleanup(
-    paths: &SystemPaths,
-    target_id: TargetId,
-) -> Result<TargetCleanupPreview, String> {
-    let ledger = read_ledger(paths)?;
-    let binding_ids = ledger
-        .bindings
-        .values()
-        .filter(|binding| binding.target_id == target_id.as_str())
-        .map(|binding| binding.id.clone())
-        .collect::<BTreeSet<_>>();
-    let mut removed = Vec::new();
-    let mut retained = Vec::new();
-    for resource in ledger.resources.values() {
-        if !resource
-            .consumer_binding_ids
-            .iter()
-            .any(|binding| binding_ids.contains(binding))
-        {
-            continue;
-        }
-        if resource
-            .consumer_binding_ids
-            .iter()
-            .all(|binding| binding_ids.contains(binding))
-        {
-            removed.push(resource.identity.clone());
-        } else {
-            retained.push(resource.identity.clone());
-        }
-    }
-    removed.sort();
-    retained.sort();
-    Ok(TargetCleanupPreview {
-        target_id,
-        binding_count: binding_ids.len(),
-        resources_removed: removed,
-        resources_retained: retained,
-    })
-}
-
-pub(crate) fn disable_target(
-    paths: &SystemPaths,
-    target_id: TargetId,
-    force_modified: bool,
-) -> Result<OperationOutcome, String> {
-    recover(paths)?;
-    let mut next = read_ledger_raw(paths)?;
-    let mut binding_ids = next
-        .bindings
-        .values()
-        .filter(|binding| binding.target_id == target_id.as_str())
-        .map(|binding| binding.id.clone())
-        .collect::<BTreeSet<_>>();
-    let affected_installations = binding_ids
-        .iter()
-        .filter_map(|binding_id| next.bindings.get(binding_id))
-        .map(|binding| binding.installation_id.clone())
-        .collect::<BTreeSet<_>>();
-    for installation_id in &affected_installations {
-        let has_other_target = next.bindings.values().any(|binding| {
-            binding.installation_id == *installation_id
-                && binding.target_id != target_id.as_str()
-                && binding.target_id != "skill-manager"
-        });
-        if !has_other_target {
-            binding_ids.extend(
-                next.bindings
-                    .values()
-                    .filter(|binding| {
-                        binding.installation_id == *installation_id
-                            && binding.target_id == "skill-manager"
-                    })
-                    .map(|binding| binding.id.clone()),
-            );
-        }
-    }
-    if binding_ids.is_empty() {
-        return Ok(OperationOutcome::default());
-    }
-    for binding_id in &binding_ids {
-        next.bindings.remove(binding_id);
-    }
-    for item in next.items.values_mut() {
-        item.binding_ids
-            .retain(|binding_id| !binding_ids.contains(binding_id));
-    }
-    let empty_installations = next
-        .items
-        .iter()
-        .filter(|(_, item)| item.binding_ids.is_empty() && item.manifest_version == 2)
-        .map(|(id, _)| id.clone())
-        .collect::<Vec<_>>();
-    for installation_id in empty_installations {
-        next.items.remove(&installation_id);
-    }
-    let mut orphan_ids = Vec::new();
-    for (resource_id, resource) in &mut next.resources {
-        resource
-            .consumer_binding_ids
-            .retain(|binding| !binding_ids.contains(binding));
-        if resource.consumer_binding_ids.is_empty() {
-            orphan_ids.push(resource_id.clone());
-        }
-    }
-    let removed = orphan_ids
-        .into_iter()
-        .filter_map(|resource_id| next.resources.remove(&resource_id))
-        .collect::<Vec<_>>();
-    let transaction_id = transaction_id(target_id.as_str());
-    let (journal, _, backup_paths) = stage_changes(&StageRequest {
-        paths,
-        transaction_id: &transaction_id,
-        plan: &OperationPlan::default(),
-        removed: &removed,
-        remaining_ledger: &next,
-        replace_unmanaged: false,
-        force_modified,
-    })?;
-    update_document_digests_from_journal(&mut next, &journal)?;
-    next.last_transaction_id = Some(transaction_id);
-    commit(paths, &journal, &next)?;
-    Ok(OperationOutcome {
-        backup_paths: backup_paths
-            .into_iter()
-            .map(|path| path.display().to_string())
-            .collect(),
-    })
-}
-
 fn merge_plan(combined: &mut OperationPlan, plan: &OperationPlan) -> Result<(), String> {
     for binding in plan.bindings.values() {
         combined.add_binding(binding.clone())?;
@@ -1250,6 +1109,7 @@ fn remove_any(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_profiles::TargetId;
     use crate::catalog::read_manifest_catalog;
     use crate::source::TEST_SOURCE_KEY;
 
@@ -1482,74 +1342,6 @@ mod tests {
         recover(&paths).expect("recover");
         assert_eq!(fs::read_to_string(target).expect("target"), "new");
         assert!(!backup.exists());
-    }
-
-    #[test]
-    fn disabling_one_target_retains_a_shared_skill_until_the_last_consumer() {
-        let root = tempfile::tempdir().expect("root");
-        let paths = paths(root.path());
-        let source_root = root.path().join("source-v2");
-        fs::create_dir_all(source_root.join("skills/review")).expect("skill");
-        fs::write(
-            source_root.join("skills/review/SKILL.md"),
-            "---\nname: review\ndescription: Review code\n---\nBody\n",
-        )
-        .expect("skill");
-        fs::write(
-            source_root.join("skill-manager.json"),
-            r#"{
-              "version": 2,
-              "source": {"id":"acme","name":"Acme","description":"Test"},
-              "packages": [{
-                "id":"review",
-                "components":[{"kind":"skill","id":"review","path":"skills/review"}]
-              }]
-            }"#,
-        )
-        .expect("manifest");
-        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
-        let source = ConfiguredSource {
-            source_key: TEST_SOURCE_KEY.to_string(),
-            source_id: "acme".to_string(),
-            name: "Acme".to_string(),
-            description: "Test".to_string(),
-            locator: crate::locator::Locator::display_url(
-                "https://nexus.example.com/repository/raw/sources/acme-latest.zip".to_string(),
-            ),
-            repository_key: None,
-        };
-        let item = catalog.items["review"].clone();
-        let snapshot = SourceSnapshot {
-            definition: source.clone(),
-            commit: "b".repeat(40),
-            path: source_root,
-            catalog,
-        };
-        for target in [TargetId::Cursor, TargetId::Codex, TargetId::OpenCode] {
-            crate::agent_profiles::set_enabled(&paths, target, true).expect("enable");
-        }
-        install(&paths, &source, &snapshot, &item, false, false).expect("install");
-        let skill = paths.home.join(".agents/skills/acme-review");
-        let ledger = read_ledger(&paths).expect("ledger");
-        assert_eq!(ledger.resources.len(), 1);
-        assert_eq!(
-            ledger
-                .resources
-                .values()
-                .next()
-                .expect("resource")
-                .consumer_binding_ids
-                .len(),
-            3
-        );
-
-        disable_target(&paths, TargetId::Cursor, false).expect("disable cursor");
-        assert!(skill.is_dir());
-        disable_target(&paths, TargetId::Codex, false).expect("disable codex");
-        assert!(skill.is_dir());
-        disable_target(&paths, TargetId::OpenCode, false).expect("disable opencode");
-        assert!(!skill.exists());
-        assert!(read_ledger(&paths).expect("ledger").items.is_empty());
     }
 
     #[test]
