@@ -2,6 +2,8 @@
 
 This tutorial publishes a catalog that lists sources. Agent Plugins can browse the catalog; packages appear only after a listed source is added.
 
+You need this only when you run your own distribution outside the marketplace server. The marketplace publishes its own catalog at `/api/catalog`, with one listed source per publisher namespace, and the app subscribes to it automatically — see [Publish to the marketplace](publish-to-marketplace.md).
+
 ## Create the catalog document
 
 Create `skill-manager-repository.json`:
@@ -47,7 +49,7 @@ cargo run --manifest-path /path/to/skill-manager/src-tauri/Cargo.toml \
 
 ## Publish and browse
 
-Host the JSON at a stable HTTPS URL and set that URL as the app's default catalog constant. In Agent Plugins:
+Serve the JSON at `{MARKETPLACE_URL}/api/catalog`, where `MARKETPLACE_URL` is the build-time constant in `src-tauri/src/locator.rs`. That is the only catalog the app reads; it takes no pasted catalog URLs. In Agent Plugins:
 
 1. Open **Manage Sources**. The catalog's listed sources appear by name and description.
 2. Select **Add** on one listed source.
