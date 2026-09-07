@@ -1,6 +1,6 @@
 //! Command-line entry points in the application binary.
 //!
-//! `agent-plugins validate|publish|search|install|whoami` run without the
+//! `agent-plugins validate|publish|search|install|access|whoami` run without the
 //! window so an agent can drive them. They share the crate's validator,
 //! locator, identity, and installer, so a CLI publish is the same operation as
 //! one from the app and authenticates the same way (ADR 0004).
@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::io::{self, BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
 
-const COMMANDS: [&str; 7] = [
-    "validate", "publish", "search", "install", "whoami", "help", "--help",
+const COMMANDS: [&str; 8] = [
+    "validate", "publish", "search", "install", "access", "whoami", "help", "--help",
 ];
 const MAX_ARCHIVE_BYTES: u64 = 50 * 1024 * 1024;
 const SECRET_SCAN_LIMIT: u64 = 2 * 1024 * 1024;
@@ -49,6 +49,7 @@ fn dispatch(command: &str, args: &[String]) -> Result<(), String> {
         "search" => search(args),
         "publish" => publish(args),
         "install" => install(args),
+        "access" => access(args),
         _ => Err(usage()),
     }
 }
@@ -61,7 +62,8 @@ agent-plugins whoami\n  \
 agent-plugins validate <path>\n  \
 agent-plugins search [query]\n  \
 agent-plugins publish <path> --version <semver> [--namespace <ns>] [--package-id <id>] [--tags a,b] [--changelog <text>] [--yes]\n  \
-agent-plugins install <namespace>/<package> [--approve-mcp]\n\n\
+agent-plugins install <namespace>/<package> [--approve-mcp]\n  \
+agent-plugins access <namespace>[/<package>] [--user <account>]... [--group <name>]... [--public]\n\n\
 <path> for publish is a skill directory containing SKILL.md, an MCP document\n\
 (mcp.json shape), or a source tree with agent-plugins.json declaring one package.\n",
         marketplace::CLIENT_VERSION
@@ -77,6 +79,7 @@ fn whoami() -> Result<(), String> {
             println!("marketplace account: {}", me.account);
             println!("namespace: {}", me.namespace);
             println!("publishes to: {}", me.namespaces.join(", "));
+            println!("groups: {}", me.groups.join(", "));
             println!("admin: {}", me.admin);
             Ok(())
         }
@@ -320,13 +323,95 @@ fn publish(args: &[String]) -> Result<(), String> {
     Err(describe_problem(status.as_u16(), &body))
 }
 
+/// The allowlist for a namespace or package, as `/api/access` returns it.
+#[derive(serde::Deserialize)]
+struct AccessDocument {
+    target: String,
+    #[serde(default)]
+    users: Vec<String>,
+    #[serde(default)]
+    groups: Vec<String>,
+}
+
+struct AccessArgs {
+    target: String,
+    users: Vec<String>,
+    groups: Vec<String>,
+    public: bool,
+}
+
+fn parse_access_args(args: &[String]) -> Result<AccessArgs, String> {
+    let mut parsed = AccessArgs {
+        target: String::new(),
+        users: Vec::new(),
+        groups: Vec::new(),
+        public: false,
+    };
+    let mut iter = args.iter();
+    let mut target = None;
+    while let Some(arg) = iter.next() {
+        let mut value = |name: &str| {
+            iter.next()
+                .cloned()
+                .ok_or_else(|| format!("{name} needs a value."))
+        };
+        match arg.as_str() {
+            "--user" => parsed.users.push(value("--user")?),
+            "--group" => parsed.groups.push(value("--group")?),
+            "--public" => parsed.public = true,
+            other if other.starts_with("--") => return Err(format!("Unknown option {other}.")),
+            other if target.is_none() => target = Some(other.to_string()),
+            other => return Err(format!("Unexpected argument {other}.")),
+        }
+    }
+    parsed.target = target.ok_or_else(usage)?;
+    if parsed.public && !(parsed.users.is_empty() && parsed.groups.is_empty()) {
+        return Err("--public cannot be combined with --user or --group.".to_string());
+    }
+    Ok(parsed)
+}
+
+/// Shows or replaces who may see and install a namespace or package. Without
+/// options it prints the current list; `--user`/`--group` replace it; `--public`
+/// clears it.
+fn access(args: &[String]) -> Result<(), String> {
+    let args = parse_access_args(args)?;
+    let url = format!("{}/api/access/{}", marketplace::base_url()?, args.target);
+    let client = marketplace::client()?;
+    let request = if args.public || !args.users.is_empty() || !args.groups.is_empty() {
+        client
+            .put(&url)
+            .json(&serde_json::json!({ "users": args.users, "groups": args.groups }))
+    } else {
+        client.get(&url)
+    };
+    let response = marketplace::authorize(request, &url)?
+        .send()
+        .map_err(|error| marketplace::describe_error(&url, &error))?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if !status.is_success() {
+        return Err(describe_problem(status.as_u16(), &body));
+    }
+    let document = serde_json::from_str::<AccessDocument>(&body)
+        .map_err(|error| format!("{url} returned an unreadable access document: {error}"))?;
+    println!("access {}", document.target);
+    if document.users.is_empty() && document.groups.is_empty() {
+        println!("  public");
+    } else {
+        println!("  users:  {}", document.users.join(", "));
+        println!("  groups: {}", document.groups.join(", "));
+    }
+    Ok(())
+}
+
 fn describe_problem(status: u16, body: &str) -> String {
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
     let title = parsed
         .as_ref()
         .and_then(|value| value.get("title"))
         .and_then(|value| value.as_str())
-        .unwrap_or("The marketplace rejected the publish.");
+        .unwrap_or("The marketplace rejected the request.");
     let mut message = format!("HTTP {status}: {title}");
     if let Some(errors) = parsed
         .as_ref()
@@ -822,5 +907,41 @@ mod tests {
         assert_eq!(parsed.tags, vec!["a", "b"]);
         assert!(parsed.yes);
         assert!(parse_publish_args(&["./skill".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parses_access_arguments() {
+        let args = [
+            "jacob/review",
+            "--group",
+            "Platform Team",
+            "--user",
+            "CORP\\jane",
+            "--user",
+            "bob",
+        ]
+        .iter()
+        .map(|arg| arg.to_string())
+        .collect::<Vec<_>>();
+        let parsed = parse_access_args(&args).expect("parse");
+        assert_eq!(parsed.target, "jacob/review");
+        assert_eq!(parsed.groups, vec!["Platform Team"]);
+        assert_eq!(parsed.users, vec!["CORP\\jane", "bob"]);
+        assert!(!parsed.public);
+        let shown = parse_access_args(&["jacob".to_string()]).expect("parse");
+        assert!(shown.users.is_empty() && shown.groups.is_empty() && !shown.public);
+        assert!(parse_access_args(&[]).is_err());
+        assert!(
+            parse_access_args(&["jacob".to_string(), "--public".to_string()])
+                .expect("parse")
+                .public
+        );
+        assert!(parse_access_args(&[
+            "jacob".to_string(),
+            "--public".to_string(),
+            "--user".to_string(),
+            "bob".to_string()
+        ])
+        .is_err());
     }
 }

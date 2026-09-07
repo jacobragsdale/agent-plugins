@@ -11,11 +11,15 @@ public sealed record MarketplaceIdentity(
     string Namespace,
     string DisplayName,
     bool IsAdmin,
-    IReadOnlyList<string> Namespaces)
+    IReadOnlyList<string> Namespaces,
+    IReadOnlyList<string> Groups)
 {
     public const string OfficialNamespace = "official";
 
     public bool Owns(string ns) => Namespaces.Contains(ns, StringComparer.Ordinal) || IsAdmin;
+
+    /// <summary>AD group names are case-insensitive, so every group comparison is.</summary>
+    public bool InGroup(string group) => Groups.Contains(group, StringComparer.OrdinalIgnoreCase);
 }
 
 public static partial class IdentityResolver
@@ -30,18 +34,28 @@ public static partial class IdentityResolver
 
         var username = Username(account);
         var ns = NamespaceFor(username);
+        var groups = principal.FindAll(ClaimTypes.Role)
+            .Select(claim => claim.Value.Trim())
+            .Where(group => group.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         var isAdmin = options.AdminAccounts.Any(candidate => AccountMatches(candidate, account, username))
-            || (options.AdminGroup is { Length: > 0 } group && principal.IsInRole(group));
+            || (options.AdminGroup is { Length: > 0 } group && groups.Contains(group, StringComparer.OrdinalIgnoreCase));
         var namespaces = new List<string> { ns };
         if (isAdmin || options.OfficialPublishers.Any(candidate => AccountMatches(candidate, account, username)))
         {
             namespaces.Add(MarketplaceIdentity.OfficialNamespace);
         }
 
+        namespaces.AddRange(options.TeamNamespaces
+            .Where(team => groups.Contains(team.Group, StringComparer.OrdinalIgnoreCase))
+            .Select(team => team.Namespace)
+            .Where(candidate => !namespaces.Contains(candidate, StringComparer.Ordinal)));
+
         var displayName = principal.FindFirst(ClaimTypes.GivenName) is { Value.Length: > 0 } given
             ? $"{given.Value} {principal.FindFirst(ClaimTypes.Surname)?.Value}".Trim()
             : username;
-        return new MarketplaceIdentity(account, ns, displayName, isAdmin, namespaces);
+        return new MarketplaceIdentity(account, ns, displayName, isAdmin, namespaces, groups);
     }
 
     /// <summary><c>CORP\jacob</c> and <c>jacob@corp.example</c> both yield <c>jacob</c>.</summary>
@@ -102,9 +116,13 @@ public static partial class IdentityResolver
         return SourceIdPattern().IsMatch(candidate) ? candidate : throw new InvalidOperationException($"Could not derive a namespace from {username}.");
     }
 
-    private static bool AccountMatches(string candidate, string account, string username) =>
+    /// <summary>
+    /// A configured or listed account matches the caller by full account name or by username, so
+    /// <c>DOMAIN\user</c>, <c>user@domain</c>, and <c>user</c> all name the same person.
+    /// </summary>
+    public static bool AccountMatches(string candidate, string account, string username) =>
         string.Equals(candidate, account, StringComparison.OrdinalIgnoreCase)
-        || string.Equals(candidate, username, StringComparison.OrdinalIgnoreCase);
+        || string.Equals(Username(candidate.Trim()), username, StringComparison.OrdinalIgnoreCase);
 
     [GeneratedRegex("^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){1,15}$")]
     public static partial Regex SourceIdPattern();

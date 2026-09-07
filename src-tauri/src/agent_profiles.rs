@@ -18,6 +18,20 @@ const PROFILES_VERSION: u8 = 1;
 const DETECTION_TIMEOUT: Duration = Duration::from_secs(3);
 const DETECTION_CACHE_TTL: Duration = Duration::from_secs(60);
 
+/// MSIX package family of Claude Desktop on Windows.
+pub(crate) const CLAUDE_DESKTOP_MSIX: &str = "Claude_pzs8sxrjxfjjc";
+const CHATGPT_MSIX: [&str; 2] = [
+    "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0",
+    "OpenAI.Codex_2p2nqsd0c76g0",
+];
+/// Where Microsoft 365 Copilot Cowork keeps its files inside OneDrive.
+pub(crate) const COWORK_RELATIVE: &str = "Documents/Cowork";
+const NOT_DETECTED: Detection = Detection {
+    detected: false,
+    version: None,
+    message: None,
+};
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum TargetId {
@@ -28,16 +42,23 @@ pub(crate) enum TargetId {
     OpenCode,
     GrokBuild,
     GithubCopilot,
+    ClaudeDesktop,
+    Chatgpt,
+    #[serde(rename = "m365-copilot")]
+    M365Copilot,
 }
 
 impl TargetId {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Cursor,
         Self::ClaudeCode,
         Self::Codex,
         Self::OpenCode,
         Self::GrokBuild,
         Self::GithubCopilot,
+        Self::ClaudeDesktop,
+        Self::Chatgpt,
+        Self::M365Copilot,
     ];
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -48,6 +69,9 @@ impl TargetId {
             Self::OpenCode => "opencode",
             Self::GrokBuild => "grok-build",
             Self::GithubCopilot => "github-copilot",
+            Self::ClaudeDesktop => "claude-desktop",
+            Self::Chatgpt => "chatgpt",
+            Self::M365Copilot => "m365-copilot",
         }
     }
 
@@ -59,22 +83,33 @@ impl TargetId {
             Self::OpenCode => "OpenCode",
             Self::GrokBuild => "Grok Build",
             Self::GithubCopilot => "GitHub Copilot",
+            Self::ClaudeDesktop => "Claude Desktop",
+            Self::Chatgpt => "ChatGPT",
+            Self::M365Copilot => "Microsoft 365 Copilot",
         }
     }
 
-    fn command(self) -> &'static str {
+    /// The CLI whose `--version` proves the agent is installed. Desktop apps
+    /// have none and are detected from their installation instead.
+    fn command(self) -> Option<&'static str> {
         match self {
-            Self::Cursor => "cursor",
-            Self::ClaudeCode => "claude",
-            Self::Codex => "codex",
-            Self::OpenCode => "opencode",
-            Self::GrokBuild => "grok",
-            Self::GithubCopilot => "copilot",
+            Self::Cursor => Some("cursor"),
+            Self::ClaudeCode => Some("claude"),
+            Self::Codex => Some("codex"),
+            Self::OpenCode => Some("opencode"),
+            Self::GrokBuild => Some("grok"),
+            Self::GithubCopilot => Some("copilot"),
+            Self::ClaudeDesktop | Self::Chatgpt | Self::M365Copilot => None,
         }
     }
 
+    /// The dialect carries the month its configuration contract was verified.
     pub(crate) fn current_dialect(self) -> String {
-        format!("{}-2026-08", self.as_str())
+        let verified = match self {
+            Self::ClaudeDesktop | Self::Chatgpt | Self::M365Copilot => "2026-09",
+            _ => "2026-08",
+        };
+        format!("{}-{verified}", self.as_str())
     }
 }
 
@@ -197,6 +232,13 @@ fn verification_guidance(target: TargetId) -> &'static str {
         TargetId::GithubCopilot => {
             "Inspect Copilot skills in VS Code, Visual Studio, JetBrains, or Copilot CLI."
         }
+        TargetId::ClaudeDesktop => {
+            "Open Claude Desktop Settings > Developer to see local MCP servers. Skills are managed at claude.ai under Customize > Skills."
+        }
+        TargetId::Chatgpt => "Open ChatGPT, switch to Codex, and check its skills and MCP servers.",
+        TargetId::M365Copilot => {
+            "Wait for OneDrive to finish syncing, then start a new Cowork conversation in Microsoft 365 Copilot and check its skills."
+        }
     }
 }
 
@@ -208,6 +250,12 @@ fn reload_guidance(target: TargetId) -> &'static str {
         }
         TargetId::ClaudeCode | TargetId::Codex | TargetId::OpenCode | TargetId::GrokBuild => {
             "Start a fresh client session after configuration changes."
+        }
+        TargetId::ClaudeDesktop | TargetId::Chatgpt => {
+            "Quit and reopen the app after configuration changes."
+        }
+        TargetId::M365Copilot => {
+            "Wait for OneDrive to finish syncing, then start a new Cowork conversation."
         }
     }
 }
@@ -260,8 +308,129 @@ fn detect_application(target: TargetId) -> Option<Detection> {
     match target {
         TargetId::Cursor => detect_cursor_application(),
         TargetId::GithubCopilot => detect_copilot_application(),
+        TargetId::ClaudeDesktop => Some(detect_claude_desktop_application()),
+        TargetId::Chatgpt => Some(detect_chatgpt_application()),
+        TargetId::M365Copilot => Some(detect_m365_copilot()),
         _ => None,
     }
+}
+
+fn detect_claude_desktop_application() -> Detection {
+    detect_msix_from(
+        &msix_package_full_names(),
+        &msix_packages_dir(),
+        &[CLAUDE_DESKTOP_MSIX],
+    )
+    .or_else(|| {
+        let local = dirs::data_local_dir()?;
+        detect_squirrel_claude_from(&local.join("AnthropicClaude"))
+    })
+    .or_else(|| detect_app_bundle(Path::new("/Applications/Claude.app")))
+    .unwrap_or(NOT_DETECTED)
+}
+
+fn detect_chatgpt_application() -> Detection {
+    detect_msix_from(
+        &msix_package_full_names(),
+        &msix_packages_dir(),
+        &CHATGPT_MSIX,
+    )
+    .or_else(|| detect_app_bundle(Path::new("/Applications/ChatGPT.app")))
+    .unwrap_or(NOT_DETECTED)
+}
+
+fn detect_m365_copilot() -> Detection {
+    detect_m365_copilot_from(crate::paths::onedrive_commercial_root().as_deref())
+}
+
+/// Nearly every corporate machine has OneDrive for work, so the Cowork folder
+/// is the signal that this person actually uses Microsoft 365 Copilot.
+fn detect_m365_copilot_from(onedrive: Option<&Path>) -> Detection {
+    match onedrive {
+        Some(root) if root.join(COWORK_RELATIVE).is_dir() => Detection {
+            detected: true,
+            version: None,
+            message: None,
+        },
+        Some(_) => Detection {
+            detected: false,
+            version: None,
+            message: Some(
+                "OneDrive for work or school is signed in, but it has no Documents\\Cowork folder yet. Use Cowork once, then refresh."
+                    .to_string(),
+            ),
+        },
+        None => NOT_DETECTED,
+    }
+}
+
+/// MSIX packages registered for this user, as full names such as
+/// `Claude_1.8555.2.0_x64__pzs8sxrjxfjjc`. Reading the repository key needs
+/// no subprocess, unlike `Get-AppxPackage`.
+#[cfg(windows)]
+fn msix_package_full_names() -> Vec<String> {
+    winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey(
+            r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages",
+        )
+        .map(|key| key.enum_keys().flatten().collect())
+        .unwrap_or_default()
+}
+
+#[cfg(not(windows))]
+fn msix_package_full_names() -> Vec<String> {
+    Vec::new()
+}
+
+fn msix_packages_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .map(|local| local.join("Packages"))
+        .unwrap_or_default()
+}
+
+/// A family is `<name>_<publisher>`; a registered full name is
+/// `<name>_<version>_<arch>__<publisher>`. The family folder under Packages
+/// appears on first launch and counts without a version.
+fn detect_msix_from(
+    full_names: &[String],
+    packages_dir: &Path,
+    families: &[&str],
+) -> Option<Detection> {
+    families.iter().find_map(|family| {
+        let (name, publisher) = family.rsplit_once('_')?;
+        let version = full_names.iter().find_map(|full| {
+            let rest = full.strip_prefix(name)?.strip_prefix('_')?;
+            let (version, _) = rest.split_once('_')?;
+            full.ends_with(&format!("__{publisher}"))
+                .then(|| version.to_string())
+        });
+        (version.is_some() || packages_dir.join(family).is_dir()).then_some(Detection {
+            detected: true,
+            version,
+            message: None,
+        })
+    })
+}
+
+/// The Squirrel installer Anthropic used before February 2026.
+fn detect_squirrel_claude_from(root: &Path) -> Option<Detection> {
+    root.join("claude.exe").is_file().then(|| Detection {
+        detected: true,
+        version: first_dir_with_prefix(root, "app-").and_then(|dir| {
+            dir.file_name()?
+                .to_str()
+                .map(|name| name["app-".len()..].to_string())
+        }),
+        message: None,
+    })
+}
+
+fn detect_app_bundle(app: &Path) -> Option<Detection> {
+    app.is_dir().then_some(Detection {
+        detected: true,
+        version: None,
+        message: None,
+    })
 }
 
 fn detect_cursor_application() -> Option<Detection> {
@@ -595,7 +764,10 @@ fn is_missing_program_error(error: &str) -> bool {
 }
 
 fn detect_command(target: TargetId) -> Detection {
-    let mut command = process::command(Path::new(target.command()));
+    let Some(program) = target.command() else {
+        return NOT_DETECTED;
+    };
+    let mut command = process::command(Path::new(program));
     command.arg("--version");
     match process::run(
         command,
@@ -793,6 +965,7 @@ mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
+            onedrive_commercial: None,
         }
     }
 
@@ -963,7 +1136,10 @@ mod tests {
                 "codex",
                 "opencode",
                 "grok-build",
-                "github-copilot"
+                "github-copilot",
+                "claude-desktop",
+                "chatgpt",
+                "m365-copilot"
             ]
             .into_iter()
             .map(serde_json::Value::from)
@@ -978,5 +1154,65 @@ mod tests {
         ));
         assert!(is_missing_program_error("No such file or directory"));
         assert!(!is_missing_program_error("timed out after 3 seconds"));
+    }
+
+    #[test]
+    fn msix_detection_reads_the_version_from_the_package_repository() {
+        let root = tempfile::tempdir().expect("root");
+        let names = [
+            "Other_1.0.0.0_x64__zzz".to_string(),
+            "Claude_1.8555.2.0_x64__pzs8sxrjxfjjc".to_string(),
+        ];
+        let detection =
+            detect_msix_from(&names, root.path(), &[CLAUDE_DESKTOP_MSIX]).expect("detected");
+        assert!(detection.detected);
+        assert_eq!(detection.version.as_deref(), Some("1.8555.2.0"));
+        assert!(detect_msix_from(&names, root.path(), &["Nope_abc"]).is_none());
+        assert!(detect_msix_from(&names, root.path(), &["Claude_otherpublisher"]).is_none());
+    }
+
+    #[test]
+    fn msix_detection_accepts_the_packages_folder_without_a_version() {
+        let root = tempfile::tempdir().expect("root");
+        assert!(detect_msix_from(&[], root.path(), &CHATGPT_MSIX).is_none());
+        fs::create_dir_all(root.path().join(CHATGPT_MSIX[1])).expect("packages dir");
+        let detection = detect_msix_from(&[], root.path(), &CHATGPT_MSIX).expect("detected");
+        assert!(detection.detected);
+        assert_eq!(detection.version, None);
+    }
+
+    #[test]
+    fn squirrel_claude_detection_needs_the_executable() {
+        let root = tempfile::tempdir().expect("root");
+        fs::create_dir_all(root.path().join("app-1.2.3")).expect("app dir");
+        assert!(detect_squirrel_claude_from(root.path()).is_none());
+        fs::write(root.path().join("claude.exe"), b"").expect("exe");
+        let detection = detect_squirrel_claude_from(root.path()).expect("detected");
+        assert_eq!(detection.version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn m365_copilot_requires_a_cowork_folder_in_onedrive() {
+        let root = tempfile::tempdir().expect("root");
+        assert!(!detect_m365_copilot_from(None).detected);
+        let without = detect_m365_copilot_from(Some(root.path()));
+        assert!(!without.detected);
+        assert!(without.message.is_some());
+        fs::create_dir_all(root.path().join(COWORK_RELATIVE)).expect("cowork");
+        assert!(detect_m365_copilot_from(Some(root.path())).detected);
+    }
+
+    #[test]
+    fn desktop_targets_pin_the_september_dialect() {
+        assert_eq!(TargetId::Chatgpt.current_dialect(), "chatgpt-2026-09");
+        assert_eq!(
+            TargetId::ClaudeDesktop.current_dialect(),
+            "claude-desktop-2026-09"
+        );
+        assert_eq!(
+            TargetId::M365Copilot.current_dialect(),
+            "m365-copilot-2026-09"
+        );
+        assert_eq!(TargetId::Codex.current_dialect(), "codex-2026-08");
     }
 }

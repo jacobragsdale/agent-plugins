@@ -1,4 +1,5 @@
 using System.Reflection;
+using Marketplace.Api.Access;
 using Marketplace.Api.Auth;
 using Marketplace.Api.Catalog;
 using Marketplace.Api.Configuration;
@@ -45,16 +46,17 @@ public static class MarketplaceEndpoints
                 displayName = identity.DisplayName,
                 namespaces = identity.Namespaces,
                 admin = identity.IsAdmin,
+                groups = identity.Groups,
             });
         }).WithName("Me");
 
         authenticated.MapGet("/catalog", async (HttpContext context, CatalogService catalog, CancellationToken cancellationToken) =>
         {
-            var document = await catalog.CatalogAsync(cancellationToken);
+            var document = await catalog.CatalogAsync(context.MarketplaceIdentity(), cancellationToken);
             return Conditional(context, document.Bytes, document.Digest, "application/json");
         }).WithName("Catalog");
 
-        authenticated.MapMethods("/sources/{ns}/archive", ["GET", "HEAD"], async (string ns, HttpContext context, MarketplaceDbContext db, CancellationToken cancellationToken) =>
+        authenticated.MapMethods("/sources/{ns}/archive", ["GET", "HEAD"], async (string ns, HttpContext context, MarketplaceDbContext db, AccessService access, CancellationToken cancellationToken) =>
         {
             var archive = await db.NamespaceArchives.AsNoTracking().SingleOrDefaultAsync(candidate => candidate.Namespace == ns, cancellationToken);
             if (archive is null || archive.PackageCount == 0)
@@ -62,16 +64,40 @@ public static class MarketplaceEndpoints
                 return Results.NotFound();
             }
 
+            // The stored archive holds exactly the live packages; a caller who may see them all gets it unchanged.
+            var identity = context.MarketplaceIdentity();
+            var rules = await access.RulesAsync(cancellationToken);
+            var live = await access.LivePackagesAsync(ns, cancellationToken);
+            var keep = live
+                .Where(package => AccessService.IsVisible(rules, identity, ns, package.PackageId))
+                .Select(package => package.PackageId)
+                .ToHashSet(StringComparer.Ordinal);
+            if (keep.Count == 0)
+            {
+                return Results.NotFound();
+            }
+
             context.Response.Headers[HeaderNames.LastModified] = archive.GeneratedAt.ToString("R");
             context.Response.Headers[HeaderNames.ContentDisposition] = $"attachment; filename=\"{ns}-latest.zip\"";
-            return Conditional(context, archive.Bytes, archive.Digest, "application/zip");
+            if (keep.Count == live.Count)
+            {
+                return Conditional(context, archive.Bytes, archive.Digest, "application/zip");
+            }
+
+            var variant = NamespaceArchiveBuilder.Filter(archive.Bytes, keep);
+            return Conditional(context, variant.Bytes, variant.Digest, "application/zip");
         }).WithName("SourceArchive");
 
-        authenticated.MapGet("/index", async (CatalogService catalog, CancellationToken cancellationToken) =>
-            Results.Ok(await catalog.IndexAsync(cancellationToken))).WithName("Index");
+        authenticated.MapGet("/index", async (HttpContext context, CatalogService catalog, CancellationToken cancellationToken) =>
+            Results.Ok(await catalog.IndexAsync(context.MarketplaceIdentity(), cancellationToken))).WithName("Index");
 
-        authenticated.MapGet("/packages/{ns}/{packageId}", async (string ns, string packageId, MarketplaceDbContext db, CancellationToken cancellationToken) =>
+        authenticated.MapGet("/packages/{ns}/{packageId}", async (string ns, string packageId, HttpContext context, MarketplaceDbContext db, AccessService access, CancellationToken cancellationToken) =>
         {
+            if (!AccessService.IsVisible(await access.RulesAsync(cancellationToken), context.MarketplaceIdentity(), ns, packageId))
+            {
+                return Results.NotFound();
+            }
+
             var package = await db.Packages.AsNoTracking().Include(candidate => candidate.Versions)
                 .SingleOrDefaultAsync(candidate => candidate.Namespace == ns && candidate.PackageId == packageId, cancellationToken);
             if (package is null)
@@ -178,8 +204,13 @@ public static class MarketplaceEndpoints
             }
         }).WithName("Events");
 
-        authenticated.MapGet("/stats/packages/{ns}/{packageId}", async (string ns, string packageId, MarketplaceDbContext db, EventsService events, CancellationToken cancellationToken) =>
+        authenticated.MapGet("/stats/packages/{ns}/{packageId}", async (string ns, string packageId, HttpContext context, MarketplaceDbContext db, AccessService access, EventsService events, CancellationToken cancellationToken) =>
         {
+            if (!AccessService.IsVisible(await access.RulesAsync(cancellationToken), context.MarketplaceIdentity(), ns, packageId))
+            {
+                return Results.NotFound();
+            }
+
             var exists = await db.Packages.AnyAsync(candidate => candidate.Namespace == ns && candidate.PackageId == packageId, cancellationToken);
             return exists ? Results.Ok(await events.PackageStatsAsync($"{ns}/{packageId}", cancellationToken)) : Results.NotFound();
         }).WithName("PackageStats");
@@ -201,6 +232,30 @@ public static class MarketplaceEndpoints
             await db.SaveChangesAsync(cancellationToken);
             return Results.Accepted();
         }).WithName("Report");
+
+        authenticated.MapGet("/access/{ns}/{packageId?}", async (string ns, string? packageId, HttpContext context, AccessService access, CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                return Results.Ok(await access.GetAsync(context.MarketplaceIdentity(), ns, packageId, cancellationToken));
+            }
+            catch (PublishRejectedException rejected)
+            {
+                return Rejected(rejected);
+            }
+        }).WithName("Access");
+
+        authenticated.MapPut("/access/{ns}/{packageId?}", async (string ns, string? packageId, AccessRequest request, HttpContext context, AccessService access, CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                return Results.Ok(await access.SetAsync(context.MarketplaceIdentity(), ns, packageId, request.Users, request.Groups, cancellationToken));
+            }
+            catch (PublishRejectedException rejected)
+            {
+                return Rejected(rejected);
+            }
+        }).WithName("SetAccess");
 
         var admin = api.MapGroup("/admin").RequireAuthorization(AdminPolicy);
         admin.MapGet("/summary", async (EventsService events, CancellationToken cancellationToken) =>
@@ -228,6 +283,9 @@ public static class MarketplaceEndpoints
 
     public sealed record ReportRequest(string PackageId, string Reason);
 
+    /// <summary>The allowlist for a namespace or package. Both lists empty makes it public.</summary>
+    public sealed record AccessRequest(string[]? Users, string[]? Groups);
+
     private static IResult Rejected(PublishRejectedException rejected)
     {
         var extensions = new Dictionary<string, object?>();
@@ -244,7 +302,7 @@ public static class MarketplaceEndpoints
     {
         var etag = $"\"{digest}\"";
         context.Response.Headers[HeaderNames.ETag] = etag;
-        context.Response.Headers[HeaderNames.CacheControl] = "no-cache";
+        context.Response.Headers[HeaderNames.CacheControl] = "private, no-cache";
         if (context.Request.Headers.IfNoneMatch.Any(value => value is not null && value.Split(',').Select(tag => tag.Trim()).Contains(etag)))
         {
             return Results.StatusCode(304);

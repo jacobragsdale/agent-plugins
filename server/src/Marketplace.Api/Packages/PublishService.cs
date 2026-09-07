@@ -2,9 +2,11 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Marketplace.Api.Auth;
+using Marketplace.Api.Configuration;
 using Marketplace.Api.Data;
 using Marketplace.Api.Storage;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace Marketplace.Api.Packages;
 
@@ -41,6 +43,7 @@ public sealed partial class PublishService(
     MarketplaceDbContext db,
     IArtifactStore store,
     IPackageValidator validator,
+    IOptions<AuthOptions> auth,
     TimeProvider timeProvider,
     ILogger<PublishService> logger)
 {
@@ -158,6 +161,11 @@ public sealed partial class PublishService(
         };
         package.Versions.Add(version);
 
+        var displayName = request.Namespace == MarketplaceIdentity.OfficialNamespace
+            ? "Official"
+            : auth.Value.TeamNamespaces.FirstOrDefault(team => team.Namespace == request.Namespace)?.DisplayName is { Length: > 0 } teamName
+                ? teamName
+                : identity.DisplayName;
         var publisher = await db.Publishers.FindAsync([request.Namespace], cancellationToken);
         if (publisher is null)
         {
@@ -165,7 +173,7 @@ public sealed partial class PublishService(
             {
                 Namespace = request.Namespace,
                 Account = request.Namespace == MarketplaceIdentity.OfficialNamespace ? MarketplaceIdentity.OfficialNamespace : identity.Account,
-                DisplayName = request.Namespace == MarketplaceIdentity.OfficialNamespace ? "Official" : identity.DisplayName,
+                DisplayName = displayName,
                 FirstSeenAt = now,
                 LastPublishedAt = now,
             });
@@ -173,10 +181,7 @@ public sealed partial class PublishService(
         else
         {
             publisher.LastPublishedAt = now;
-            if (request.Namespace != MarketplaceIdentity.OfficialNamespace)
-            {
-                publisher.DisplayName = identity.DisplayName;
-            }
+            publisher.DisplayName = displayName;
         }
 
         await db.SaveChangesAsync(cancellationToken);
@@ -347,7 +352,7 @@ public sealed partial class PublishService(
         inspected.ComponentKinds.Count == 0 ? null : $"{string.Join(", ", inspected.ComponentKinds)} package.";
 
     [GeneratedRegex("^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,63}$")]
-    private static partial Regex PackageIdPattern();
+    public static partial Regex PackageIdPattern();
 
     [GeneratedRegex("^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9]))*$")]
     private static partial Regex TagPattern();

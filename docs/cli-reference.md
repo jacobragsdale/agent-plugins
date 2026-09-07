@@ -17,10 +17,11 @@ agent-plugins search [query]
 agent-plugins publish <path> --version <semver> [--namespace <ns>] [--package-id <id>]
                              [--tags a,b] [--changelog <text>] [--yes]
 agent-plugins install <namespace>/<package> [--approve-mcp]
+agent-plugins access <namespace>[/<package>] [--user <account>]... [--group <name>]... [--public]
 agent-plugins help
 ```
 
-Exit status is `0` on success and `1` on failure; failures print `error: <message>` on stderr. Any argument that is not one of `validate`, `publish`, `search`, `install`, `whoami`, `help`, or `--help` starts the desktop app instead.
+Exit status is `0` on success and `1` on failure; failures print `error: <message>` on stderr. Any argument that is not one of `validate`, `publish`, `search`, `install`, `access`, `whoami`, `help`, or `--help` starts the desktop app instead.
 
 ## `whoami`
 
@@ -31,18 +32,20 @@ host account: CORP\jacob
 identity: Kerberos (Negotiate)
 marketplace account: CORP\jacob
 namespace: jacob
-publishes to: jacob, official
+publishes to: jacob, official, team-data
+groups: Data Engineering, AP-Admins
 admin: false
 ```
 
-| Line                  | Meaning                                                                |
-| --------------------- | ---------------------------------------------------------------------- |
-| `host account`        | Who the process runs as, according to Windows.                         |
-| `identity`            | The scheme used for marketplace requests: Kerberos, or the dev header. |
-| `marketplace account` | Who the server says you are.                                           |
-| `namespace`           | Your default publish namespace: your lowercase account name.           |
-| `publishes to`        | Every namespace you may publish to, including allowlisted lanes.       |
-| `admin`               | Whether the server grants administrative rights.                       |
+| Line                  | Meaning                                                                                      |
+| --------------------- | -------------------------------------------------------------------------------------------- |
+| `host account`        | Who the process runs as, according to Windows.                                               |
+| `identity`            | The scheme used for marketplace requests: Kerberos, or the dev header.                       |
+| `marketplace account` | Who the server says you are.                                                                 |
+| `namespace`           | Your default publish namespace: your lowercase account name.                                 |
+| `publishes to`        | Every namespace you may publish to: allowlisted lanes and team namespaces your groups own.   |
+| `groups`              | The AD groups the server resolved for you. Empty means group-restricted packages are hidden. |
+| `admin`               | Whether the server grants administrative rights.                                             |
 
 ## `validate <path>`
 
@@ -131,6 +134,27 @@ installed jacob/review (Review workflow)
 Backup lines appear only when an existing destination had to be preserved. An unknown ID fails with `<id> is not in the catalog. Try 'agent-plugins search'.`
 
 There is no `uninstall` command; uninstall from the app.
+
+## `access <namespace>[/<package>]`
+
+Shows or replaces who may see and install a namespace or one package. You must own the namespace: your own, a team namespace your group owns, or any namespace as an admin.
+
+| Argument               | Meaning                                                                           |
+| ---------------------- | --------------------------------------------------------------------------------- |
+| `<ns>` or `<ns>/<pkg>` | The target. A package list replaces its namespace list for that package.          |
+| `--user <account>`     | Repeatable. `CORP\jane`, `jane@corp.example`, or `jane` all name the same person. |
+| `--group <name>`       | Repeatable. An AD group name, matched case-insensitively.                         |
+| `--public`             | Clears the list. Cannot be combined with `--user` or `--group`.                   |
+
+With no options it prints the current list. With any option it replaces the whole list and prints the result:
+
+```text
+access jacob/review
+  users:  CORP\jane
+  groups: Data Engineering
+```
+
+A public target prints `public`. A namespace or package with a list is hidden from everyone not on it: it leaves their catalog, `search`, and the app, and anything they installed from it shows **Removed Upstream** until they uninstall it. Owners and admins always see their own.
 
 ## Environment
 

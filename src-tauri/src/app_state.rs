@@ -53,6 +53,7 @@ pub(crate) struct MarketplaceMeta {
     pub(crate) published_at: String,
     pub(crate) installs: u64,
     pub(crate) installed_base: u64,
+    pub(crate) restricted: bool,
 }
 
 impl MarketplaceMeta {
@@ -66,6 +67,7 @@ impl MarketplaceMeta {
             published_at: package.published_at.clone(),
             installs: package.installs,
             installed_base: package.installed_base,
+            restricted: package.restricted,
         }
     }
 }

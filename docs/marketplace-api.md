@@ -11,7 +11,13 @@ Every endpoint except `GET /api/health` requires an authenticated principal.
 | `Negotiate` | Production. Kerberos validated with a keytab. | `Authorization: Negotiate <token>` |
 | `DevHeader` | `ASPNETCORE_ENVIRONMENT=Development` only.    | `X-Dev-User: <username>`           |
 
-The principal's namespace is its lowercase sAMAccountName. Group claims come from LDAP when `Auth:Ldap:Domain` is configured.
+The principal's namespace is its lowercase sAMAccountName. Group claims come from LDAP when `Auth:LdapDomain` is configured; the claim value is the AD group's CN, and every group comparison is case-insensitive. A configured or listed account matches by username, so `CORP\jane`, `jane@corp.example`, and `jane` name the same person.
+
+### Access
+
+Who may see and install what is server policy ([ADR 0005](decisions/0005-marketplace-access-control.md)). A namespace (`ns`) or one package (`ns/packageId`) may carry an allowlist of accounts and groups. No list means public. A package list replaces its namespace list. Owners of a namespace and admins always see it. Everything the caller may not see answers `404`, never `403`, so the desktop app treats it as gone.
+
+A **team namespace** is a `source.id` owned by an AD group: `Auth:TeamNamespaces` lists `{ namespace, group, displayName }` entries, and every member of `group` may publish and yank there and manage its access lists. Who may _read_ a team namespace is a separate access list. Use a `team-` prefix so a team never collides with a person's derived namespace.
 
 ## Endpoints
 
@@ -30,16 +36,20 @@ Anonymous. Returns server version and client version policy.
 Returns the caller's identity.
 
 ```json
-{ "account": "CORP\\jacob", "namespace": "jacob", "displayName": "Jacob Ragsdale", "namespaces": ["jacob"], "admin": false }
+{ "account": "CORP\\jacob", "namespace": "jacob", "displayName": "Jacob Ragsdale", "namespaces": ["jacob", "team-data"], "admin": false, "groups": ["Data Engineering"] }
 ```
+
+`namespaces` includes every team namespace the caller's groups own; `groups` is the resolved group claims, useful when a team-restricted package is unexpectedly missing.
 
 ### `GET /api/catalog`
 
-Returns an `agent-plugins-repository.json` document. Each listed source is one namespace with at least one non-yanked package. The listing carries the optional marketplace fields `publisher`, `packageCount`, and `updatedAt`. `ETag` is the digest of the document.
+Returns an `agent-plugins-repository.json` document. Each listed source is one namespace with at least one non-yanked package the caller may see; `packageCount` counts only those. The listing carries the optional marketplace fields `publisher`, `packageCount`, and `updatedAt`. `ETag` is the digest of the document.
 
 ### `GET /api/sources/{namespace}/archive`
 
 Returns the namespace's current source archive: a zip whose root `agent-plugins.json` has `source.id` equal to the namespace and one package per latest non-yanked version. Supports `HEAD`, `ETag`, and `Last-Modified`.
+
+A caller who may see only some of the namespace's packages receives an archive holding just those. Its `ETag` is the digest of that subset, stable for the same subset of the same archive; `Last-Modified` is the full archive's. A caller who may see none answers `404`.
 
 ### `GET /api/index`
 
@@ -61,17 +71,18 @@ Per-package marketplace metadata joined by canonical ID.
       "tags": ["review", "git"],
       "publishedAt": "2026-08-28T19:12:03Z",
       "installs": 34,
-      "installedBase": 12
+      "installedBase": 12,
+      "restricted": false
     }
   ]
 }
 ```
 
-`lane` is `official` or `personal`. `installs` counts install events over all time; `installedBase` counts principals whose latest heartbeat includes the package.
+Only packages the caller may see are listed. `lane` is `official`, `team`, or `personal`. `restricted` is true when the package or its namespace carries an access list. `installs` counts install events over all time; `installedBase` counts principals whose latest heartbeat includes the package.
 
 ### `GET /api/packages/{namespace}/{packageId}`
 
-Returns the package's versions, newest first, with `yanked` flags and each version's `archiveDigest`.
+Returns the package's versions, newest first, with `yanked` flags and each version's `archiveDigest`. `404` when the caller may not see the package.
 
 ### `POST /api/packages/{namespace}/{packageId}/versions`
 
@@ -98,7 +109,21 @@ Returns `202`. The server deduplicates by `(principal, kind, occurredAt, package
 
 ### `GET /api/stats/packages/{namespace}/{packageId}`
 
-Publisher-facing statistics: installs by day for 90 days, installed base, and agent mix.
+Publisher-facing statistics: installs by day for 90 days, installed base, and agent mix. `404` when the caller may not see the package.
+
+### `GET /api/access/{namespace}` and `GET /api/access/{namespace}/{packageId}`
+
+The allowlist for a namespace or a package. Owner or admin only; anyone else gets `403`.
+
+```json
+{ "target": "jacob/review", "users": ["CORP\\jane"], "groups": ["Data Engineering"] }
+```
+
+Empty lists mean public.
+
+### `PUT /api/access/{namespace}` and `PUT /api/access/{namespace}/{packageId}`
+
+Replaces the allowlist. Body `{ "users": [...], "groups": [...] }`; both lists empty makes the target public again. Entries are trimmed and deduplicated case-insensitively, at most 256 characters each and 200 in total. Owner or admin only (`403`); a package target must be published (`404`). Returns the resulting document. The CLI verb is `agent-plugins access`.
 
 ### `GET /api/admin/summary`
 
@@ -114,15 +139,17 @@ Errors are RFC 9457 problem documents. `401` carries `WWW-Authenticate: Negotiat
 
 ## Configuration
 
-| Setting                                   | Meaning                                                              |
-| ----------------------------------------- | -------------------------------------------------------------------- |
-| `ConnectionStrings:Marketplace`           | PostgreSQL connection string.                                        |
-| `ArtifactKeeper:BaseUrl`                  | Artifact Keeper API base, for example `http://artifact-keeper:8080`. |
-| `ArtifactKeeper:Repository`               | Generic repository name, for example `files`.                        |
-| `ArtifactKeeper:Prefix`                   | Path prefix inside the repository, for example `marketplace`.        |
-| `ArtifactKeeper:Username` / `Password`    | Service credential used to obtain a bearer token.                    |
-| `Auth:Ldap:Domain`                        | Optional. Enables LDAP group claims for Negotiate.                   |
-| `Auth:AdminGroup`                         | AD group or `DevHeader` username list that may call `/api/admin/*`.  |
-| `Auth:OfficialPublishers`                 | Principals that may publish under `official`.                        |
-| `Client:MinimumVersion` / `LatestVersion` | Values returned by `/api/health`.                                    |
-| `Validator:Path`                          | Path to the `validate-source` binary inside the image.               |
+| Setting                                   | Meaning                                                                                        |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `ConnectionStrings:Marketplace`           | PostgreSQL connection string.                                                                  |
+| `ArtifactKeeper:BaseUrl`                  | Artifact Keeper API base, for example `http://artifact-keeper:8080`.                           |
+| `ArtifactKeeper:Repository`               | Generic repository name, for example `files`.                                                  |
+| `ArtifactKeeper:Prefix`                   | Path prefix inside the repository, for example `marketplace`.                                  |
+| `ArtifactKeeper:Username` / `Password`    | Service credential used to obtain a bearer token.                                              |
+| `Auth:LdapDomain`                         | Optional. Enables LDAP group claims for Negotiate.                                             |
+| `Auth:AdminGroup`                         | AD group whose members may call `/api/admin/*`.                                                |
+| `Auth:AdminAccounts`                      | Accounts that may call `/api/admin/*`.                                                         |
+| `Auth:OfficialPublishers`                 | Principals that may publish under `official`.                                                  |
+| `Auth:TeamNamespaces`                     | `[{ namespace, group, displayName }]`: team namespaces owned by a group. Validated at startup. |
+| `Client:MinimumVersion` / `LatestVersion` | Values returned by `/api/health`.                                                              |
+| `Validator:Path`                          | Path to the `validate-source` binary inside the image.                                         |

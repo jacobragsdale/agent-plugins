@@ -126,6 +126,23 @@ public sealed class Heartbeat
     public DateTime ReceivedAt { get; set; }
 }
 
+/// <summary>
+/// Who may see and install a namespace (<c>ns</c>) or one package (<c>ns/package</c>). No row means
+/// public; a row is an allowlist of accounts and AD groups.
+/// </summary>
+public sealed class AccessRule
+{
+    public required string Target { get; set; }
+
+    public string[] Users { get; set; } = [];
+
+    public string[] Groups { get; set; } = [];
+
+    public required string UpdatedBy { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+}
+
 public sealed class PackageReport
 {
     public long Id { get; set; }

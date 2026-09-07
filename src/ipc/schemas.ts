@@ -3,7 +3,7 @@ import { z } from "zod";
 export const itemStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "conflict", "sourceConflict", "partiallyInstalled"]);
 export const sourceStatusSchema = z.enum(["fresh", "cached", "error"]);
 export const catalogErrorSchema = z.strictObject({ path: z.string().min(1), message: z.string().min(1) }).readonly();
-export const targetIdSchema = z.enum(["cursor", "claude-code", "codex", "opencode", "grok-build", "github-copilot"]);
+export const targetIdSchema = z.enum(["cursor", "claude-code", "codex", "opencode", "grok-build", "github-copilot", "claude-desktop", "chatgpt", "m365-copilot"]);
 export const agentProfileSchema = z
   .strictObject({
     targetId: targetIdSchema,
@@ -47,7 +47,8 @@ export const marketplaceMetaSchema = z
     tags: z.array(z.string().min(1)).readonly(),
     publishedAt: z.string().min(1),
     installs: z.number().int().nonnegative(),
-    installedBase: z.number().int().nonnegative()
+    installedBase: z.number().int().nonnegative(),
+    restricted: z.boolean()
   })
   .readonly();
 export const itemSchema = z

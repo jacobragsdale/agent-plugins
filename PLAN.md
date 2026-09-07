@@ -13,7 +13,6 @@ See [ADR 0003](docs/decisions/0003-artifact-only-catalog.md), [publish a catalog
 ## Later, not this cut
 
 - Stored Nexus credentials or SSO for restricted artifacts.
-- Package-level access rules (`source.id` + `package.id`), not Git ACLs.
 - `http://` LAN Nexus.
 - Maven coordinates, version pins, user-authored URLs, a second user-facing catalog.
 - Redeploy-in-place of `…-latest.zip` without a delete (Nexus write policy).

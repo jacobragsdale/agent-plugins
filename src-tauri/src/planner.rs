@@ -118,7 +118,7 @@ fn plan_portable(
         .collect::<Vec<_>>();
     if enabled.is_empty() {
         return Err(
-            "No supported coding agent was detected. Install Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot first."
+            "No supported AI app was detected. Install Claude Desktop, ChatGPT, or Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then try again."
                 .to_string(),
         );
     }
@@ -363,6 +363,7 @@ mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
+            onedrive_commercial: None,
         }
     }
 
@@ -402,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_skill_projection_coalesces_five_agents_skills_root() {
+    fn shared_skill_projection_coalesces_shared_agents_consumers() {
         let root = tempfile::tempdir().expect("root");
         let (snapshot, item) = review_snapshot(root.path());
         assert_eq!(item.components[0].kind, CatalogComponentKind::Skill);
@@ -412,6 +413,7 @@ mod tests {
             TargetId::OpenCode,
             TargetId::GrokBuild,
             TargetId::GithubCopilot,
+            TargetId::Chatgpt,
         ]
         .into_iter()
         .map(|target_id| AgentProfile {
@@ -431,7 +433,7 @@ mod tests {
                 .expect("resource")
                 .consumer_binding_ids
                 .len(),
-            5
+            6
         );
         assert!(plan
             .resources
@@ -479,7 +481,7 @@ mod tests {
         assert!(
             plan_portable(&paths(root.path()), &snapshot, &item, &[], None)
                 .expect_err("no agents")
-                .contains("No supported coding agent was detected")
+                .contains("No supported AI app was detected")
         );
     }
 

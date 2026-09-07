@@ -1,6 +1,6 @@
 # Agent Plugins
 
-Agent Plugins is a desktop app and an internal marketplace. People publish Agent Skills and MCP server configurations under their own namespace; anyone can find them, read them, and install them onto the coding agents on their machine: Cursor, Claude Code, Codex, OpenCode, Grok Build, and GitHub Copilot.
+Agent Plugins is a desktop app and an internal marketplace. People publish Agent Skills and MCP server configurations under their own namespace; anyone can find them, read them, and install them onto the AI apps on their machine: Claude Desktop, ChatGPT, Microsoft 365 Copilot, Cursor, Claude Code, Codex, OpenCode, Grok Build, and GitHub Copilot.
 
 A **source** is an HTTPS archive with `agent-plugins.json` at its root. That file is the source manifest: it names the source and lists packages of skills and MCP servers. The **marketplace server** publishes one source per publisher namespace and a catalog that lists them; the app subscribes to that catalog, so every published package appears without configuration. Identity is the Windows logon. The server records installs and heartbeats so publishers see how many people use their packages.
 

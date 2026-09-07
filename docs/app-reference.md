@@ -37,26 +37,29 @@ The badge on a card, and the button beside it.
 | `updateAvailable`    | Update Available    | Update            | The source publishes a different digest for this package.                                                                                   |
 | `partiallyInstalled` | Partially Installed | Install remaining | Some components are installed; others are not, or an owned resource no longer matches the plan.                                             |
 | `modified`           | Local Changes       | Protected         | An owned file was edited outside Agent Plugins. Disabled: it will not overwrite your edit.                                                  |
-| `removed`            | Removed Upstream    | Uninstall         | Installed, but the source no longer publishes it.                                                                                           |
+| `removed`            | Removed Upstream    | Uninstall         | Installed, but the source no longer publishes it, or you may no longer see it.                                                              |
 | `sourceConflict`     | Owned Elsewhere     | Owned Elsewhere   | Another source already owns this package ID. Disabled.                                                                                      |
 | `conflict`           | Unmanaged Conflict  | Replace…          | Reserved for an unmanaged file at a destination. The current build reports that as an install error instead, so this state does not appear. |
 
-Component rows carry the same states. A package whose components are all skills marked `disable-model-invocation` also shows **Manual Invocation**; a package published to the official lane shows **Official**.
+Component rows carry the same states. A package whose components are all skills marked `disable-model-invocation` also shows **Manual Invocation**; a package published to the official lane shows **Official**, one from a team namespace shows **Team**, and one whose namespace or package carries an access list shows **Restricted**.
 
 An update applies only the components already installed on that package. Installing a component you skipped the first time is a separate action.
 
 ## Destinations
 
-| Target         | Skills             | MCP configuration            |
-| -------------- | ------------------ | ---------------------------- |
-| Cursor         | `~/.agents/skills` | `~/.cursor/mcp.json`         |
-| Claude Code    | `~/.claude/skills` | `~/.claude.json`             |
-| Codex          | `~/.agents/skills` | `~/.codex/config.toml`       |
-| OpenCode       | `~/.agents/skills` | user `opencode.jsonc`        |
-| Grok Build     | `~/.agents/skills` | `~/.grok/config.toml`        |
-| GitHub Copilot | `~/.agents/skills` | `~/.copilot/mcp-config.json` |
+| Target                | Skills                               | MCP configuration                                 |
+| --------------------- | ------------------------------------ | ------------------------------------------------- |
+| Cursor                | `~/.agents/skills`                   | `~/.cursor/mcp.json`                              |
+| Claude Code           | `~/.claude/skills`                   | `~/.claude.json`                                  |
+| Codex                 | `~/.agents/skills`                   | `~/.codex/config.toml`                            |
+| OpenCode              | `~/.agents/skills`                   | user `opencode.jsonc`                             |
+| Grok Build            | `~/.agents/skills`                   | `~/.grok/config.toml`                             |
+| GitHub Copilot        | `~/.agents/skills`                   | `~/.copilot/mcp-config.json`                      |
+| Claude Desktop        | Not installable; upload at claude.ai | `claude_desktop_config.json` (stdio servers only) |
+| ChatGPT               | `~/.agents/skills`                   | `~/.codex/config.toml`                            |
+| Microsoft 365 Copilot | OneDrive `Documents/Cowork/skills`   | None                                              |
 
-A skill directory is named `<sourceId>-<skillName>`. Every target except Claude Code shares one copy under `~/.agents/skills`; the ledger records each target as a consumer, and the directory is deleted only when the last one goes away. Shared configuration files are edited in place, preserving comments where the format allows, and untouched keys stay untouched.
+A skill directory is named `<sourceId>-<skillName>`. Every target except Claude Code and Microsoft 365 Copilot shares one copy under `~/.agents/skills`; the ledger records each target as a consumer, and the directory is deleted only when the last one goes away. Shared configuration files are edited in place, preserving comments where the format allows, and untouched keys stay untouched.
 
 Replacing an unmanaged destination, or force-removing modified content, first copies the original to `~/.agents/.agent-plugins-backups`. The app reports the backup path when it makes one.
 
@@ -78,6 +81,7 @@ MCP approval is per operation and is never inferred. A background update that wo
 - **Sync.** Every 15 minutes, and on **Refresh** or **Check for Updates Now**. It runs preflight, refreshes the catalog, then the sources, subscribes to any catalog source not yet added, and posts a `heartbeat` event.
 - **Updates.** Installed packages whose state is `updateAvailable` are updated during sync, without approval, so anything touching an MCP server is left pending and reported. Nothing is updated while no agent is detected.
 - **Offline.** A failed refresh keeps the last validated snapshot. A failed catalog fetch does not stop source refresh.
+- **Gone sources.** A source whose archive answers 404 (unpublished, or no longer visible to you) drops its cached snapshot. Its installed packages show **Removed Upstream**; the source retires itself once nothing from it is installed.
 - **Events.** `install`, `update`, `uninstall`, and `heartbeat` are posted to the marketplace from a background thread. Reporting never blocks or fails an operation.
 
 ## State on disk

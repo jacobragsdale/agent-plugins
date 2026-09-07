@@ -82,11 +82,37 @@
         "responses": { "200": { "description": "OK" } }
       }
     },
+    "/api/access/{ns}/{packageId}": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Access",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      },
+      "put": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "SetAccess",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AccessRequest" } } }, "required": true },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
     "/api/admin/summary": { "get": { "tags": ["Marketplace.Api"], "operationId": "AdminSummary", "responses": { "200": { "description": "OK" } } } },
     "/api/admin/reports": { "get": { "tags": ["Marketplace.Api"], "operationId": "AdminReports", "responses": { "200": { "description": "OK" } } } }
   },
   "components": {
     "schemas": {
+      "AccessRequest": {
+        "required": ["users", "groups"],
+        "type": "object",
+        "properties": { "users": { "type": ["null", "array"], "items": { "type": "string" } }, "groups": { "type": ["null", "array"], "items": { "type": "string" } } }
+      },
       "ClientEventDto": {
         "required": ["kind", "occurredAt", "clientVersion", "osBuild", "agents", "installed", "checks", "packageId", "version", "fromVersion", "toVersion"],
         "type": "object",

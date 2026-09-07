@@ -149,7 +149,7 @@ The file uses the closed Agent Plugins 1.0.0 `mcp.json` shape. That is a portabl
 | `$schema`    | Required. Must be exactly `https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`. |
 | `mcpServers` | Required object with at least one entry. Keys are server names, 1–64 characters.     |
 
-Each `mcpServers` value is tagged by `type`. Allowed values are `stdio`, `streamable-http`, and `sse`. A target adapter may report a transport unsupported for its dialect. Codex, OpenCode, and Grok Build report `sse` as unsupported.
+Each `mcpServers` value is tagged by `type`. Allowed values are `stdio`, `streamable-http`, and `sse`. A target adapter may report a transport unsupported for its dialect. Codex, ChatGPT, OpenCode, and Grok Build report `sse` as unsupported. Claude Desktop accepts only `stdio`.
 
 If the document declares one server, the catalog component keeps the package-local component ID. If it declares several, each server becomes `{component-id}-{server-name}`. The installed registration key is `source-id-server-name`.
 

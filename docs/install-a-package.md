@@ -5,7 +5,7 @@ This tutorial takes you from a freshly installed Agent Plugins to a skill your c
 You need:
 
 - Windows 11 on the corporate domain.
-- Agent Plugins installed, and at least one of Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot.
+- Agent Plugins installed, and at least one of Claude Desktop, ChatGPT, Microsoft 365 Copilot, Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot.
 - Nothing else. Your Windows logon is the sign-in; there is no account to create.
 
 ## Open the app and read the header
@@ -72,6 +72,9 @@ Files on disk prove Agent Plugins did its job. They do not prove your agent noti
 - **Claude Code** — start a new session; the skill appears in its skills listing.
 - **Codex** — start a fresh session.
 - **OpenCode**, **Grok Build**, **GitHub Copilot** — use that client's own configuration or skills listing.
+- **ChatGPT** — quit and reopen the app, switch to Codex, and type `$` to see the skill.
+- **Microsoft 365 Copilot** — wait for OneDrive to finish syncing, then start a new Cowork conversation.
+- **Claude Desktop** — skills are not installed to disk; the Chat and Cowork tabs use the skills enabled on your claude.ai account under Customize > Skills. MCP servers from the config file appear under Settings > Developer.
 
 Your skill should appear under its prefixed name. That round trip — install, reload, confirm — is the one to repeat whenever you doubt an install.
 

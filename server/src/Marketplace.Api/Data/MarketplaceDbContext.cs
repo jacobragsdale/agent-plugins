@@ -18,6 +18,8 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
 
     public DbSet<PackageReport> Reports => Set<PackageReport>();
 
+    public DbSet<AccessRule> AccessRules => Set<AccessRule>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Publisher>(entity =>
@@ -80,6 +82,13 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
             entity.Property(heartbeat => heartbeat.ClientVersion).HasMaxLength(64);
             entity.Property(heartbeat => heartbeat.OsBuild).HasMaxLength(120);
             entity.Property(heartbeat => heartbeat.ChecksJson).HasColumnType("jsonb");
+        });
+
+        modelBuilder.Entity<AccessRule>(entity =>
+        {
+            entity.HasKey(rule => rule.Target);
+            entity.Property(rule => rule.Target).HasMaxLength(81);
+            entity.Property(rule => rule.UpdatedBy).HasMaxLength(256);
         });
 
         modelBuilder.Entity<PackageReport>(entity =>

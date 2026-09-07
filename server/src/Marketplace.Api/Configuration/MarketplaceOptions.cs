@@ -52,11 +52,27 @@ public sealed class AuthOptions
     /// <summary>Accounts that may publish under the <c>official</c> namespace.</summary>
     public string[] OfficialPublishers { get; set; } = [];
 
+    /// <summary>Namespaces owned by an AD group rather than one account. Members publish and yank there.</summary>
+    public TeamNamespaceOptions[] TeamNamespaces { get; set; } = [];
+
     /// <summary>
     /// Trust <c>X-Dev-User</c>. Forced on in Development, forced off otherwise; this setting
     /// exists so a test host can turn it on explicitly.
     /// </summary>
     public bool AllowDevHeader { get; set; }
+}
+
+/// <summary>A shared publishing namespace keyed to an AD group.</summary>
+public sealed class TeamNamespaceOptions
+{
+    /// <summary>The <c>source.id</c>, for example <c>team-data</c>.</summary>
+    public string Namespace { get; set; } = string.Empty;
+
+    /// <summary>The group claim (AD group CN) whose members own the namespace.</summary>
+    public string Group { get; set; } = string.Empty;
+
+    /// <summary>Shown as the publisher of every package in the namespace.</summary>
+    public string DisplayName { get; set; } = string.Empty;
 }
 
 public sealed class ClientOptions

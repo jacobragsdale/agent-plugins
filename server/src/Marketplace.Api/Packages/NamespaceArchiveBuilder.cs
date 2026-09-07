@@ -51,6 +51,54 @@ public static class NamespaceArchiveBuilder
         return new BuiltArchive(bytes, Convert.ToHexStringLower(SHA256.HashData(bytes)), ordered.Length);
     }
 
+    /// <summary>
+    /// The subset of a built namespace archive that lists and contains only <paramref name="keepPackageIds"/>.
+    /// Entries are copied in stored order with the same fixed timestamps, so one subset always has one digest.
+    /// </summary>
+    // ponytail: re-zips on every request for a partially visible namespace; cache by (namespace, digest, kept ids) if it shows in profiles.
+    public static BuiltArchive Filter(byte[] fullArchive, IReadOnlySet<string> keepPackageIds)
+    {
+        using var input = ArchiveInspector.OpenZip(new MemoryStream(fullArchive, writable: false));
+        var manifestEntry = input.GetEntry(ArchiveInspector.ManifestFile)
+            ?? throw new InvalidOperationException("The namespace archive has no manifest.");
+        JsonObject manifest;
+        using (var manifestStream = manifestEntry.Open())
+        {
+            manifest = JsonNode.Parse(manifestStream) as JsonObject
+                ?? throw new InvalidOperationException("The namespace archive manifest is not an object.");
+        }
+
+        var packages = manifest["packages"] as JsonArray
+            ?? throw new InvalidOperationException("The namespace archive manifest has no packages.");
+        var kept = packages.OfType<JsonObject>()
+            .Where(package => package["id"] is JsonValue id && id.TryGetValue<string>(out var text) && keepPackageIds.Contains(text))
+            .Select(package => package.DeepClone())
+            .ToArray();
+        manifest["packages"] = new JsonArray(kept);
+
+        using var output = new MemoryStream();
+        using (var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            WriteEntry(zip, ArchiveInspector.ManifestFile, Encoding.UTF8.GetBytes(manifest.ToJsonString(ManifestJson) + "\n"), 0);
+            foreach (var entry in input.Entries)
+            {
+                var slash = entry.FullName.IndexOf('/');
+                if (slash <= 0 || !keepPackageIds.Contains(entry.FullName[..slash]))
+                {
+                    continue;
+                }
+
+                using var content = entry.Open();
+                using var buffer = new MemoryStream();
+                content.CopyTo(buffer);
+                WriteEntry(zip, entry.FullName, buffer.ToArray(), entry.ExternalAttributes);
+            }
+        }
+
+        var bytes = output.ToArray();
+        return new BuiltArchive(bytes, Convert.ToHexStringLower(SHA256.HashData(bytes)), kept.Length);
+    }
+
     private static JsonNode PrefixedManifest(string packageId, JsonObject packageManifest)
     {
         var clone = (JsonObject)packageManifest.DeepClone();

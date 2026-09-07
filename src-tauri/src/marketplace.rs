@@ -15,6 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const DEV_USER_ENV: &str = "AGENT_PLUGINS_DEV_USER";
+/// Comma-separated groups sent as `X-Dev-Groups` with the development header,
+/// so team rules can be exercised where there is no domain.
+pub(crate) const DEV_GROUPS_ENV: &str = "AGENT_PLUGINS_DEV_GROUPS";
 const INDEX_CACHE_FILE: &str = "marketplace-index.json";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -39,6 +42,8 @@ pub(crate) struct Me {
     pub(crate) namespaces: Vec<String>,
     #[serde(default)]
     pub(crate) admin: bool,
+    #[serde(default)]
+    pub(crate) groups: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -68,6 +73,9 @@ pub(crate) struct IndexPackage {
     pub(crate) installs: u64,
     #[serde(default)]
     pub(crate) installed_base: u64,
+    /// The package or its namespace has an access list; the caller is on it.
+    #[serde(default)]
+    pub(crate) restricted: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -126,7 +134,15 @@ pub(crate) fn auth_headers(url: &str) -> Result<Vec<(&'static str, String)>, Str
         return Ok(Vec::new());
     }
     match auth_mode() {
-        AuthMode::DevHeader(account) => Ok(vec![("X-Dev-User", account)]),
+        AuthMode::DevHeader(account) => {
+            let mut headers = vec![("X-Dev-User", account)];
+            if let Ok(groups) = std::env::var(DEV_GROUPS_ENV) {
+                if !groups.trim().is_empty() {
+                    headers.push(("X-Dev-Groups", groups.trim().to_string()));
+                }
+            }
+            Ok(headers)
+        }
         AuthMode::Negotiate(_) => {
             let host = url::Url::parse(url)
                 .ok()
@@ -149,7 +165,7 @@ pub(crate) fn authorize(builder: RequestBuilder, url: &str) -> Result<RequestBui
     Ok(builder)
 }
 
-fn client() -> Result<Client, String> {
+pub(crate) fn client() -> Result<Client, String> {
     Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .user_agent(format!("agent-plugins/{CLIENT_VERSION}"))
@@ -157,7 +173,7 @@ fn client() -> Result<Client, String> {
         .map_err(|error| format!("Could not create the HTTPS client: {error}"))
 }
 
-fn base_url() -> Result<&'static str, String> {
+pub(crate) fn base_url() -> Result<&'static str, String> {
     locator::marketplace_base_url().ok_or_else(|| "No marketplace is configured.".to_string())
 }
 
@@ -562,12 +578,20 @@ mod tests {
     fn dev_user_env_forces_the_development_header() {
         let headers = {
             std::env::set_var(DEV_USER_ENV, "TEST\\someone");
+            std::env::set_var(DEV_GROUPS_ENV, " Platform Team,Ops ");
             let headers = auth_headers(&format!("{}/api/me", locator::MARKETPLACE_URL));
             std::env::remove_var(DEV_USER_ENV);
+            std::env::remove_var(DEV_GROUPS_ENV);
             headers
         }
         .expect("headers");
-        assert_eq!(headers, vec![("X-Dev-User", "TEST\\someone".to_string())]);
+        assert_eq!(
+            headers,
+            vec![
+                ("X-Dev-User", "TEST\\someone".to_string()),
+                ("X-Dev-Groups", "Platform Team,Ops".to_string()),
+            ]
+        );
         assert!(auth_headers("https://example.com/other.zip")
             .expect("headers")
             .is_empty());

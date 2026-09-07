@@ -585,7 +585,7 @@ fn remove_leftover_source_skills(
     }
     let prefix = format!("{}-", source.source_id);
     let mut backup_paths = Vec::new();
-    for root in crate::adapters::managed_skill_roots(&paths.home) {
+    for root in crate::adapters::managed_skill_roots(paths) {
         let Ok(entries) = fs::read_dir(&root) else {
             continue;
         };
@@ -1120,6 +1120,7 @@ mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
+            onedrive_commercial: None,
         }
     }
 

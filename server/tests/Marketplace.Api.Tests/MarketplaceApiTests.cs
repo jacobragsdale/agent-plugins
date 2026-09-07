@@ -213,4 +213,173 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
         Assert.True(summary.GetProperty("activeUsers").GetProperty("day").GetInt32() >= 2);
         Assert.Equal(2, summary.GetProperty("preflightFailures").GetProperty("host.clock").GetInt32());
     }
+
+    [Fact]
+    public async Task Namespace_access_rule_hides_it_from_everyone_not_listed()
+    {
+        using var owner = factory.ClientFor("TEST\\gatekeeper");
+        using var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("gatekeeper", "tool"), "1.0.0");
+        Assert.Equal(HttpStatusCode.Created, (await owner.PostAsync("/api/packages/gatekeeper/tool/versions", form, TestContext.Current.CancellationToken)).StatusCode);
+        var set = await owner.PutAsJsonAsync("/api/access/gatekeeper", new { users = new[] { "TEST\\friend", "  " }, groups = new[] { "Platform Team" } }, Json, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, set.StatusCode);
+        var document = await set.Content.ReadFromJsonAsync<JsonElement>(Json, TestContext.Current.CancellationToken);
+        Assert.Equal("gatekeeper", document.GetProperty("target").GetString());
+        Assert.Equal(["TEST\\friend"], document.GetProperty("users").EnumerateArray().Select(user => user.GetString()).ToArray());
+
+        using var stranger = factory.ClientFor("TEST\\stranger2");
+        await AssertHidden(stranger, "gatekeeper", "tool");
+        using var member = factory.ClientFor("TEST\\member", "platform team");
+        await AssertVisible(member, "gatekeeper", "tool");
+        using var friend = factory.ClientFor("TEST\\Friend");
+        await AssertVisible(friend, "gatekeeper", "tool");
+        using var friendUpn = factory.ClientFor("friend@test.example");
+        await AssertVisible(friendUpn, "gatekeeper", "tool");
+        using var admin = factory.ClientFor("TEST\\admin");
+        await AssertVisible(admin, "gatekeeper", "tool");
+        await AssertVisible(owner, "gatekeeper", "tool");
+
+        var index = await owner.GetFromJsonAsync<JsonElement>("/api/index", Json, TestContext.Current.CancellationToken);
+        var entry = index.GetProperty("packages").EnumerateArray().Single(candidate => candidate.GetProperty("id").GetString() == "gatekeeper/tool");
+        Assert.True(entry.GetProperty("restricted").GetBoolean());
+        var read = await member.GetAsync("/api/access/gatekeeper", TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.Forbidden, read.StatusCode);
+        var mine = await owner.GetFromJsonAsync<JsonElement>("/api/access/gatekeeper", Json, TestContext.Current.CancellationToken);
+        Assert.Equal(["Platform Team"], mine.GetProperty("groups").EnumerateArray().Select(group => group.GetString()).ToArray());
+
+        Assert.Equal(HttpStatusCode.Forbidden, (await stranger.PutAsJsonAsync("/api/access/gatekeeper", new { users = new[] { "TEST\\stranger2" } }, Json, TestContext.Current.CancellationToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await owner.PutAsJsonAsync("/api/access/gatekeeper/missing", new { users = new[] { "TEST\\friend" } }, Json, TestContext.Current.CancellationToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await owner.PutAsJsonAsync("/api/access/gatekeeper", new { users = new[] { new string('x', 300) } }, Json, TestContext.Current.CancellationToken)).StatusCode);
+
+        var cleared = await owner.PutAsJsonAsync("/api/access/gatekeeper", new { users = Array.Empty<string>(), groups = Array.Empty<string>() }, Json, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, cleared.StatusCode);
+        await AssertVisible(stranger, "gatekeeper", "tool");
+    }
+
+    [Fact]
+    public async Task Package_rule_overrides_namespace_rule_and_filters_the_archive()
+    {
+        using var owner = factory.ClientFor("TEST\\partial");
+        foreach (var packageId in new[] { "open", "secret" })
+        {
+            using var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("partial", packageId), "1.0.0");
+            Assert.Equal(HttpStatusCode.Created, (await owner.PostAsync($"/api/packages/partial/{packageId}/versions", form, TestContext.Current.CancellationToken)).StatusCode);
+        }
+
+        Assert.Equal(HttpStatusCode.OK, (await owner.PutAsJsonAsync("/api/access/partial", new { groups = new[] { "Platform Team" } }, Json, TestContext.Current.CancellationToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await owner.PutAsJsonAsync("/api/access/partial/secret", new { users = new[] { "carol" } }, Json, TestContext.Current.CancellationToken)).StatusCode);
+        var full = await owner.GetAsync("/api/sources/partial/archive", TestContext.Current.CancellationToken);
+        var fullEtag = full.Headers.ETag?.Tag;
+        Assert.NotNull(fullEtag);
+
+        using var member = factory.ClientFor("TEST\\teammate", "Platform Team");
+        Assert.Equal(1, await PackageCount(member, "partial"));
+        var memberIndex = await member.GetFromJsonAsync<JsonElement>("/api/index", Json, TestContext.Current.CancellationToken);
+        Assert.Equal(["partial/open"], IndexIds(memberIndex, "partial/"));
+        var first = await member.GetAsync("/api/sources/partial/archive", TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        var etag = first.Headers.ETag?.Tag;
+        Assert.NotNull(etag);
+        Assert.NotEqual(fullEtag, etag);
+        Assert.Equal(full.Content.Headers.LastModified, first.Content.Headers.LastModified);
+        var bytes = await first.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(["open"], await ManifestPackageIds(bytes));
+        using (var zip = new ZipArchive(new MemoryStream(bytes)))
+        {
+            Assert.NotNull(zip.GetEntry("open/skills/open/SKILL.md"));
+            Assert.DoesNotContain(zip.Entries, entry => entry.FullName.StartsWith("secret/", StringComparison.Ordinal));
+        }
+
+        var second = await member.GetAsync("/api/sources/partial/archive", TestContext.Current.CancellationToken);
+        Assert.Equal(etag, second.Headers.ETag?.Tag);
+        using var headRequest = new HttpRequestMessage(HttpMethod.Head, "/api/sources/partial/archive");
+        var head = await member.SendAsync(headRequest, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+        Assert.Equal(etag, head.Headers.ETag?.Tag);
+        Assert.Equal(bytes.Length, head.Content.Headers.ContentLength);
+        using var conditional = new HttpRequestMessage(HttpMethod.Get, "/api/sources/partial/archive");
+        conditional.Headers.IfNoneMatch.ParseAdd(etag);
+        Assert.Equal(HttpStatusCode.NotModified, (await member.SendAsync(conditional, TestContext.Current.CancellationToken)).StatusCode);
+
+        using var carol = factory.ClientFor("TEST\\carol");
+        Assert.Equal(1, await PackageCount(carol, "partial"));
+        var carolIndex = await carol.GetFromJsonAsync<JsonElement>("/api/index", Json, TestContext.Current.CancellationToken);
+        Assert.Equal(["partial/secret"], IndexIds(carolIndex, "partial/"));
+        Assert.Equal(["secret"], await ManifestPackageIds(await carol.GetByteArrayAsync("/api/sources/partial/archive", TestContext.Current.CancellationToken)));
+
+        Assert.Equal(HttpStatusCode.OK, (await owner.PutAsJsonAsync("/api/access/partial", new { }, Json, TestContext.Current.CancellationToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await owner.PutAsJsonAsync("/api/access/partial/secret", new { }, Json, TestContext.Current.CancellationToken)).StatusCode);
+        using var stranger = factory.ClientFor("TEST\\stranger3");
+        Assert.Equal(2, await PackageCount(stranger, "partial"));
+        Assert.Equal(fullEtag, (await stranger.GetAsync("/api/sources/partial/archive", TestContext.Current.CancellationToken)).Headers.ETag?.Tag);
+    }
+
+    [Fact]
+    public async Task Team_namespace_belongs_to_the_group()
+    {
+        using var outsider = factory.ClientFor("TEST\\outsider");
+        using var denied = SamplePackages.PublishForm(SamplePackages.SkillPackage("team-platform", "deploy"), "1.0.0");
+        Assert.Equal(HttpStatusCode.Forbidden, (await outsider.PostAsync("/api/packages/team-platform/deploy/versions", denied, TestContext.Current.CancellationToken)).StatusCode);
+
+        using var member = factory.ClientFor("TEST\\platformer", "platform team");
+        var me = await member.GetFromJsonAsync<JsonElement>("/api/me", Json, TestContext.Current.CancellationToken);
+        Assert.Contains("team-platform", me.GetProperty("namespaces").EnumerateArray().Select(ns => ns.GetString()));
+        Assert.Equal(["platform team"], me.GetProperty("groups").EnumerateArray().Select(group => group.GetString()).ToArray());
+        using var allowed = SamplePackages.PublishForm(SamplePackages.SkillPackage("team-platform", "deploy"), "1.0.0");
+        Assert.Equal(HttpStatusCode.Created, (await member.PostAsync("/api/packages/team-platform/deploy/versions", allowed, TestContext.Current.CancellationToken)).StatusCode);
+
+        var catalog = await outsider.GetFromJsonAsync<JsonElement>("/api/catalog", Json, TestContext.Current.CancellationToken);
+        var source = catalog.GetProperty("sources").EnumerateArray().Single(candidate => candidate.GetProperty("sourceId").GetString() == "team-platform");
+        Assert.Equal("Platform Team", source.GetProperty("publisher").GetString());
+        var index = await outsider.GetFromJsonAsync<JsonElement>("/api/index", Json, TestContext.Current.CancellationToken);
+        var entry = index.GetProperty("packages").EnumerateArray().Single(candidate => candidate.GetProperty("id").GetString() == "team-platform/deploy");
+        Assert.Equal("team", entry.GetProperty("lane").GetString());
+        Assert.Equal("Platform Team", entry.GetProperty("publisher").GetProperty("displayName").GetString());
+        Assert.False(entry.GetProperty("restricted").GetBoolean());
+
+        using var second = factory.ClientFor("TEST\\platformer2", "Platform Team");
+        Assert.Equal(HttpStatusCode.OK, (await second.PutAsJsonAsync("/api/access/team-platform", new { groups = new[] { "Platform Team" } }, Json, TestContext.Current.CancellationToken)).StatusCode);
+        await AssertHidden(outsider, "team-platform", "deploy");
+        await AssertVisible(member, "team-platform", "deploy");
+    }
+
+    private static async Task AssertHidden(HttpClient client, string ns, string packageId)
+    {
+        var catalog = await client.GetFromJsonAsync<JsonElement>("/api/catalog", Json, TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(catalog.GetProperty("sources").EnumerateArray(), source => source.GetProperty("sourceId").GetString() == ns);
+        var index = await client.GetFromJsonAsync<JsonElement>("/api/index", Json, TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(index.GetProperty("packages").EnumerateArray(), package => package.GetProperty("id").GetString() == $"{ns}/{packageId}");
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/sources/{ns}/archive", TestContext.Current.CancellationToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/packages/{ns}/{packageId}", TestContext.Current.CancellationToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/stats/packages/{ns}/{packageId}", TestContext.Current.CancellationToken)).StatusCode);
+    }
+
+    private static async Task AssertVisible(HttpClient client, string ns, string packageId)
+    {
+        var catalog = await client.GetFromJsonAsync<JsonElement>("/api/catalog", Json, TestContext.Current.CancellationToken);
+        Assert.Contains(catalog.GetProperty("sources").EnumerateArray(), source => source.GetProperty("sourceId").GetString() == ns);
+        var index = await client.GetFromJsonAsync<JsonElement>("/api/index", Json, TestContext.Current.CancellationToken);
+        Assert.Contains(index.GetProperty("packages").EnumerateArray(), package => package.GetProperty("id").GetString() == $"{ns}/{packageId}");
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/sources/{ns}/archive", TestContext.Current.CancellationToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/packages/{ns}/{packageId}", TestContext.Current.CancellationToken)).StatusCode);
+    }
+
+    private static async Task<int> PackageCount(HttpClient client, string ns)
+    {
+        var catalog = await client.GetFromJsonAsync<JsonElement>("/api/catalog", Json, TestContext.Current.CancellationToken);
+        return catalog.GetProperty("sources").EnumerateArray().Single(source => source.GetProperty("sourceId").GetString() == ns).GetProperty("packageCount").GetInt32();
+    }
+
+    private static string[] IndexIds(JsonElement index, string prefix) =>
+        index.GetProperty("packages").EnumerateArray()
+            .Select(package => package.GetProperty("id").GetString()!)
+            .Where(id => id.StartsWith(prefix, StringComparison.Ordinal))
+            .ToArray();
+
+    private static async Task<string[]> ManifestPackageIds(byte[] archive)
+    {
+        using var zip = new ZipArchive(new MemoryStream(archive));
+        using var stream = zip.GetEntry("agent-plugins.json")!.Open();
+        var manifest = await JsonDocument.ParseAsync(stream, cancellationToken: TestContext.Current.CancellationToken);
+        return manifest.RootElement.GetProperty("packages").EnumerateArray().Select(package => package.GetProperty("id").GetString()!).ToArray();
+    }
 }

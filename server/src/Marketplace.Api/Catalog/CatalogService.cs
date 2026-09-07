@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Marketplace.Api.Access;
+using Marketplace.Api.Auth;
 using Marketplace.Api.Configuration;
 using Marketplace.Api.Data;
 using Marketplace.Api.Packages;
@@ -26,22 +28,34 @@ public sealed record IndexPackage(
     string[] ComponentKinds,
     DateTime PublishedAt,
     int Installs,
-    int InstalledBase);
+    int InstalledBase,
+    bool Restricted);
 
 public sealed record IndexDocument(DateTime GeneratedAt, IReadOnlyList<IndexPackage> Packages);
 
-public sealed class CatalogService(MarketplaceDbContext db, IOptions<ServerOptions> server, TimeProvider timeProvider)
+public sealed class CatalogService(
+    MarketplaceDbContext db,
+    AccessService access,
+    IOptions<ServerOptions> server,
+    IOptions<AuthOptions> auth,
+    TimeProvider timeProvider)
 {
     private static readonly JsonSerializerOptions CatalogJson = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private static readonly TimeSpan InstalledBaseWindow = TimeSpan.FromDays(30);
 
-    /// <summary>The catalog v1 document the desktop app already understands, one listed source per namespace.</summary>
-    public async Task<CatalogDocument> CatalogAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// The catalog v1 document the desktop app already understands, one listed source per namespace.
+    /// A namespace is listed only when the caller may see at least one of its packages.
+    /// </summary>
+    public async Task<CatalogDocument> CatalogAsync(MarketplaceIdentity identity, CancellationToken cancellationToken)
     {
+        var visible = (await access.VisiblePackagesAsync(identity, null, cancellationToken))
+            .GroupBy(package => package.Namespace, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
         var archives = await db.NamespaceArchives
             .Where(archive => archive.PackageCount > 0)
             .OrderBy(archive => archive.Namespace)
-            .Select(archive => new { archive.Namespace, archive.PackageCount, archive.GeneratedAt })
+            .Select(archive => new { archive.Namespace, archive.GeneratedAt })
             .ToListAsync(cancellationToken);
         var publishers = await db.Publishers.ToDictionaryAsync(publisher => publisher.Namespace, cancellationToken);
         var baseUrl = server.Value.PublicBaseUrl.TrimEnd('/');
@@ -54,7 +68,7 @@ public sealed class CatalogService(MarketplaceDbContext db, IOptions<ServerOptio
                 name = server.Value.CatalogName,
                 description = server.Value.CatalogDescription,
             },
-            sources = archives.Select(archive =>
+            sources = archives.Where(archive => visible.ContainsKey(archive.Namespace)).Select(archive =>
             {
                 var publisher = publishers.GetValueOrDefault(archive.Namespace);
                 var displayName = publisher?.DisplayName ?? archive.Namespace;
@@ -65,7 +79,7 @@ public sealed class CatalogService(MarketplaceDbContext db, IOptions<ServerOptio
                     url = $"{baseUrl}/api/sources/{archive.Namespace}/archive",
                     sourceId = archive.Namespace,
                     publisher = displayName,
-                    packageCount = archive.PackageCount,
+                    packageCount = visible[archive.Namespace],
                     updatedAt = archive.GeneratedAt,
                 };
             }).ToArray(),
@@ -74,16 +88,17 @@ public sealed class CatalogService(MarketplaceDbContext db, IOptions<ServerOptio
         return new CatalogDocument(bytes, Convert.ToHexStringLower(SHA256.HashData(bytes)));
     }
 
-    public async Task<IndexDocument> IndexAsync(CancellationToken cancellationToken)
+    public async Task<IndexDocument> IndexAsync(MarketplaceIdentity identity, CancellationToken cancellationToken)
     {
         var packages = await db.Packages.Include(package => package.Versions).ToListAsync(cancellationToken);
         var publishers = await db.Publishers.ToDictionaryAsync(publisher => publisher.Namespace, cancellationToken);
         var stats = await StatsAsync(cancellationToken);
+        var rules = await access.RulesAsync(cancellationToken);
         var entries = new List<IndexPackage>(packages.Count);
         foreach (var package in packages.OrderBy(package => package.Namespace, StringComparer.Ordinal).ThenBy(package => package.PackageId, StringComparer.Ordinal))
         {
             var latest = PublishService.LatestVersion(package);
-            if (latest is null)
+            if (latest is null || !AccessService.IsVisible(rules, identity, package.Namespace, package.PackageId))
             {
                 continue;
             }
@@ -98,16 +113,22 @@ public sealed class CatalogService(MarketplaceDbContext db, IOptions<ServerOptio
                 package.Description,
                 latest.Version,
                 new IndexPublisher(publisher?.Account ?? package.Namespace, publisher?.DisplayName ?? package.Namespace),
-                package.Namespace == Auth.MarketplaceIdentity.OfficialNamespace ? "official" : "personal",
+                Lane(package.Namespace),
                 package.Tags,
                 latest.ComponentKinds,
                 latest.PublishedAt,
                 installs,
-                installedBase));
+                installedBase,
+                rules.ContainsKey(package.CanonicalId) || rules.ContainsKey(package.Namespace)));
         }
 
         return new IndexDocument(timeProvider.GetUtcNow().UtcDateTime, entries);
     }
+
+    private string Lane(string ns) =>
+        ns == MarketplaceIdentity.OfficialNamespace ? "official"
+        : auth.Value.TeamNamespaces.Any(team => team.Namespace == ns) ? "team"
+        : "personal";
 
     /// <summary>Install events over all time and the installed base from heartbeats in the last 30 days.</summary>
     public async Task<Dictionary<string, (int Installs, int InstalledBase)>> StatsAsync(CancellationToken cancellationToken)

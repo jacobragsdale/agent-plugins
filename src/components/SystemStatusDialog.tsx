@@ -180,7 +180,7 @@ function StatusSummary({
         label="Agents"
         detail={
           detected.length === 0
-            ? "No supported coding agent was found. Install Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then refresh."
+            ? "No supported AI app was found. Install Claude Desktop, ChatGPT, or Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then refresh."
             : detected.map(agentSummary).join(", ")
         }
         problem={null}

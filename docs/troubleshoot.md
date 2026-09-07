@@ -15,7 +15,7 @@ dir $env:USERPROFILE\.claude\skills
 
 The directory is named `<sourceId>-<skillName>`.
 
-**The directory is there.** Your agent has not re-read it. Reload at that agent's own boundary: reload the window in Cursor, start a new session in Claude Code or Codex, or use the client's configuration surface for OpenCode, Grok Build, and Copilot. Nothing in Agent Plugins can force this.
+**The directory is there.** Your agent has not re-read it. Reload at that agent's own boundary: reload the window in Cursor, start a new session in Claude Code or Codex, quit and reopen Claude Desktop or ChatGPT, start a new Cowork conversation in Microsoft 365 Copilot once OneDrive has synced, or use the client's configuration surface for OpenCode, Grok Build, and Copilot. Nothing in Agent Plugins can force this.
 
 **The directory is missing and the card says Installed.** The ledger and the disk disagree. Select **Refresh**; the card should move to **Local Changes** or **Partially Installed**, and the sections below apply.
 
@@ -65,7 +65,7 @@ Open it. The panel leads with three rows — Windows sign-in, marketplace server
 | Windows sign-in    | Not domain-joined, or no Kerberos ticket for the server. | Connect to the corporate network or VPN and sign in again. `klist` should show a ticket-granting ticket.                                                                          |
 | Marketplace server | DNS, TLS, or the server itself is unreachable.           | Check the URL in the row resolves and answers. A failed server leaves the app offline, on the last snapshot it validated.                                                         |
 | Marketplace server | The client is older than the server's minimum.           | Select **Update Agent Plugins**, which opens the download site when this build configures one and otherwise tells you to ask your administrator. This one blocks every operation. |
-| Agents             | No supported coding agent found.                         | Install Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then select **Refresh**.                                                                             |
+| Agents             | No supported AI app found.                               | Install Claude Desktop, ChatGPT, or Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then select **Refresh**. |
 
 Warnings never turn the button red. Expand **All checks** if you want to read them.
 
@@ -84,6 +84,14 @@ Three checks can stop the app from planning, installing, or syncing at all:
 ## A source disappeared from Manage Sources
 
 Sources you added that the catalog no longer lists move to **Other sources**, where the only action is **Remove**. Removing one uninstalls everything it installed. If you expected a source to be there and it is not, the catalog owner has to list it — the app does not take pasted URLs.
+
+## A package or source you expected is missing
+
+The marketplace shows each person only what they may see. A namespace or package with an access list is absent from the catalog, from `agent-plugins search`, and from the app for anyone not on it, and nothing says so.
+
+Ask the package's owner to run `agent-plugins access <namespace>/<package>` and add you or your team. If a team rule should already cover you, run `agent-plugins whoami`: an empty `groups:` line means the server resolved no group membership for your account, which is a server-side LDAP problem to raise with the marketplace administrator.
+
+If you had installed the package, its card now says **Removed Upstream** with an **Uninstall** button, and the source stays in **Manage Sources** until nothing from it is installed.
 
 ## An operation was interrupted
 

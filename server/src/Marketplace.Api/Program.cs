@@ -1,3 +1,4 @@
+using Marketplace.Api.Access;
 using Marketplace.Api.Auth;
 using Marketplace.Api.Catalog;
 using Marketplace.Api.Configuration;
@@ -32,6 +33,19 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 });
 
 var authOptions = builder.Configuration.GetSection(AuthOptions.Section).Get<AuthOptions>() ?? new AuthOptions();
+foreach (var team in authOptions.TeamNamespaces)
+{
+    if (!IdentityResolver.SourceIdPattern().IsMatch(team.Namespace) || team.Namespace == MarketplaceIdentity.OfficialNamespace || string.IsNullOrWhiteSpace(team.Group))
+    {
+        throw new InvalidOperationException($"Auth:TeamNamespaces entry '{team.Namespace}' needs a valid namespace other than 'official' and a group.");
+    }
+}
+
+if (authOptions.TeamNamespaces.Select(team => team.Namespace).Distinct(StringComparer.Ordinal).Count() != authOptions.TeamNamespaces.Length)
+{
+    throw new InvalidOperationException("Auth:TeamNamespaces lists a namespace twice.");
+}
+
 var devHeader = builder.Environment.IsDevelopment() || authOptions.AllowDevHeader;
 var schemes = new List<string>();
 if (authOptions.EnableNegotiate)
@@ -98,6 +112,7 @@ builder.Services.AddSingleton<IArtifactStore>(services => services.GetRequiredSe
 builder.Services.AddSingleton<IPackageValidator, ProcessPackageValidator>();
 builder.Services.AddScoped<PublishService>();
 builder.Services.AddScoped<CatalogService>();
+builder.Services.AddScoped<AccessService>();
 builder.Services.AddScoped<EventsService>();
 builder.Services.AddProblemDetails();
 builder.Services.AddOpenApi();

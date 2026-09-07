@@ -611,29 +611,30 @@ pub(super) fn refresh_sources(
             }
             Err(message) => {
                 if crate::artifact::is_gone(&message) {
+                    if let Err(error) = source::remove_source_cache(cache, &definition.source_key) {
+                        eprintln!(
+                            "Could not remove the cache of the retired source {}: {error}",
+                            definition.name
+                        );
+                    }
                     if !installed_keys.contains(&definition.source_key) {
-                        if let Err(error) =
-                            source::remove_source_cache(cache, &definition.source_key)
-                        {
-                            eprintln!(
-                                "Could not remove the cache of the retired source {}: {error}",
-                                definition.name
-                            );
-                        }
                         retired.push(definition.name.clone());
                         continue;
                     }
+                    // The definition stays so installed packages can be uninstalled, but the
+                    // snapshot is gone: nothing else from the source may be installed from cache.
                     let message = format!(
-                        "{} is no longer published at its URL. Its installed packages remain until you remove the source.",
+                        "{} is no longer available. Its installed packages remain until you uninstall them.",
                         definition.name
                     );
-                    push_refresh_error(
-                        cache,
+                    updated_definitions.push(definition.clone());
+                    loaded.push(LoadedSource {
                         definition,
-                        message,
-                        &mut updated_definitions,
-                        &mut loaded,
-                    );
+                        snapshot: None,
+                        status: SourceStatus::Error,
+                        refresh_failed: true,
+                        message: Some(message),
+                    });
                     continue;
                 }
                 push_refresh_error(
@@ -889,16 +890,20 @@ mod retire_tests {
         assert_eq!(retired, vec!["Retired".to_string()]);
         assert!(!root.exists());
 
+        std::fs::create_dir_all(&root).expect("cache root");
+        std::fs::write(root.join("current.json"), b"{}").expect("stale pointer");
         let installed = BTreeSet::from([definition.source_key.clone()]);
         let (updated, loaded, retired) =
             refresh_sources(cache.path(), vec![definition], &installed);
         assert_eq!(updated.len(), 1);
         assert_eq!(retired.len(), 0);
         assert!(loaded[0].refresh_failed);
+        assert!(loaded[0].snapshot.is_none());
+        assert!(!root.exists(), "a gone source keeps no cached snapshot");
         assert!(loaded[0]
             .message
             .as_deref()
-            .is_some_and(|message| message.contains("no longer published")));
+            .is_some_and(|message| message.contains("no longer available")));
     }
 
     #[test]
@@ -939,6 +944,7 @@ mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
+            onedrive_commercial: None,
         }
     }
 

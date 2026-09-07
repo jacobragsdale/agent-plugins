@@ -890,8 +890,8 @@ fn agent_checks(out: &mut Collector, input: &PreflightInput<'_>) {
             "agents.detected",
             "Detected agents",
             CheckStatus::Warn,
-            "No supported coding agent was found on this machine.",
-            manual("Install Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then refresh."),
+            "No supported AI app was found on this machine.",
+            manual("Install Claude Desktop, ChatGPT, or Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then refresh."),
             false,
         );
     } else {

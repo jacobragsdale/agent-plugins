@@ -26,7 +26,7 @@ export function ItemCard({
             ))}
             {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
             {item.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
-            {item.marketplace?.lane === "official" ? <Badge color="violet">Official</Badge> : null}
+            <MarketplaceBadges meta={item.marketplace} />
           </div>
           <Text as="p" color="gray" size="2">
             {item.description}
@@ -87,6 +87,19 @@ export function ItemCard({
 
 function uniqueKinds(components: readonly CatalogComponent[]): readonly string[] {
   return [...new Set(components.map((component) => component.kind))];
+}
+
+function MarketplaceBadges({ meta }: Readonly<{ meta: CatalogItem["marketplace"] }>): JSX.Element | null {
+  if (meta === null) {
+    return null;
+  }
+  return (
+    <>
+      {meta.lane === "official" ? <Badge color="violet">Official</Badge> : null}
+      {meta.lane === "team" ? <Badge color="teal">Team</Badge> : null}
+      {meta.restricted ? <Badge color="orange">Restricted</Badge> : null}
+    </>
+  );
 }
 
 function KindBadge({ kind }: Readonly<{ kind: string }>): JSX.Element {

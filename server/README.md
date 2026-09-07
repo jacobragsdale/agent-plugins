@@ -29,7 +29,7 @@ Production registers only `Negotiate` (Kerberos). The container needs:
 
 1. An AD service account with the SPN `HTTP/<server fqdn>` (`setspn -S HTTP/marketplace.corp.example svc-marketplace`).
 2. A keytab for that account (`ktpass`), mounted at `/etc/krb5.keytab` with `KRB5_KTNAME` pointing at it, and a `krb5.conf` for the realm.
-3. `Auth__LdapDomain=corp.example` if `team-*` namespaces or group-based admin are wanted.
+3. `Auth__LdapDomain=corp.example` if team namespaces (`Auth__TeamNamespaces__0__Namespace`, `__Group`, `__DisplayName`), group-based admin, or group access lists are wanted. Groups arrive as the AD group's CN.
 
 Negotiate on Linux is Kerberos-only: clients must use the fully qualified name in the URL, and clocks must agree within five minutes. The app's preflight checks both.
 
@@ -53,4 +53,5 @@ The suite starts PostgreSQL through Testcontainers, replaces Artifact Keeper wit
 ASPNETCORE_ENVIRONMENT=Development Database__MigrateOnStartup=false Kestrel__Endpoints__Http__Url=http://127.0.0.1:5088 \
   dotnet run --project src/Marketplace.Api --no-launch-profile &
 curl -s http://127.0.0.1:5088/openapi/v1.json > openapi.json
+pnpm --dir .. format   # the checked-in document is Prettier-formatted
 ```

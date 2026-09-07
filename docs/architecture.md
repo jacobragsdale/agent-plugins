@@ -18,7 +18,7 @@ Agent profiles are stored separately from sources. Detection is the configuratio
 
 Each stable target selects a pinned dialect. A built-in adapter reports `native`, `losslessTranslation`, `lossyTranslation`, `unsupported`, or `blocked`, then returns typed desired resources. It cannot mutate the machine.
 
-The planner fans every package component across detected agents and coalesces identical physical identities. Cursor, Codex, OpenCode, Grok Build, and GitHub Copilot share one namespaced skill under `~/.agents/skills`. Claude Code uses `~/.claude/skills`. There is no per-agent opt-out: detection is the configuration set.
+The planner fans every package component across detected agents and coalesces identical physical identities. Cursor, Codex, OpenCode, Grok Build, GitHub Copilot, and the ChatGPT app share one namespaced skill under `~/.agents/skills`. Claude Code uses `~/.claude/skills`. Microsoft 365 Copilot uses `Documents/Cowork/skills` in the OneDrive for work sync root. Claude Desktop's Chat and Cowork tabs take skills only from the claude.ai account, so that adapter reports skills unsupported. There is no per-agent opt-out: detection is the configuration set.
 
 The initial resources are:
 
@@ -59,6 +59,8 @@ See [ADR 0001](decisions/0001-multi-agent-desired-state.md) for the product deci
 ## Marketplace
 
 The marketplace server (`server/`, .NET 10) is the only endpoint the app talks to. It publishes the catalog at `/api/catalog` in the source-repository shape, one listed source per publisher namespace, and each namespace archive at `/api/sources/{namespace}/archive`; the acquisition path above is unchanged. Artifact Keeper stores every published version immutably behind the server. See [ADR 0004](decisions/0004-internal-marketplace.md) and [the API reference](marketplace-api.md).
+
+Access is server policy ([ADR 0005](decisions/0005-marketplace-access-control.md)): a namespace or package may carry an allowlist of accounts and AD groups, the catalog, index, and archives are filtered per caller, and anything hidden answers 404 so the client's gone-source handling applies unchanged. A team namespace is a configured AD group that owns a shared `source.id`.
 
 `locator.rs` holds the build-time marketplace URL. `marketplace.rs` attaches identity to every request for that origin: a Kerberos `Negotiate` token from SSPI (`host_identity.rs`) on a domain-joined Windows host, otherwise the `X-Dev-User` header that only a Development server trusts. Sync auto-subscribes to every source the marketplace catalog lists, joins `/api/index` metadata (publisher, version, tags, installs, installed base) onto catalog items, and posts a `heartbeat` event; item operations post `install`, `update`, and `uninstall` events from a background thread. Usage reporting never blocks or fails an operation.
 
