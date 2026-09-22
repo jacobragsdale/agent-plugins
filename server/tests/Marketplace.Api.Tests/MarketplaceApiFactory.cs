@@ -27,17 +27,28 @@ public sealed class MarketplaceApiFactory : WebApplicationFactory<Program>, IAsy
 
     public string? ValidatorPath { get; } = LocateValidator();
 
+    /// <summary>Stands in for the Angular build and the installer folder.</summary>
+    public string SiteRoot { get; } = Directory.CreateTempSubdirectory("marketplace-site-").FullName;
+
     public async ValueTask InitializeAsync() => await _postgres.StartAsync();
 
     public override async ValueTask DisposeAsync()
     {
         await base.DisposeAsync();
         await _postgres.DisposeAsync();
+        Directory.Delete(SiteRoot, recursive: true);
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
+        var webRoot = Directory.CreateDirectory(Path.Combine(SiteRoot, "wwwroot")).FullName;
+        File.WriteAllText(Path.Combine(webRoot, "index.html"), "<!doctype html><title>Agent Plugins</title>");
+        var downloads = Directory.CreateDirectory(Path.Combine(SiteRoot, "downloads", "releases", "0.1.0")).Parent!.Parent!.FullName;
+        File.WriteAllText(Path.Combine(downloads, "manifest.json"), "{}");
+        File.WriteAllText(Path.Combine(downloads, "releases", "0.1.0", "Agent-Plugins.AppImage"), "binary");
+        builder.UseWebRoot(webRoot);
+        builder.UseSetting("Server:DownloadsPath", downloads);
         builder.UseSetting("ConnectionStrings:Marketplace", _postgres.GetConnectionString());
         builder.UseSetting("Server:PublicBaseUrl", "https://marketplace.test");
         builder.UseSetting("Auth:EnableNegotiate", "false");
@@ -150,4 +161,7 @@ public sealed class PermissiveValidator : IPackageValidator
             ? new ValidationOutcome(true, "fake", 1, [])
             : ValidationOutcome.Fatal("agent-plugins.json is missing."));
     }
+
+    public Task StageAsync(StagingRequest request, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("Wrapping uploads needs the Rust validator; build validate-source.");
 }

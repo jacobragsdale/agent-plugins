@@ -25,10 +25,13 @@ dist-ssr
 *.sln
 *.sw?
 
-# Locally published website release artifacts. The manifest stays tracked so
-# a fresh checkout has a complete preview of the download page.
-website/releases/*
-!website/releases/manifest.json
+# Locally published installers. The manifest stays tracked so a fresh
+# checkout has a complete preview of the download page.
+server/releases/*
+!server/releases/manifest.json
+
+# Angular build cache
+.angular
 
 # .NET build output
 server/**/bin/

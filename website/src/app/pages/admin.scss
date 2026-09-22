@@ -1,0 +1,17 @@
+.tab {
+  padding-top: 1.25rem;
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+
+  app-icon {
+    color: var(--success);
+  }
+
+  p {
+    margin: 0;
+  }
+}

@@ -13,9 +13,16 @@ public sealed record ValidationOutcome(bool Accepted, string? SourceId, int Vali
     public static ValidationOutcome Fatal(string message) => new(false, null, 0, [new ValidationError("", message)]);
 }
 
+/// <summary>What <c>validate-source stage</c> wraps into a one-package source zip at <see cref="OutputZip"/>.</summary>
+public sealed record StagingRequest(string InputDirectory, string OutputZip, string Namespace, string PackageId, string? Name, string? Description);
+
 public interface IPackageValidator
 {
+    /// <summary>Validates a source tree and scans it for files that look like credentials.</summary>
     Task<ValidationOutcome> ValidateAsync(string sourceDirectory, CancellationToken cancellationToken);
+
+    /// <summary>Wraps a skill, a folder of skills, an MCP document, or a source tree; throws <see cref="ArchiveRejectedException"/> when it cannot.</summary>
+    Task StageAsync(StagingRequest request, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -28,14 +35,56 @@ public sealed class ProcessPackageValidator(IOptions<ValidatorOptions> options, 
 
     public async Task<ValidationOutcome> ValidateAsync(string sourceDirectory, CancellationToken cancellationToken)
     {
+        var (stdout, stderr) = await RunAsync(["--json", "--secrets", sourceDirectory], cancellationToken);
+        var report = Parse(stdout, stderr);
+        if (report is null || report.Fatal is not null)
+        {
+            return ValidationOutcome.Fatal(report?.Fatal ?? (stderr.Length > 0 ? stderr : "The validator produced no output."));
+        }
+
+        var errors = report.Errors.Select(error => new ValidationError(error.Path, error.Message)).ToArray();
+        return new ValidationOutcome(errors.Length == 0 && report.ValidInstalls > 0, report.SourceId, report.ValidInstalls, errors);
+    }
+
+    public async Task StageAsync(StagingRequest request, CancellationToken cancellationToken)
+    {
+        List<string> arguments = ["stage", "--namespace", request.Namespace, "--package-id", request.PackageId];
+        if (request.Name is { Length: > 0 } name)
+        {
+            arguments.AddRange(["--name", name]);
+        }
+
+        if (request.Description is { Length: > 0 } description)
+        {
+            arguments.AddRange(["--description", description]);
+        }
+
+        arguments.AddRange([request.InputDirectory, request.OutputZip]);
+        var (stdout, stderr) = await RunAsync(arguments, cancellationToken);
+        var report = Parse(stdout, stderr);
+        if (report?.Fatal is { } fatal)
+        {
+            throw new ArchiveRejectedException(fatal);
+        }
+
+        if (!File.Exists(request.OutputZip))
+        {
+            throw new InvalidOperationException($"The validator did not stage the upload: {stderr}");
+        }
+    }
+
+    private async Task<(string Stdout, string Stderr)> RunAsync(IEnumerable<string> arguments, CancellationToken cancellationToken)
+    {
         var start = new ProcessStartInfo(options.Value.Path)
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
         };
-        start.ArgumentList.Add("--json");
-        start.ArgumentList.Add(sourceDirectory);
+        foreach (var argument in arguments)
+        {
+            start.ArgumentList.Add(argument);
+        }
 
         using var process = new Process { StartInfo = start };
         try
@@ -76,31 +125,27 @@ public sealed class ProcessPackageValidator(IOptions<ValidatorOptions> options, 
             throw new InvalidOperationException($"The validator rejected its arguments: {stderr.Trim()}");
         }
 
-        var line = stdout.Trim();
-        if (line.Length == 0)
+        return (stdout.Trim(), stderr.Trim());
+    }
+
+    /// <summary>The single JSON line the validator prints, or null when it printed nothing.</summary>
+    private ValidatorReport? Parse(string stdout, string stderr)
+    {
+        if (stdout.Length == 0)
         {
-            return ValidationOutcome.Fatal(stderr.Trim().Length > 0 ? stderr.Trim() : "The validator produced no output.");
+            return null;
         }
 
-        ValidatorReport report;
         try
         {
-            report = JsonSerializer.Deserialize<ValidatorReport>(line, JsonOptions)
+            return JsonSerializer.Deserialize<ValidatorReport>(stdout, JsonOptions)
                 ?? throw new JsonException("empty document");
         }
         catch (JsonException error)
         {
-            logger.LogError(error, "Validator output was not JSON: {Output}", line);
+            logger.LogError(error, "Validator output was not JSON: {Output} {Error}", stdout, stderr);
             throw new InvalidOperationException("The validator produced malformed output.", error);
         }
-
-        if (report.Fatal is not null)
-        {
-            return ValidationOutcome.Fatal(report.Fatal);
-        }
-
-        var errors = report.Errors.Select(error => new ValidationError(error.Path, error.Message)).ToArray();
-        return new ValidationOutcome(errors.Length == 0 && report.ValidInstalls > 0, report.SourceId, report.ValidInstalls, errors);
     }
 
     private sealed class ValidatorReport

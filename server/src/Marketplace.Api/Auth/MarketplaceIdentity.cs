@@ -124,6 +124,18 @@ public static partial class IdentityResolver
         string.Equals(candidate, account, StringComparison.OrdinalIgnoreCase)
         || string.Equals(Username(candidate.Trim()), username, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>official, team (a configured AD-group namespace), or personal.</summary>
+    public static string Lane(AuthOptions options, string ns) =>
+        ns == MarketplaceIdentity.OfficialNamespace ? "official"
+        : options.TeamNamespaces.Any(team => team.Namespace == ns) ? "team"
+        : "personal";
+
+    /// <summary>How a namespace is shown: "Official", the team's configured name, or the caller's own name.</summary>
+    public static string NamespaceDisplayName(AuthOptions options, MarketplaceIdentity identity, string ns) =>
+        ns == MarketplaceIdentity.OfficialNamespace ? "Official"
+        : options.TeamNamespaces.FirstOrDefault(team => team.Namespace == ns)?.DisplayName is { Length: > 0 } teamName ? teamName
+        : identity.DisplayName;
+
     [GeneratedRegex("^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){1,15}$")]
     public static partial Regex SourceIdPattern();
 }

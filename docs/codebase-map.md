@@ -5,7 +5,8 @@ Where each responsibility lives. This describes the layout; [architecture](archi
 ```text
 src/           React window: presentation and Zod validation only
 src-tauri/     Rust: everything that decides or writes
-server/        .NET 10 marketplace API
+server/        .NET 10 marketplace API; also serves the web portal and installers
+website/       Angular web portal: browse, publish, review
 schemas/       Generated JSON Schemas for the manifest contracts
 docs/          This documentation set, with ADRs under decisions/
 ```
@@ -24,7 +25,7 @@ A source becomes files on disk in one direction. Each stage may use the stage ab
 | Serve        | `application/`, `ipc.rs`, `app_state.rs`                                        | Sequence use cases behind locks and project state for the UI.                                |
 | Reach out    | `marketplace.rs`, `host_identity.rs`, `preflight.rs`                            | Identity, marketplace requests, events, and the startup checks.                              |
 | Host         | `paths.rs`, `startup.rs`, `process.rs`, `parallel.rs`, `qa_paths.rs`, `tray.rs` | Filesystem roots, environment repair, bounded subprocesses, QA isolation, tray.              |
-| Entry points | `main.rs`, `lib.rs`, `cli.rs`, `bin/`                                           | Window, command registration, headless verbs, validator binaries.                            |
+| Entry points | `main.rs`, `lib.rs`, `cli.rs`, `staging.rs`, `bin/`                             | Window, command registration, headless verbs, publish staging, validator binaries.           |
 
 ### Modules worth knowing before you change anything
 
@@ -84,7 +85,7 @@ Adding a command means touching `ipc.rs`, `lib.rs`, and `src/ipc/schemas.ts` tog
 
 | Path                            | Responsibility                                                                                   |
 | ------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `src/Marketplace.Api/Endpoints` | Every HTTP endpoint.                                                                             |
+| `src/Marketplace.Api/Endpoints` | Every HTTP endpoint, plus `PortalHosting`: the portal, `/downloads`, security headers.           |
 | `src/Marketplace.Api/Auth`      | Negotiate, and the Development-only `X-Dev-User` handler.                                        |
 | `src/Marketplace.Api/Packages`  | Publish, validation via the Rust binary, SemVer, archive inspection, namespace archive building. |
 | `src/Marketplace.Api/Catalog`   | The `/api/catalog` document, one listed source per namespace.                                    |
@@ -92,6 +93,18 @@ Adding a command means touching `ipc.rs`, `lib.rs`, and `src/ipc/schemas.ts` tog
 | `src/Marketplace.Api/Events`    | Install, update, uninstall, and heartbeat ingestion.                                             |
 | `src/Marketplace.Api/Data`      | EF Core model and migrations, applied at startup.                                                |
 | `tests/Marketplace.Api.Tests`   | Integration tests against a throwaway PostgreSQL container.                                      |
+
+## Web portal
+
+`website/` is an Angular app (standalone components, signals, Angular Material) built into the server image. See [website/README.md](../website/README.md).
+
+| Path                 | Responsibility                                                                  |
+| -------------------- | ------------------------------------------------------------------------------- |
+| `src/app/api.ts`     | Every API call; Zod schemas parse each response.                                |
+| `src/app/session.ts` | Who is signed in, the development sign-in, and the admin route guard.           |
+| `src/app/format.ts`  | Pure helpers: versions, IDs, SKILL.md frontmatter. Covered by `format.spec.ts`. |
+| `src/app/pages/`     | One page per route, with its smaller parts in `*-parts.ts`.                     |
+| `src/app/shared/`    | Components used across pages: icons, file viewer, dialogs, badges.              |
 
 ## Documentation
 

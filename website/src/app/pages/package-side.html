@@ -1,0 +1,63 @@
+<section class="card">
+  <h2>Get it</h2>
+  @if (item().liveVersion === null) {
+    <p class="muted">Not available to install yet. It appears in the app once an admin approves it.</p>
+  } @else {
+    <ol class="get">
+      <li>Open <strong>Agent Plugins</strong> on your PC.</li>
+      <li>
+        Find <strong>{{ item().name }}</strong
+        >. Search helps.
+      </li>
+      <li>Click <strong>Install</strong>. It's added to every AI assistant the app found.</li>
+    </ol>
+    <a mat-button routerLink="/" fragment="download"><app-icon name="download" />Don't have the app?</a>
+  }
+  @if (hasServer()) {
+    <p class="notice">
+      This includes an <strong>MCP server</strong>, a small program that runs on your PC so the assistant can use a tool. The app shows exactly what it runs and asks you before installing.
+    </p>
+  }
+</section>
+
+@if (entry(); as listed) {
+  <section class="card facts">
+    <dl>
+      <dt>Version</dt>
+      <dd>{{ listed.version }}</dd>
+      <dt>Updated</dt>
+      <dd>{{ updated() }}</dd>
+      <dt>People using it</dt>
+      <dd>{{ listed.installedBase }}</dd>
+    </dl>
+  </section>
+}
+
+@if (version(); as shown) {
+  <details class="technical">
+    <summary>Technical details</summary>
+    <dl>
+      <dt>ID</dt>
+      <dd>
+        <code>{{ item().id }}</code>
+      </dd>
+      <dt>Version</dt>
+      <dd>{{ shown.version }}</dd>
+      <dt>Size</dt>
+      <dd>{{ size() }}</dd>
+      <dt>SHA-256</dt>
+      <dd>
+        <code>{{ shown.archiveDigest }}</code>
+      </dd>
+      <dt>Command line</dt>
+      <dd>
+        <code>{{ installCommand() }}</code>
+        <button mat-button type="button" (click)="copy()">Copy</button>
+      </dd>
+    </dl>
+  </details>
+}
+
+@if (canReport()) {
+  <button mat-button type="button" class="report" (click)="report.emit()"><app-icon name="flag" />Report a problem</button>
+}

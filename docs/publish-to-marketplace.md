@@ -2,6 +2,10 @@
 
 This tutorial publishes a skill you already have on your machine to the company marketplace. It takes a minute. Authentication is your Windows logon; there is nothing to sign in to.
 
+## From the web portal
+
+Open the marketplace in your browser and choose **Share a skill**. Write the skill there (a name, when the AI should use it, and the instructions), or choose **Upload files** and drag in a skill folder, a folder of skill folders, a `SKILL.md`, or a zip. Add another skill in the editor to make a skill pack. The rest of this page is the command-line route.
+
 ## From an agent
 
 Install the official `publish` skill from the marketplace (search for `official/publish` in Agent Plugins, or run `agent-plugins install official/publish`). Then tell your agent:
@@ -41,20 +45,21 @@ The skill validates the package, proposes a better description and tags, runs a 
 
    Answer `y`. Add `--yes` to skip the prompt.
 
-3. The response names the package:
+3. The response names the package and its page in the portal:
 
    ```
-   published jacob/review 1.0.0
-     https://marketplace.example.com/api/packages/jacob/review
+   submitted jacob/review 1.0.0 for review; it goes live when an admin approves it
+     https://marketplace.example.com/p/jacob/review
    ```
 
-   Every client sees it at its next sync; the card shows your name, the version, and how many people use it.
+   An admin reviews a package's first version. Once it is approved, every client sees it at its next sync; the card shows your name, the version, and how many people use it. Later versions go live immediately unless they contain an MCP server, which is reviewed every time. The status and any reviewer's note are on **My skills** in the portal.
 
 ## What you can publish
 
 | Input                                   | Result                                                                                           |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | A directory with `SKILL.md`             | One `skill` package. The package ID is the frontmatter `name` (a `yourname-` prefix is dropped). |
+| A directory of skill directories        | A skill pack: one package, one `skill` component per subfolder, named after the directory.       |
 | An MCP document in the `mcp.json` shape | One `mcpServer` package named after the file.                                                    |
 | A tree with `agent-plugins.json`        | The single package it declares; `source.id` must equal your namespace.                           |
 
@@ -62,13 +67,13 @@ The skill validates the package, proposes a better description and tags, runs a 
 
 ## Versions
 
-Versions are immutable semantic versions. Publish a new version to change anything; the namespace archive always carries the latest non-yanked version of each package, so clients update on their next sync. Yank a version with the API when it must disappear from the catalog (installed copies are unaffected).
+Versions are immutable semantic versions. Publish a new version to change anything; the namespace archive always carries the latest non-yanked version of each package, so clients update on their next sync. Withdraw a version from its page in the portal, or yank it with the API, when it must disappear from the catalog (installed copies are unaffected). A version number that was ever used, including one an admin sent back, cannot be reused.
 
 ## Rules the CLI enforces
 
 - The archive is at most 50 MB and contains no symbolic links.
 - No `.env`, key, certificate, or token-looking content.
 - `SKILL.md` has a non-empty `name` and `description`; the name equals the package ID.
-- The package validates: the server runs the same validator and rejects a mismatch.
+- The package validates: the server runs the same validator and credential scan and rejects a mismatch.
 
 See [the API reference](marketplace-api.md) for the request the CLI makes and [ADR 0004](decisions/0004-internal-marketplace.md) for why publishing works this way.

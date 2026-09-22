@@ -1,0 +1,38 @@
+<a class="skip-link" href="#content">Skip to content</a>
+
+<app-top-bar />
+
+@let state = session.state();
+@if (state.kind === "signed-out" && state.devSignIn) {
+  <form class="dev-sign-in" (submit)="signIn($event)">
+    <p>
+      <strong>Development sign-in.</strong>
+      This server trusts the name you type. At work, Windows signs you in automatically.
+    </p>
+    <mat-form-field appearance="outline" subscriptSizing="dynamic">
+      <mat-label>Windows account</mat-label>
+      <input matInput name="account" autocomplete="username" placeholder="CORP\jane" [value]="devAccount()" (input)="setDevAccount($event)" />
+    </mat-form-field>
+    <button mat-flat-button type="submit">Sign in</button>
+  </form>
+} @else if (state.kind === "signed-out") {
+  <p class="banner" role="alert">Windows didn't sign you in. Open this page in Edge or Chrome on your work PC to see skills and share your own.</p>
+} @else if (state.kind === "unavailable") {
+  <p class="banner" role="alert">The marketplace isn't reachable right now. Browsing and publishing will work again once it is.</p>
+}
+
+<main id="content">
+  <router-outlet />
+</main>
+
+<footer class="foot">
+  <div class="bar">
+    <span>Agent Plugins</span>
+    <a routerLink="/help/publish">Publishing help</a>
+    <a routerLink="/help/source-manifest">Manifest reference</a>
+    <span class="spacer"></span>
+    @if (session.health(); as health) {
+      <span class="muted">Server {{ health.serverVersion }}</span>
+    }
+  </div>
+</footer>

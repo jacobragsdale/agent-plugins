@@ -31,6 +31,7 @@ pub mod repository;
 mod resource;
 mod source;
 mod sources;
+pub mod staging;
 mod startup;
 
 /// The host preparation report from process start, for the preflight.

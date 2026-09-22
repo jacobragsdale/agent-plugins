@@ -113,7 +113,7 @@ public sealed class CatalogService(
                 package.Description,
                 latest.Version,
                 new IndexPublisher(publisher?.Account ?? package.Namespace, publisher?.DisplayName ?? package.Namespace),
-                Lane(package.Namespace),
+                IdentityResolver.Lane(auth.Value, package.Namespace),
                 package.Tags,
                 latest.ComponentKinds,
                 latest.PublishedAt,
@@ -124,11 +124,6 @@ public sealed class CatalogService(
 
         return new IndexDocument(timeProvider.GetUtcNow().UtcDateTime, entries);
     }
-
-    private string Lane(string ns) =>
-        ns == MarketplaceIdentity.OfficialNamespace ? "official"
-        : auth.Value.TeamNamespaces.Any(team => team.Namespace == ns) ? "team"
-        : "personal";
 
     /// <summary>Install events over all time and the installed base from heartbeats in the last 30 days.</summary>
     public async Task<Dictionary<string, (int Installs, int InstalledBase)>> StatsAsync(CancellationToken cancellationToken)

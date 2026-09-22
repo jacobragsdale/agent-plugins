@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Marketplace.Api.Access;
 using Marketplace.Api.Auth;
 using Marketplace.Api.Catalog;
@@ -24,6 +26,8 @@ builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection(Dat
 builder.Services.Configure<FormOptions>(options =>
 {
     options.MultipartBodyLengthLimit = ArchiveInspector.MaxArchiveBytes + 64 * 1024;
+    // A browser upload sends a file and a path value per file, plus a few fields.
+    options.ValueCountLimit = 2 * PublishService.MaxUploadFiles + 16;
 });
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -115,6 +119,7 @@ builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<AccessService>();
 builder.Services.AddScoped<EventsService>();
 builder.Services.AddProblemDetails();
+builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase)));
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
@@ -122,10 +127,12 @@ var app = builder.Build();
 app.UseForwardedHeaders();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
+app.UsePortalFiles(app.Configuration.GetSection(ServerOptions.Section).Get<ServerOptions>() ?? new ServerOptions());
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapOpenApi().AllowAnonymous();
 app.MapMarketplace(schemes);
+app.MapPortalFallback();
 
 var databaseOptions = app.Configuration.GetSection(DatabaseOptions.Section).Get<DatabaseOptions>() ?? new DatabaseOptions();
 if (databaseOptions.MigrateOnStartup)

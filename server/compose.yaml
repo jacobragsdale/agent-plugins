@@ -4,6 +4,8 @@
 #
 #   docker compose -f server/compose.yaml up --build
 #   curl -H 'X-Dev-User: CORP\jacob' http://localhost:8080/api/me
+#
+# The web portal is at http://localhost:8080; it asks for a development user name.
 
 name: marketplace-dev
 
@@ -20,6 +22,9 @@ services:
       ArtifactKeeper__Username: ${ARTIFACT_KEEPER_USERNAME:-}
       ArtifactKeeper__Password: ${ARTIFACT_KEEPER_PASSWORD:-}
       Auth__AdminAccounts__0: jacob
+    volumes:
+      # Installers for the download page: manifest.json plus releases/<version>/.
+      - ./releases:/srv/downloads:ro
     ports:
       - "8080:8080"
     depends_on:

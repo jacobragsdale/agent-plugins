@@ -9,7 +9,8 @@ import tseslint from "typescript-eslint";
 const tsconfigRootDir = dirname(fileURLToPath(import.meta.url));
 
 export default tseslint.config(
-  { ignores: ["coverage/**", "dist/**", "src-tauri/target/**"] },
+  // The web portal has its own Angular config in website/eslint.config.mjs.
+  { ignores: ["coverage/**", "dist/**", "src-tauri/target/**", "website/**"] },
   { linterOptions: { reportUnusedDisableDirectives: "error", reportUnusedInlineConfigs: "error" } },
   {
     files: ["**/*.{ts,tsx}"],

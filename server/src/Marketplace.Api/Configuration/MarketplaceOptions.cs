@@ -13,6 +13,9 @@ public sealed class ServerOptions
     public string CatalogName { get; set; } = "Marketplace";
 
     public string CatalogDescription { get; set; } = "Skills and MCP servers published by people at the company.";
+
+    /// <summary>Folder served at <c>/downloads</c>: the installer <c>manifest.json</c> and <c>releases/</c>. Unset serves nothing.</summary>
+    public string? DownloadsPath { get; set; }
 }
 
 public sealed class ArtifactKeeperOptions

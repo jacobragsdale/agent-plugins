@@ -1,0 +1,24 @@
+h2 {
+  font: var(--mat-sys-title-large);
+  margin: 0;
+}
+
+mat-form-field {
+  width: 100%;
+}
+
+.narrow {
+  max-width: 28rem;
+}
+
+.tight {
+  gap: 0.5rem;
+}
+
+.label {
+  font: var(--mat-sys-label-large);
+}
+
+p {
+  margin: 0;
+}

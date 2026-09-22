@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-09-05
 - Extends: [ADR 0004](0004-internal-marketplace.md), which left team namespaces keyed to AD groups as a follow-up
+- Amended by: [ADR 0006](0006-web-portal-and-review.md), which adds skill packs (several components per package), the portal's visibility editor, and review of MCP servers
 
 ## Context
 

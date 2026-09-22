@@ -1,0 +1,47 @@
+<div class="page stack">
+  <header>
+    <h1>Admin</h1>
+    <p class="lead">Check new skills before they go live, handle reports, and see how the marketplace is used.</p>
+  </header>
+
+  <mat-tab-group mat-stretch-tabs="false" animationDuration="0ms">
+    <mat-tab [label]="reviewsLabel()">
+      <div class="tab stack">
+        @if (reviews.hasValue()) {
+          @for (review of reviews.value(); track review.id + "@" + review.version) {
+            <app-review-card [review]="review" [busy]="busy()" (approve)="approve($event)" (reject)="reject($event)" />
+          } @empty {
+            <div class="card empty">
+              <app-icon name="check" />
+              <p>Nothing is waiting. New skills and MCP servers appear here.</p>
+            </div>
+          }
+        } @else if (reviews.error(); as error) {
+          <p class="problem">{{ message(error) }}</p>
+        } @else {
+          <mat-progress-bar mode="indeterminate" aria-label="Loading reviews" />
+        }
+      </div>
+    </mat-tab>
+
+    <mat-tab [label]="reportsLabel()">
+      <div class="tab">
+        @if (reports.hasValue()) {
+          <app-report-list [reports]="reports.value()" (resolve)="resolve($event)" />
+        } @else if (reports.error(); as error) {
+          <p class="problem">{{ message(error) }}</p>
+        }
+      </div>
+    </mat-tab>
+
+    <mat-tab label="Usage">
+      <div class="tab">
+        @if (summary.hasValue()) {
+          <app-usage-summary [summary]="summary.value()" />
+        } @else if (summary.error(); as error) {
+          <p class="problem">{{ message(error) }}</p>
+        }
+      </div>
+    </mat-tab>
+  </mat-tab-group>
+</div>

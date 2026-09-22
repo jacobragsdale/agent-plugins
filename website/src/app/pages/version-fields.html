@@ -1,0 +1,50 @@
+<h2>{{ isNew() ? "Anything else?" : "About this version" }}</h2>
+@if (!isNew()) {
+  <div class="stack tight">
+    <span id="bump-label" class="label">What kind of change is this?</span>
+    <mat-button-toggle-group aria-labelledby="bump-label" [value]="bump()" (change)="setBump($event.value)">
+      <mat-button-toggle value="patch">Small fix</mat-button-toggle>
+      <mat-button-toggle value="minor">New feature</mat-button-toggle>
+      <mat-button-toggle value="major">Big change</mat-button-toggle>
+    </mat-button-toggle-group>
+    <span class="muted">This will be version {{ version() }}.</span>
+  </div>
+}
+<mat-form-field appearance="outline">
+  <mat-label>{{ noteLabel() }}</mat-label>
+  <textarea matInput rows="2" maxlength="4096" [value]="changelog()" (input)="changelog.set(text($event))"></textarea>
+</mat-form-field>
+<mat-form-field appearance="outline">
+  <mat-label>Tags (optional)</mat-label>
+  <input matInput placeholder="meetings, writing" [value]="tags()" (input)="tags.set(text($event))" />
+  <mat-hint>Separate with commas. They help people find it.</mat-hint>
+</mat-form-field>
+
+<details class="technical">
+  <summary>Technical details</summary>
+  <dl>
+    <dt>Space ID</dt>
+    <dd>
+      <code>{{ space() }}</code>
+    </dd>
+    <dt>Package ID</dt>
+    <dd>
+      @if (isNew()) {
+        <mat-form-field appearance="outline" subscriptSizing="dynamic" class="narrow">
+          <input matInput aria-label="Package ID" [value]="packageId()" (input)="setId($event)" />
+        </mat-form-field>
+      } @else {
+        <code>{{ packageId() }}</code>
+      }
+    </dd>
+    <dt>Version</dt>
+    <dd>{{ version() }}</dd>
+  </dl>
+</details>
+
+@if (taken()) {
+  <p class="problem" role="alert">{{ spaceLabel() }} already has a package called “{{ packageId() }}”. Pick another name, or publish a new version of that one from My skills.</p>
+}
+@if (reviewed()) {
+  <p class="notice">An admin checks new skills before others can see them. You'll find the status on <a routerLink="/mine">My skills</a>.</p>
+}

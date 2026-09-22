@@ -1,0 +1,42 @@
+:host {
+  display: grid;
+  gap: 1rem;
+}
+
+h2 {
+  font: var(--mat-sys-title-large);
+}
+
+.get {
+  padding-left: 1.25rem;
+  margin: 0 0 0.75rem;
+
+  li + li {
+    margin-top: 0.4rem;
+  }
+}
+
+.notice {
+  margin: 0.75rem 0 0;
+  font: var(--mat-sys-body-medium);
+}
+
+.facts dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.4rem 1rem;
+  margin: 0;
+
+  dt {
+    color: var(--muted);
+  }
+
+  dd {
+    margin: 0;
+  }
+}
+
+.report {
+  justify-self: start;
+  color: var(--muted);
+}

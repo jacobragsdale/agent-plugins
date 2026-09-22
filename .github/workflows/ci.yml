@@ -45,6 +45,14 @@ jobs:
       - run: pnpm lint
       - run: pnpm format:check
       - run: pnpm build
+      # The web portal (website/) ships inside the marketplace server image, so
+      # one platform is enough; root format:check already covers its files.
+      - name: Check the web portal
+        if: runner.os == 'Linux'
+        run: |
+          pnpm --filter website lint
+          pnpm --filter website test
+          pnpm --filter website build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml

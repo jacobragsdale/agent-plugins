@@ -1,0 +1,26 @@
+<div class="tiles">
+  @for (tile of tiles(); track tile.label) {
+    <div class="tile">
+      <span class="value">{{ tile.value }}</span>
+      <span class="muted">{{ tile.label }}</span>
+    </div>
+  }
+</div>
+<div class="charts">
+  @for (chart of charts(); track chart.title) {
+    <section class="card">
+      <h2>{{ chart.title }}</h2>
+      <ul class="bars">
+        @for (row of chart.rows; track row.label) {
+          <li [title]="row.label + ': ' + row.count">
+            <span class="label">{{ row.label }}</span>
+            <span class="bar" aria-hidden="true"><span [style.width.%]="row.share"></span></span>
+            <span class="count">{{ row.count }}</span>
+          </li>
+        } @empty {
+          <li class="muted">No data yet.</li>
+        }
+      </ul>
+    </section>
+  }
+</div>

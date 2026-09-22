@@ -1,0 +1,123 @@
+.help {
+  display: grid;
+  grid-template-columns: 14rem minmax(0, 1fr);
+  gap: 2rem;
+  align-items: start;
+}
+
+.topics {
+  position: sticky;
+  top: 5rem;
+  display: grid;
+  gap: 0.25rem;
+
+  a {
+    padding: 0.5rem 0.9rem;
+    border-radius: 999px;
+    color: var(--muted);
+    text-decoration: none;
+    font: var(--mat-sys-label-large);
+
+    &:hover {
+      background: var(--mat-sys-surface-container-high);
+    }
+
+    &.active {
+      background: var(--mat-sys-secondary-container);
+      color: var(--mat-sys-on-secondary-container);
+    }
+  }
+}
+
+.spec {
+  max-width: 78ch;
+  line-height: 1.6;
+
+  .intro {
+    margin-bottom: 2rem;
+  }
+
+  .spec-intro {
+    font: var(--mat-sys-title-medium);
+    color: var(--muted);
+  }
+
+  section + section {
+    margin-top: 2.5rem;
+  }
+
+  h2 {
+    font: var(--mat-sys-title-large);
+    margin-top: 0;
+  }
+
+  .spec-steps {
+    list-style: none;
+    counter-reset: step;
+    margin: 0;
+    padding: 0;
+
+    > li {
+      counter-increment: step;
+      position: relative;
+      padding: 0 0 2rem 3rem;
+      border-left: 2px solid var(--mat-sys-outline-variant);
+      margin-left: 1rem;
+
+      &::before {
+        content: counter(step);
+        position: absolute;
+        left: -1rem;
+        top: -0.2rem;
+        display: grid;
+        place-items: center;
+        width: 2rem;
+        height: 2rem;
+        border-radius: 50%;
+        background: var(--mat-sys-primary-container);
+        color: var(--mat-sys-on-primary-container);
+        font: var(--mat-sys-title-small);
+      }
+
+      &:last-child {
+        border-left-color: transparent;
+      }
+    }
+  }
+
+  .table-wrap {
+    overflow-x: auto;
+    margin: 1rem 0;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font: var(--mat-sys-body-medium);
+  }
+
+  th,
+  td {
+    text-align: left;
+    vertical-align: top;
+    padding: 0.5rem 0.75rem;
+    border-bottom: var(--border);
+  }
+
+  th {
+    color: var(--muted);
+    font: var(--mat-sys-label-large);
+  }
+}
+
+@media (max-width: 800px) {
+  .help {
+    grid-template-columns: 1fr;
+  }
+
+  .topics {
+    position: static;
+    display: flex;
+    flex-wrap: wrap;
+  }
+}

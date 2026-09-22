@@ -2,14 +2,16 @@
 
 The marketplace server is the only endpoint the desktop app and CLI talk to. It is a .NET 10 API in `server/`, backed by PostgreSQL for the index and metrics and by Artifact Keeper for immutable package archives. [ADR 0004](decisions/0004-internal-marketplace.md) records the decision. The generated OpenAPI document is [`server/openapi.json`](../server/openapi.json).
 
+The same server serves the web portal at `/` and the installers at `/downloads` ([ADR 0006](decisions/0006-web-portal-and-review.md)). Those need no sign-in; an unknown `/api/*` route is still a `404` problem document.
+
 ## Authentication
 
 Every endpoint except `GET /api/health` requires an authenticated principal.
 
-| Scheme      | When                                          | Header                             |
-| ----------- | --------------------------------------------- | ---------------------------------- |
-| `Negotiate` | Production. Kerberos validated with a keytab. | `Authorization: Negotiate <token>` |
-| `DevHeader` | `ASPNETCORE_ENVIRONMENT=Development` only.    | `X-Dev-User: <username>`           |
+| Scheme      | When                                          | Header                                                 |
+| ----------- | --------------------------------------------- | ------------------------------------------------------ |
+| `Negotiate` | Production. Kerberos validated with a keytab. | `Authorization: Negotiate <token>`                     |
+| `DevHeader` | Development, or `Auth:AllowDevHeader`.        | `X-Dev-User: <username>`, optional `X-Dev-Groups: a,b` |
 
 The principal's namespace is its lowercase sAMAccountName. Group claims come from LDAP when `Auth:LdapDomain` is configured; the claim value is the AD group's CN, and every group comparison is case-insensitive. A configured or listed account matches by username, so `CORP\jane`, `jane@corp.example`, and `jane` name the same person.
 
@@ -18,6 +20,10 @@ The principal's namespace is its lowercase sAMAccountName. Group claims come fro
 Who may see and install what is server policy ([ADR 0005](decisions/0005-marketplace-access-control.md)). A namespace (`ns`) or one package (`ns/packageId`) may carry an allowlist of accounts and groups. No list means public. A package list replaces its namespace list. Owners of a namespace and admins always see it. Everything the caller may not see answers `404`, never `403`, so the desktop app treats it as gone.
 
 A **team namespace** is a `source.id` owned by an AD group: `Auth:TeamNamespaces` lists `{ namespace, group, displayName }` entries, and every member of `group` may publish and yank there and manage its access lists. Who may _read_ a team namespace is a separate access list. Use a `team-` prefix so a team never collides with a person's derived namespace.
+
+### Review
+
+Each version is `pending`, `approved`, or `rejected` ([ADR 0006](decisions/0006-web-portal-and-review.md)). A publish is approved at once when the publisher is an admin, or when the package already has a live version and the new version contains no MCP server; otherwise it waits for an admin. Only approved, non-yanked versions are **live**: the catalog, index, namespace archives, and everyone but owners and admins see nothing else. A package with no live version answers `404` to them. A pending version leaves the package's name, description, and tags unchanged until it is approved.
 
 ## Endpoints
 
@@ -82,13 +88,25 @@ Only packages the caller may see are listed. `lane` is `official`, `team`, or `p
 
 ### `GET /api/packages/{namespace}/{packageId}`
 
-Returns the package's versions, newest first, with `yanked` flags and each version's `archiveDigest`. `404` when the caller may not see the package.
+The package and its versions, newest first: `liveVersion` (null until one is approved) and, per version, `archiveDigest`, `sizeBytes`, `publishedBy`, `publishedAt`, `changelog`, `yanked`, `componentKinds`, `reviewState`, and `reviewNote`. Owners and admins see every version and the reviewer's note; everyone else sees approved versions only. `404` when the caller may not see the package.
+
+### `GET /api/packages/{namespace}/{packageId}/versions/{version}/files`
+
+The version's files as `[{ "path": "skills/review/SKILL.md", "size": 812 }]`, relative to the source root. `GET …/files/{path}` returns one file: UTF-8 text as `text/plain; charset=utf-8`, anything else as an `application/octet-stream` attachment, `413` above 1 MB. Readable by owners and admins, and by others only for live versions they may see.
+
+### `GET /api/mine`
+
+What the portal's My skills page shows: `spaces[]` (`namespace`, `displayName`, `lane`) the caller may publish to, and `packages[]` in those namespaces in the package-detail shape, including pending and rejected versions.
 
 ### `POST /api/packages/{namespace}/{packageId}/versions`
 
-Publishes a version. Multipart form: `archive` (zip, tar, or tar.gz containing exactly one package), `version` (semver string), optional `tags` (comma separated), optional `changelog` (text).
+Publishes a version. Multipart form: `version` (semver string), optional `tags` (comma separated), optional `changelog` (text), and the content as one of:
 
-Server checks, in order: caller owns `{namespace}`; archive within 50 MB and free of unsafe entries; `agent-plugins.json` present with `source.id == namespace`, exactly one package whose `id == packageId`; the Rust `validate-source` binary reports no errors; the version is not already published. On success the version is stored in Artifact Keeper, the namespace archive is regenerated, and the response is `201` with the version document. Validation failures return `422` with the validator messages.
+- `archive`: a zip. With `agent-plugins.json` at its root it must declare exactly one package; without one, its contents are wrapped as below.
+- `files` with one `paths` value each (relative, forward slashes): a skill directory (`SKILL.md` at the root), a folder of skill directories (a skill pack), one MCP document (`.json`), or a source tree. A single top-level folder shared by every path is dropped. Optional `name` and `description` label a wrapped package.
+- `files` and `paths` with `base` set to a published version: the files replace or add to that version's files, which is how the portal edits a skill.
+
+Wrapping is `validate-source stage`, the same code as `agent-plugins publish`. Server checks, in order: caller owns `{namespace}`; upload within 50 MB and free of unsafe paths; `agent-plugins.json` with `source.id == namespace` and exactly one package whose `id == packageId`; the Rust validator, with its credential scan, reports no errors; the version was never published before (pending and rejected numbers stay used). On success the version is stored in Artifact Keeper and the response is `201` with the version document, whose `reviewState` says whether it is live or waiting. Only an approved version regenerates the namespace archive. Validation failures return `422` with the validator messages.
 
 ### `POST /api/packages/{namespace}/{packageId}/versions/{version}/yank`
 
@@ -127,11 +145,23 @@ Replaces the allowlist. Body `{ "users": [...], "groups": [...] }`; both lists e
 
 ### `GET /api/admin/summary`
 
-Admin group only. Active users (1, 7, 30 days), client version distribution, agent mix, top packages, and preflight failure counts by check ID over the last 7 days.
+Admins only. Active users (1, 7, 30 days), live package and publisher counts, client version distribution, agent mix, top packages, preflight failure counts by check ID over the last 7 days, and the number of unresolved reports.
+
+### `GET /api/admin/reviews`
+
+Admins only. The pending versions, oldest first, with `firstVersion` (the package has never been approved), `liveVersion`, `componentKinds`, `publishedBy`, and `changelog`.
+
+### `POST /api/admin/reviews/{namespace}/{packageId}/{version}`
+
+Admins only. Body `{ "decision": "approve" | "reject", "note": "…" }`; a rejection needs a note (at most 2,048 characters), which the publisher sees. Approval makes the version live and regenerates the namespace archive. `204`; `409` when the version is not pending; `404` when it does not exist.
+
+### `GET /api/admin/reports` and `POST /api/admin/reports/{id}/resolve`
+
+Admins only. The latest 200 reports, unresolved first, with `resolvedAt` and `resolvedBy`; resolving one returns `204`.
 
 ### `POST /api/reports`
 
-Flags a package. Body: `packageId`, `reason`. Stored and surfaced in the admin summary.
+Flags a package. Body: `packageId`, `reason`. Stored, counted in the admin summary until resolved, and listed at `/api/admin/reports`.
 
 ## Errors
 
@@ -139,17 +169,18 @@ Errors are RFC 9457 problem documents. `401` carries `WWW-Authenticate: Negotiat
 
 ## Configuration
 
-| Setting                                   | Meaning                                                                                        |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `ConnectionStrings:Marketplace`           | PostgreSQL connection string.                                                                  |
-| `ArtifactKeeper:BaseUrl`                  | Artifact Keeper API base, for example `http://artifact-keeper:8080`.                           |
-| `ArtifactKeeper:Repository`               | Generic repository name, for example `files`.                                                  |
-| `ArtifactKeeper:Prefix`                   | Path prefix inside the repository, for example `marketplace`.                                  |
-| `ArtifactKeeper:Username` / `Password`    | Service credential used to obtain a bearer token.                                              |
-| `Auth:LdapDomain`                         | Optional. Enables LDAP group claims for Negotiate.                                             |
-| `Auth:AdminGroup`                         | AD group whose members may call `/api/admin/*`.                                                |
-| `Auth:AdminAccounts`                      | Accounts that may call `/api/admin/*`.                                                         |
-| `Auth:OfficialPublishers`                 | Principals that may publish under `official`.                                                  |
-| `Auth:TeamNamespaces`                     | `[{ namespace, group, displayName }]`: team namespaces owned by a group. Validated at startup. |
-| `Client:MinimumVersion` / `LatestVersion` | Values returned by `/api/health`.                                                              |
-| `Validator:Path`                          | Path to the `validate-source` binary inside the image.                                         |
+| Setting                                   | Meaning                                                                                          |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `ConnectionStrings:Marketplace`           | PostgreSQL connection string.                                                                    |
+| `ArtifactKeeper:BaseUrl`                  | Artifact Keeper API base, for example `http://artifact-keeper:8080`.                             |
+| `ArtifactKeeper:Repository`               | Generic repository name, for example `files`.                                                    |
+| `ArtifactKeeper:Prefix`                   | Path prefix inside the repository, for example `marketplace`.                                    |
+| `ArtifactKeeper:Username` / `Password`    | Service credential used to obtain a bearer token.                                                |
+| `Auth:LdapDomain`                         | Optional. Enables LDAP group claims for Negotiate.                                               |
+| `Auth:AdminGroup`                         | AD group whose members may call `/api/admin/*`.                                                  |
+| `Auth:AdminAccounts`                      | Accounts that may call `/api/admin/*`.                                                           |
+| `Auth:OfficialPublishers`                 | Principals that may publish under `official`.                                                    |
+| `Auth:TeamNamespaces`                     | `[{ namespace, group, displayName }]`: team namespaces owned by a group. Validated at startup.   |
+| `Client:MinimumVersion` / `LatestVersion` | Values returned by `/api/health`.                                                                |
+| `Validator:Path`                          | Path to the `validate-source` binary inside the image.                                           |
+| `Server:DownloadsPath`                    | Folder served at `/downloads`: `manifest.json` and `releases/`. The image sets `/srv/downloads`. |

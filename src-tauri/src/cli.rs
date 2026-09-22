@@ -8,16 +8,14 @@
 use crate::application::{self, RuntimeState};
 use crate::host_identity;
 use crate::marketplace::{self, IndexPackage};
-use crate::sources::copy_directory;
-use std::collections::BTreeMap;
+use crate::staging::{scan_for_secrets, stage_tree, zip_tree, StageRequest};
 use std::io::{self, BufRead as _, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const COMMANDS: [&str; 8] = [
     "validate", "publish", "search", "install", "access", "whoami", "help", "--help",
 ];
 const MAX_ARCHIVE_BYTES: u64 = 50 * 1024 * 1024;
-const SECRET_SCAN_LIMIT: u64 = 2 * 1024 * 1024;
 
 /// Runs a CLI command when the first argument names one. Returns the exit code.
 pub(crate) fn maybe_run() -> Option<i32> {
@@ -212,14 +210,6 @@ fn parse_publish_args(args: &[String]) -> Result<PublishArgs, String> {
     Ok(parsed)
 }
 
-/// A source tree staged for upload: `agent-plugins.json` at the root and one package.
-struct StagedPackage {
-    root: PathBuf,
-    package_id: String,
-    file_count: usize,
-    total_bytes: u64,
-}
-
 fn publish(args: &[String]) -> Result<(), String> {
     let args = parse_publish_args(args)?;
     let me = marketplace::fetch_me()?;
@@ -240,11 +230,17 @@ fn publish(args: &[String]) -> Result<(), String> {
         ));
     }
     let staging = tempfile_dir("publish")?;
-    let staged = stage_tree(&args.path, &namespace, args.package_id.as_deref(), &staging)?;
+    let request = StageRequest {
+        namespace: &namespace,
+        package_id: args.package_id.as_deref(),
+        name: None,
+        description: None,
+    };
+    let staged = stage_tree(&args.path, &request, &staging)?;
     let findings = scan_for_secrets(&staged.root)?;
     if !findings.is_empty() {
         for finding in &findings {
-            eprintln!("secret: {finding}");
+            eprintln!("secret: {}: {}", finding.path, finding.reason);
         }
         let _ = std::fs::remove_dir_all(&staging);
         return Err(
@@ -313,11 +309,22 @@ fn publish(args: &[String]) -> Result<(), String> {
     let status = response.status();
     let body = response.text().unwrap_or_default();
     if status.as_u16() == 201 {
-        println!(
-            "published {namespace}/{} {}",
-            staged.package_id, args.version
-        );
-        println!("  {base}/api/packages/{namespace}/{}", staged.package_id);
+        let pending = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|published| published["reviewState"].as_str().map(str::to_owned))
+            .is_some_and(|state| state == "pending");
+        if pending {
+            println!(
+                "submitted {namespace}/{} {} for review; it goes live when an admin approves it",
+                staged.package_id, args.version
+            );
+        } else {
+            println!(
+                "published {namespace}/{} {}",
+                staged.package_id, args.version
+            );
+        }
+        println!("  {base}/p/{namespace}/{}", staged.package_id);
         return Ok(());
     }
     Err(describe_problem(status.as_u16(), &body))
@@ -449,377 +456,6 @@ fn tempfile_dir(label: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Builds a one-package source tree from a skill directory, an MCP document, or
-/// an existing source tree.
-fn stage_tree(
-    input: &Path,
-    namespace: &str,
-    package_id: Option<&str>,
-    staging: &Path,
-) -> Result<StagedPackage, String> {
-    let input = input
-        .canonicalize()
-        .map_err(|error| format!("{}: {error}", input.display()))?;
-    let root = staging.join("source");
-    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    let package_id = if input.join(crate::manifest::SOURCE_MANIFEST_FILE).is_file() {
-        let bytes = std::fs::read(input.join(crate::manifest::SOURCE_MANIFEST_FILE))
-            .map_err(|error| error.to_string())?;
-        let crate::manifest::SourceManifest::V2(manifest) =
-            crate::manifest::SourceManifest::from_slice(&bytes)?;
-        if manifest.source.id != namespace {
-            return Err(format!(
-                "{} declares source.id {}; publish to the namespace {namespace} by setting source.id to it.",
-                crate::manifest::SOURCE_MANIFEST_FILE,
-                manifest.source.id
-            ));
-        }
-        let [package] = manifest.packages.as_slice() else {
-            return Err("A marketplace upload must declare exactly one package.".to_string());
-        };
-        if let Some(requested) = package_id {
-            if requested != package.id {
-                return Err(format!(
-                    "The tree declares package {}, not {requested}.",
-                    package.id
-                ));
-            }
-        }
-        copy_directory(&input, &root)?;
-        package.id.clone()
-    } else if input.join("SKILL.md").is_file() {
-        let (name, description) = skill_frontmatter(&input.join("SKILL.md"))?;
-        let id = package_id.map(str::to_string).unwrap_or_else(|| {
-            name.strip_prefix(&format!("{namespace}-"))
-                .unwrap_or(&name)
-                .to_string()
-        });
-        let skill_dir = root.join("skills").join(&id);
-        std::fs::create_dir_all(skill_dir.parent().unwrap_or(&root))
-            .map_err(|error| error.to_string())?;
-        copy_directory(&input, &skill_dir)?;
-        if name != id {
-            rewrite_skill_name(&skill_dir.join("SKILL.md"), &id)?;
-        }
-        write_manifest(
-            &root,
-            namespace,
-            &id,
-            &title_case(&id),
-            &description,
-            "skill",
-            &format!("skills/{id}"),
-        )?;
-        id
-    } else if input.is_file() && input.extension().is_some_and(|ext| ext == "json") {
-        let bytes = std::fs::read(&input).map_err(|error| error.to_string())?;
-        let document: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("{} is not valid JSON: {error}", input.display()))?;
-        if document.get("mcpServers").is_none() {
-            return Err(format!("{} has no mcpServers object.", input.display()));
-        }
-        let stem = input
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("mcp")
-            .to_lowercase();
-        let id = package_id.map(str::to_string).unwrap_or(stem);
-        std::fs::create_dir_all(root.join("mcp")).map_err(|error| error.to_string())?;
-        std::fs::copy(&input, root.join("mcp").join(format!("{id}.json")))
-            .map_err(|error| error.to_string())?;
-        write_manifest(
-            &root,
-            namespace,
-            &id,
-            &title_case(&id),
-            &format!("{} MCP server.", title_case(&id)),
-            "mcpServer",
-            &format!("mcp/{id}.json"),
-        )?;
-        id
-    } else {
-        return Err(format!(
-            "{} is not a skill directory (SKILL.md), an MCP document (.json), or a source tree (agent-plugins.json).",
-            input.display()
-        ));
-    };
-    let (file_count, total_bytes) = count_files(&root)?;
-    Ok(StagedPackage {
-        root,
-        package_id,
-        file_count,
-        total_bytes,
-    })
-}
-
-fn write_manifest(
-    root: &Path,
-    namespace: &str,
-    package_id: &str,
-    name: &str,
-    description: &str,
-    kind: &str,
-    component_path: &str,
-) -> Result<(), String> {
-    let manifest = serde_json::json!({
-        "version": 2,
-        "source": {
-            "id": namespace,
-            "name": namespace,
-            "description": format!("Packages published by {namespace}."),
-        },
-        "packages": [{
-            "id": package_id,
-            "name": name,
-            "description": description,
-            "components": [{ "kind": kind, "path": component_path }],
-        }],
-    });
-    let text = serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
-    std::fs::write(
-        root.join(crate::manifest::SOURCE_MANIFEST_FILE),
-        text + "\n",
-    )
-    .map_err(|error| error.to_string())
-}
-
-/// Reads `name` and `description` from SKILL.md frontmatter.
-fn skill_frontmatter(path: &Path) -> Result<(String, String), String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let text = text.trim_start_matches('\u{feff}');
-    let mut lines = text.lines();
-    if lines.next().map(str::trim) != Some("---") {
-        return Err(format!(
-            "{} does not start with YAML frontmatter.",
-            path.display()
-        ));
-    }
-    let frontmatter = lines
-        .by_ref()
-        .take_while(|line| line.trim() != "---")
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mapping: BTreeMap<String, serde_yaml_ng::Value> = serde_yaml_ng::from_str(&frontmatter)
-        .map_err(|error| format!("{} frontmatter is not valid YAML: {error}", path.display()))?;
-    let name = mapping
-        .get("name")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("{} frontmatter has no name.", path.display()))?
-        .to_string();
-    let description = mapping
-        .get("description")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("{} frontmatter has no description.", path.display()))?
-        .to_string();
-    Ok((name, description))
-}
-
-/// The skill name must equal the component ID; rewrite only the `name:` line.
-fn rewrite_skill_name(path: &Path, id: &str) -> Result<(), String> {
-    let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let mut out = String::with_capacity(text.len());
-    let mut in_frontmatter = false;
-    let mut replaced = false;
-    for (index, line) in text.lines().enumerate() {
-        if index == 0 && line.trim() == "---" {
-            in_frontmatter = true;
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        }
-        if in_frontmatter && line.trim() == "---" {
-            in_frontmatter = false;
-        }
-        if in_frontmatter && !replaced && line.trim_start().starts_with("name:") {
-            out.push_str(&format!("name: {id}\n"));
-            replaced = true;
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    std::fs::write(path, out).map_err(|error| error.to_string())
-}
-
-fn title_case(id: &str) -> String {
-    id.split('-')
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn count_files(root: &Path) -> Result<(usize, u64), String> {
-    let mut count = 0;
-    let mut bytes = 0;
-    for path in walk(root)? {
-        let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
-        count += 1;
-        bytes += metadata.len();
-    }
-    Ok((count, bytes))
-}
-
-fn walk(root: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut files = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let mut entries = std::fs::read_dir(&dir)
-            .map_err(|error| format!("{}: {error}", dir.display()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let path = entry.path();
-            let file_type = entry.file_type().map_err(|error| error.to_string())?;
-            if file_type.is_symlink() {
-                return Err(format!(
-                    "{} is a symbolic link; packages cannot contain links.",
-                    path.display()
-                ));
-            }
-            if file_type.is_dir() {
-                stack.push(path);
-            } else {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
-const SECRET_FILE_NAMES: [&str; 6] = [
-    ".env",
-    "id_rsa",
-    "id_ed25519",
-    "id_ecdsa",
-    ".npmrc",
-    ".netrc",
-];
-const SECRET_EXTENSIONS: [&str; 6] = ["pem", "key", "p12", "pfx", "keytab", "jks"];
-const SECRET_MARKERS: [&str; 8] = [
-    "PRIVATE KEY-----",
-    "ghp_",
-    "github_pat_",
-    "xoxb-",
-    "xoxp-",
-    "sk-ant-",
-    "AKIA",
-    "-----BEGIN OPENSSH",
-];
-
-/// Refuses obvious credentials: by file name, extension, or content marker.
-fn scan_for_secrets(root: &Path) -> Result<Vec<String>, String> {
-    let mut findings = Vec::new();
-    for path in walk(root)? {
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .display()
-            .to_string();
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        if SECRET_FILE_NAMES.contains(&file_name) || file_name.starts_with(".env.") {
-            findings.push(format!("{relative}: credential file name"));
-            continue;
-        }
-        if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| SECRET_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
-        {
-            findings.push(format!("{relative}: credential file extension"));
-            continue;
-        }
-        let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
-        if metadata.len() > SECRET_SCAN_LIMIT {
-            continue;
-        }
-        let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
-        let text = String::from_utf8_lossy(&bytes);
-        for marker in SECRET_MARKERS {
-            if let Some(position) = text.find(marker) {
-                if marker == "AKIA" {
-                    let tail = text[position + 4..].chars().take(16).collect::<String>();
-                    if tail.len() < 16
-                        || !tail
-                            .chars()
-                            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
-                    {
-                        continue;
-                    }
-                }
-                findings.push(format!("{relative}: contains {marker}"));
-                break;
-            }
-        }
-    }
-    Ok(findings)
-}
-
-/// Deterministic zip of the tree: sorted entries, forward slashes, fixed timestamps.
-fn zip_tree(root: &Path) -> Result<Vec<u8>, String> {
-    use std::io::Cursor;
-    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let base_options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(zip::DateTime::default());
-    for path in walk(root)? {
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| error.to_string())?
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("/");
-        let options = unix_permissions(&path, base_options)?;
-        writer
-            .start_file(relative, options)
-            .map_err(|error| error.to_string())?;
-        let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
-        writer
-            .write_all(&bytes)
-            .map_err(|error| error.to_string())?;
-    }
-    let cursor = writer.finish().map_err(|error| error.to_string())?;
-    Ok(cursor.into_inner())
-}
-
-#[cfg(unix)]
-fn unix_permissions(
-    path: &Path,
-    options: zip::write::SimpleFileOptions,
-) -> Result<zip::write::SimpleFileOptions, String> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let mode = std::fs::metadata(path)
-        .map_err(|error| error.to_string())?
-        .permissions()
-        .mode();
-    Ok(options.unix_permissions(mode & 0o777))
-}
-
-#[cfg(not(unix))]
-fn unix_permissions(
-    _path: &Path,
-    options: zip::write::SimpleFileOptions,
-) -> Result<zip::write::SimpleFileOptions, String> {
-    Ok(options)
-}
-
 fn install(args: &[String]) -> Result<(), String> {
     let mut id = None;
     let mut approve_mcp = false;
@@ -857,44 +493,6 @@ fn install(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn stages_a_bare_skill_directory() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let skill = temp.path().join("review");
-        std::fs::create_dir_all(&skill).expect("skill dir");
-        std::fs::write(
-            skill.join("SKILL.md"),
-            "---\nname: jacob-review\ndescription: Reviews a change.\n---\n\n# Review\n",
-        )
-        .expect("write");
-        let staging = temp.path().join("staging");
-        let staged = stage_tree(&skill, "jacob", None, &staging).expect("stage");
-        assert_eq!(staged.package_id, "review");
-        let manifest =
-            std::fs::read_to_string(staged.root.join("agent-plugins.json")).expect("manifest");
-        assert!(manifest.contains("\"id\": \"jacob\""));
-        assert!(manifest.contains("skills/review"));
-        let rewritten =
-            std::fs::read_to_string(staged.root.join("skills/review/SKILL.md")).expect("skill");
-        assert!(rewritten.starts_with("---\nname: review\n"));
-        let report =
-            crate::source::validate_source(&staged.root.display().to_string()).expect("validate");
-        assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert_eq!(report.valid_installs, 1);
-        let archive = zip_tree(&staged.root).expect("zip");
-        assert!(archive.len() > 100);
-    }
-
-    #[test]
-    fn refuses_secrets() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("notes.txt"), "token ghp_abcdef\n").expect("write");
-        std::fs::write(temp.path().join("ok.txt"), "AKIAnotakey\n").expect("write");
-        let findings = scan_for_secrets(temp.path()).expect("scan");
-        assert_eq!(findings.len(), 1);
-        assert!(findings[0].starts_with("notes.txt"));
-    }
 
     #[test]
     fn parses_publish_arguments() {

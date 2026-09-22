@@ -1,0 +1,39 @@
+h2 {
+  font: var(--mat-sys-title-large);
+  margin: 0;
+}
+
+mat-form-field {
+  width: 100%;
+}
+
+.editor {
+  display: grid;
+  gap: 1rem;
+
+  &.split {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  textarea {
+    font-family: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
+    font-size: 0.9rem;
+    line-height: 1.5;
+  }
+}
+
+.preview {
+  max-height: 28rem;
+  overflow: auto;
+  padding: 1rem 1.25rem;
+}
+
+.toggle {
+  justify-self: start;
+}
+
+@media (max-width: 720px) {
+  .editor.split {
+    grid-template-columns: 1fr;
+  }
+}

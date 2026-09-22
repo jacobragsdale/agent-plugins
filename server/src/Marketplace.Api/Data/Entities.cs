@@ -59,6 +59,9 @@ public sealed class PackageVersion
 
     public string[] ComponentKinds { get; set; } = [];
 
+    /// <summary>The tags sent with this version; they reach the package listing when the version is approved.</summary>
+    public string[] Tags { get; set; } = [];
+
     public required string PublishedBy { get; set; }
 
     public DateTime PublishedAt { get; set; }
@@ -66,6 +69,23 @@ public sealed class PackageVersion
     public string? Changelog { get; set; }
 
     public bool Yanked { get; set; }
+
+    /// <summary>Pending versions are visible only to their owners and admins until an admin approves them.</summary>
+    public ReviewState ReviewState { get; set; }
+
+    public string? ReviewedBy { get; set; }
+
+    public DateTime? ReviewedAt { get; set; }
+
+    /// <summary>The reviewer's note to the publisher; required when a version is rejected.</summary>
+    public string? ReviewNote { get; set; }
+}
+
+public enum ReviewState
+{
+    Pending,
+    Approved,
+    Rejected,
 }
 
 /// <summary>The generated source archive a client downloads for one namespace.</summary>
@@ -154,4 +174,8 @@ public sealed class PackageReport
     public required string Reason { get; set; }
 
     public DateTime CreatedAt { get; set; }
+
+    public DateTime? ResolvedAt { get; set; }
+
+    public string? ResolvedBy { get; set; }
 }

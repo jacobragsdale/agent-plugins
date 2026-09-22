@@ -32,6 +32,31 @@
         "responses": { "200": { "description": "OK" } }
       }
     },
+    "/api/packages/{ns}/{packageId}/versions/{version}/files": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "PackageFiles",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/packages/{ns}/{packageId}/versions/{version}/files/{path}": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "PackageFile",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "path", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
     "/api/packages/{ns}/{packageId}/versions": {
       "post": {
         "tags": ["Marketplace.Api"],
@@ -55,6 +80,7 @@
         "responses": { "200": { "description": "OK" } }
       }
     },
+    "/api/mine": { "get": { "tags": ["Marketplace.Api"], "operationId": "Mine", "responses": { "200": { "description": "OK" } } } },
     "/api/events": {
       "post": {
         "tags": ["Marketplace.Api"],
@@ -104,7 +130,29 @@
       }
     },
     "/api/admin/summary": { "get": { "tags": ["Marketplace.Api"], "operationId": "AdminSummary", "responses": { "200": { "description": "OK" } } } },
-    "/api/admin/reports": { "get": { "tags": ["Marketplace.Api"], "operationId": "AdminReports", "responses": { "200": { "description": "OK" } } } }
+    "/api/admin/reports": { "get": { "tags": ["Marketplace.Api"], "operationId": "AdminReports", "responses": { "200": { "description": "OK" } } } },
+    "/api/admin/reports/{id}/resolve": {
+      "post": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "ResolveReport",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": "integer", "format": "int64" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/admin/reviews": { "get": { "tags": ["Marketplace.Api"], "operationId": "Reviews", "responses": { "200": { "description": "OK" } } } },
+    "/api/admin/reviews/{ns}/{packageId}/{version}": {
+      "post": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Review",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReviewRequest" } } }, "required": true },
+        "responses": { "200": { "description": "OK" } }
+      }
+    }
   },
   "components": {
     "schemas": {
@@ -131,7 +179,8 @@
         }
       },
       "EventsBatch": { "required": ["events"], "type": "object", "properties": { "events": { "type": "array", "items": { "$ref": "#/components/schemas/ClientEventDto" } } } },
-      "ReportRequest": { "required": ["packageId", "reason"], "type": "object", "properties": { "packageId": { "type": "string" }, "reason": { "type": "string" } } }
+      "ReportRequest": { "required": ["packageId", "reason"], "type": "object", "properties": { "packageId": { "type": "string" }, "reason": { "type": "string" } } },
+      "ReviewRequest": { "required": ["decision", "note"], "type": "object", "properties": { "decision": { "type": "string" }, "note": { "type": ["null", "string"] } } }
     }
   },
   "tags": [{ "name": "Marketplace.Api" }]

@@ -1,5 +1,12 @@
+packages:
+  - website
+
+# The Angular CLI's native accelerators are optional; their prebuilt binaries cover every CI platform.
 allowBuilds:
+  "@parcel/watcher": false
   esbuild: true
+  lmdb: false
+  msgpackr-extract: false
 # Radix Themes 3.3.0 declarations need these narrow fixes under exactOptionalPropertyTypes.
 patchedDependencies:
   "@radix-ui/themes@3.3.0": patches/@radix-ui__themes@3.3.0.patch

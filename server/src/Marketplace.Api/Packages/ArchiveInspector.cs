@@ -31,38 +31,9 @@ public static class ArchiveInspector
 
     public static InspectedArchive Inspect(ReadOnlyMemory<byte> bytes)
     {
-        if (bytes.Length > MaxArchiveBytes)
-        {
-            throw new ArchiveRejectedException("The archive is larger than the 50 MB limit.");
-        }
-
         using var stream = new MemoryStream(bytes.ToArray(), writable: false);
         using var zip = OpenZip(stream);
-        var names = new List<string>();
-        long uncompressed = 0;
-        foreach (var entry in zip.Entries)
-        {
-            if (++uncompressed > MaxEntries)
-            {
-                throw new ArchiveRejectedException($"The archive has more than {MaxEntries} entries.");
-            }
-
-            var name = SafeName(entry);
-            if (name is null)
-            {
-                continue;
-            }
-
-            names.Add(name);
-        }
-
-        uncompressed = zip.Entries.Sum(entry => entry.Length);
-        if (uncompressed > MaxUncompressedBytes)
-        {
-            throw new ArchiveRejectedException("The archive expands to more than 200 MB.");
-        }
-
-        var prefix = RootPrefix(names);
+        var (names, prefix) = Scan(zip, bytes.Length);
         var manifestEntry = zip.GetEntry(prefix + ManifestFile)
             ?? throw new ArchiveRejectedException($"The archive has no {ManifestFile} at its root.");
         JsonObject manifest;
@@ -102,6 +73,18 @@ public static class ArchiveInspector
             .Where(name => name.Length > 0)
             .ToArray();
         return new InspectedArchive(sourceId, packageId, (JsonObject)package.DeepClone(), kinds, relative, prefix);
+    }
+
+    /// <summary>
+    /// Applies the size, entry-count, and path checks without requiring a manifest. An archive
+    /// without <c>agent-plugins.json</c> at its root holds a bare skill or skills to wrap.
+    /// </summary>
+    public static (string Prefix, bool HasManifest) Survey(ReadOnlyMemory<byte> bytes)
+    {
+        using var stream = new MemoryStream(bytes.ToArray(), writable: false);
+        using var zip = OpenZip(stream);
+        var (names, prefix) = Scan(zip, bytes.Length);
+        return (prefix, names.Contains(prefix + ManifestFile));
     }
 
     /// <summary>Extracts the source root into <paramref name="destination"/> for validation.</summary>
@@ -167,6 +150,18 @@ public static class ArchiveInspector
             return null;
         }
 
+        SafePath(name);
+        if (((entry.ExternalAttributes >> 16) & 0xF000) == SymlinkMode)
+        {
+            throw new ArchiveRejectedException($"Symbolic links are not accepted: {name}");
+        }
+
+        return name;
+    }
+
+    /// <summary>Rejects backslashes, absolute paths, and <c>.</c> or <c>..</c> segments in a relative path.</summary>
+    public static void SafePath(string name)
+    {
         if (name.Contains('\\'))
         {
             throw new ArchiveRejectedException($"Entry uses backslashes: {name}");
@@ -177,18 +172,31 @@ public static class ArchiveInspector
             throw new ArchiveRejectedException($"Entry has an absolute path: {name}");
         }
 
-        var segments = name.Split('/');
-        if (segments.Any(segment => segment is ".." or "."))
+        if (name.Split('/').Any(segment => segment is ".." or "."))
         {
             throw new ArchiveRejectedException($"Entry contains a relative path segment: {name}");
         }
+    }
 
-        if (((entry.ExternalAttributes >> 16) & 0xF000) == SymlinkMode)
+    private static (List<string> Names, string Prefix) Scan(ZipArchive zip, long archiveBytes)
+    {
+        if (archiveBytes > MaxArchiveBytes)
         {
-            throw new ArchiveRejectedException($"Symbolic links are not accepted: {name}");
+            throw new ArchiveRejectedException("The archive is larger than the 50 MB limit.");
         }
 
-        return name;
+        if (zip.Entries.Count > MaxEntries)
+        {
+            throw new ArchiveRejectedException($"The archive has more than {MaxEntries} entries.");
+        }
+
+        var names = zip.Entries.Select(SafeName).OfType<string>().ToList();
+        if (zip.Entries.Sum(entry => entry.Length) > MaxUncompressedBytes)
+        {
+            throw new ArchiveRejectedException("The archive expands to more than 200 MB.");
+        }
+
+        return (names, RootPrefix(names));
     }
 
     /// <summary>When every entry lives under one top-level directory, that directory is the root.</summary>

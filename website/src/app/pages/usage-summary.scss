@@ -1,0 +1,77 @@
+:host {
+  display: grid;
+  gap: 1rem;
+}
+
+h2 {
+  font: var(--mat-sys-title-large);
+  margin: 0;
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 1rem;
+}
+
+.tile {
+  display: grid;
+  gap: 0.25rem;
+  background: var(--card);
+  border: var(--border);
+  border-radius: var(--radius-small);
+  padding: 1rem;
+
+  .value {
+    font: var(--mat-sys-headline-medium);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+  gap: 1rem;
+}
+
+.bars {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+
+  li {
+    display: grid;
+    grid-template-columns: minmax(6rem, 12rem) 1fr 3rem;
+    align-items: center;
+    gap: 0.75rem;
+    font: var(--mat-sys-body-medium);
+
+    &.muted {
+      display: block;
+    }
+  }
+
+  .label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .bar {
+    height: 10px;
+
+    span {
+      display: block;
+      height: 100%;
+      border-radius: 0 4px 4px 0;
+      background: var(--mat-sys-primary);
+    }
+  }
+
+  .count {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+}

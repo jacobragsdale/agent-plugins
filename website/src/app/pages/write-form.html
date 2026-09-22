@@ -1,0 +1,37 @@
+@if (editing()) {
+  <section class="card stack">
+    <h2>Listing</h2>
+    <mat-form-field appearance="outline">
+      <mat-label>Name</mat-label>
+      <input matInput maxlength="120" required [value]="packTitle()" (input)="packTitle.set(text($event))" />
+    </mat-form-field>
+    <mat-form-field appearance="outline">
+      <mat-label>Short description</mat-label>
+      <textarea matInput rows="2" maxlength="1024" required [value]="packDescription()" (input)="packDescription.set(text($event))"></textarea>
+      <mat-hint>Shown on the card in Browse.</mat-hint>
+    </mat-form-field>
+  </section>
+}
+
+@for (draft of drafts(); track draft.key; let index = $index) {
+  <app-skill-editor [draft]="draft" [heading]="heading(draft, index)" [showName]="!editing()" [removable]="isPack()" (changed)="update(draft.key, $event)" (remove)="remove(draft.key)" />
+}
+
+@if (!editing()) {
+  <button mat-stroked-button type="button" class="add" (click)="add()"><app-icon name="add" />Add another skill</button>
+  @if (isPack()) {
+    <section class="card stack">
+      <h2>Skill pack</h2>
+      <p class="muted">Several skills published together, installed and updated as one.</p>
+      <mat-form-field appearance="outline">
+        <mat-label>Pack name</mat-label>
+        <input matInput maxlength="120" required placeholder="Writing helpers" [value]="packTitle()" (input)="packTitle.set(text($event))" />
+      </mat-form-field>
+      <mat-form-field appearance="outline">
+        <mat-label>What's in it? (optional)</mat-label>
+        <textarea matInput rows="2" maxlength="1024" [value]="packDescription()" (input)="packDescription.set(text($event))"></textarea>
+        <mat-hint>Left empty, the skill names are listed.</mat-hint>
+      </mat-form-field>
+    </section>
+  }
+}

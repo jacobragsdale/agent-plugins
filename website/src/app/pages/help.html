@@ -1,0 +1,390 @@
+<div class="page help">
+  <nav class="topics" aria-label="Help topics">
+    <a routerLink="/help/publish" routerLinkActive="active">Command line</a>
+    <a routerLink="/help/source-manifest" routerLinkActive="active">Source manifest</a>
+    <a routerLink="/help/source-repository" routerLinkActive="active">Source repository</a>
+  </nav>
+
+  <article class="spec">
+    @switch (topic()) {
+      @case ("source-manifest") {
+        <header class="intro">
+          <h1>Source manifest</h1>
+          <p class="spec-intro">
+            The source manifest is a file named <code>agent-plugins.json</code> at the root of a source archive. Agent Plugins reads that file to learn the source identity and the packages it can
+            install. Publish the tree as a zip, tar, or tar.gz at a raw HTTPS URL. A <a routerLink="/help/source-repository">source repository</a> is a separate catalog that lists those archives.
+          </p>
+        </header>
+
+        <section aria-labelledby="create-heading">
+          <h2 id="create-heading">Create a compatible source</h2>
+          <ol class="spec-steps">
+            <li>
+              <h2>Make the source tree</h2>
+              <p>
+                Put <code>agent-plugins.json</code> at the top level. Host a zip, tar, or tar.gz of that tree at an <code>https://</code> artifact URL. Artifact URLs may include a query string and
+                must not include credentials.
+              </p>
+              <pre><code>example-source/
+        ├── agent-plugins.json
+        ├── mcp/
+        │   └── database.json
+        └── skills/
+        └── review/
+          └── SKILL.md</code></pre>
+            </li>
+
+            <li>
+              <h2>Write the manifest</h2>
+              <p>
+                Set <code>version</code> to <code>2</code>. Give the source a stable id. Add one package for each installable unit. A package lists one or more <code>skill</code> or
+                <code>mcpServer</code> components.
+              </p>
+              <pre><code>&#123;
+        "version": 2,
+        "source": &#123;
+        "id": "example",
+        "name": "Example source",
+        "description": "Portable review configuration."
+        &#125;,
+        "packages": [
+        &#123;
+        "id": "review",
+        "components": [
+          &#123; "kind": "skill", "id": "review", "path": "skills/review" &#125;,
+          &#123; "kind": "mcpServer", "id": "database", "path": "mcp/database.json" &#125;
+        ]
+        &#125;
+        ]
+        &#125;</code></pre>
+
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Field</th>
+                      <th>Rule</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><code>version</code></td>
+                      <td>Required integer. Must be <code>2</code>.</td>
+                    </tr>
+                    <tr>
+                      <td><code>source.id</code></td>
+                      <td>2–16 lowercase letters, digits, or single hyphens. Must begin with a letter. Namespaces package and install names.</td>
+                    </tr>
+                    <tr>
+                      <td><code>source.name</code></td>
+                      <td>Required display name, 1–120 characters.</td>
+                    </tr>
+                    <tr>
+                      <td><code>source.description</code></td>
+                      <td>Required description, 1–1,024 characters.</td>
+                    </tr>
+                    <tr>
+                      <td><code>packages[].id</code></td>
+                      <td>1–64 lowercase letters, digits, or single hyphens. Unique inside the source.</td>
+                    </tr>
+                    <tr>
+                      <td><code>packages[].components[].kind</code></td>
+                      <td><code>skill</code> or <code>mcpServer</code>.</td>
+                    </tr>
+                    <tr>
+                      <td><code>packages[].components[].id</code></td>
+                      <td>Required when the package has several components. A single component may inherit the package id.</td>
+                    </tr>
+                    <tr>
+                      <td><code>packages[].components[].path</code></td>
+                      <td>Archive-relative skill directory or MCP document.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p>
+                Unknown fields are rejected. Package ids must be unique. Generic file destinations, always-on instruction files, and native <code>agent-plugin&#64;1.0.0</code> package trees are not
+                accepted.
+              </p>
+            </li>
+
+            <li>
+              <h2>Write the skill</h2>
+              <p>
+                A skill path is a directory that contains <code>SKILL.md</code>. The frontmatter <code>name</code> must match the component id. The directory name does not have to match. Agent Plugins
+                rewrites only <code>name</code> to <code>source-id-component-id</code> on install; other keys and the Markdown body are copied through.
+              </p>
+              <pre><code>---
+        name: review
+        description: Reviews a change before it is submitted.
+        disable-model-invocation: true
+        ---
+
+        # Review
+
+        Follow the repository's review workflow.</code></pre>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Field</th>
+                      <th>Rule</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><code>name</code></td>
+                      <td>Required. 1–64 lowercase letters, digits, or single hyphens. Must equal the component id.</td>
+                    </tr>
+                    <tr>
+                      <td><code>description</code></td>
+                      <td>Required non-empty string, at most 1,024 characters.</td>
+                    </tr>
+                    <tr>
+                      <td><code>disable-model-invocation</code></td>
+                      <td>Optional boolean.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </li>
+
+            <li>
+              <h2>Write the MCP document</h2>
+              <p>
+                An <code>mcpServer</code> path is a JSON file. Set <code>$schema</code> to the Agent Plugins 1.0.0 MCP schema and declare one or more servers. A stdio <code>command</code> must be a
+                bare executable on <code>PATH</code>.
+              </p>
+              <pre><code>&#123;
+        "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+        "mcpServers": &#123;
+        "database": &#123;
+        "type": "stdio",
+        "command": "npx",
+        "args": ["&#64;acme/database-mcp"]
+        &#125;
+        &#125;
+        &#125;</code></pre>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Field</th>
+                      <th>Rule</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><code>$schema</code></td>
+                      <td>Required. Must be <code>https://agent-plugins.org/schemas/1.0.0/mcp.schema.json</code>.</td>
+                    </tr>
+                    <tr>
+                      <td><code>mcpServers</code></td>
+                      <td>Required object with at least one entry. Keys are 1–64 character server names.</td>
+                    </tr>
+                    <tr>
+                      <td><code>type</code></td>
+                      <td><code>stdio</code>, <code>streamable-http</code>, or <code>sse</code>.</td>
+                    </tr>
+                    <tr>
+                      <td><code>command</code></td>
+                      <td>Required for <code>stdio</code>. Bare executable name. No <code>./bin/server</code> or <code>$&#123;PLUGIN_ROOT&#125;</code>.</td>
+                    </tr>
+                    <tr>
+                      <td><code>url</code></td>
+                      <td>Required for remote types. <code>https</code>, or <code>http</code> only on localhost.</td>
+                    </tr>
+                    <tr>
+                      <td>sensitive headers</td>
+                      <td><code>Authorization</code> and API-key headers must be <code>$&#123;ENV_NAME&#125;</code>, not a literal secret.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </li>
+
+            <li>
+              <h2>Check paths and limits</h2>
+              <ul>
+                <li>Directories are copied recursively. Executable permission bits are preserved where supported.</li>
+                <li>Symlinks, special files, globs, commands, hooks, and environment-variable expansion are not supported.</li>
+                <li>The manifest is limited to 1 MB. Selected content is limited to 2,000 files and 50 MB.</li>
+              </ul>
+            </li>
+
+            <li>
+              <h2>Validate and publish</h2>
+              <p>Check the JSON before committing it:</p>
+              <pre><code>jq empty agent-plugins.json</code></pre>
+              <p>For structural validation, save the <a href="/schema/v2/source-manifest.schema.json">v2 JSON Schema</a> beside the manifest and run:</p>
+              <pre><code>npx ajv-cli validate --spec=draft2020 --strict=false \
+        -s source-manifest.schema.json \
+        -d agent-plugins.json</code></pre>
+              <p>
+                Upload an archive of the tree with every referenced path. List that HTTPS URL in a
+                <a routerLink="/help/source-repository">source repository</a>. In Agent Plugins, add the listed source from Manage Sources. Adding a source validates the tree and makes packages
+                available; it does not install them.
+              </p>
+            </li>
+          </ol>
+        </section>
+      }
+      @case ("source-repository") {
+        <header class="intro">
+          <h1>Source repository</h1>
+          <p class="spec-intro">
+            A source repository is a catalog that lists sources. It is not installable. Packages appear only after a listed
+            <a routerLink="/help/source-manifest">source</a> is added. Publish the document as raw JSON at an HTTPS URL. The conventional filename is <code>agent-plugins-repository.json</code>.
+          </p>
+        </header>
+
+        <section aria-labelledby="create-heading">
+          <h2 id="create-heading">Create a compatible catalog</h2>
+          <ol class="spec-steps">
+            <li>
+              <h2>Write the catalog</h2>
+              <p>Set <code>version</code> to <code>1</code>. Give the catalog a stable id, then list each source by name, description, and HTTPS archive URL.</p>
+              <pre><code>&#123;
+        "version": 1,
+        "repository": &#123;
+        "id": "acme",
+        "name": "Acme sources",
+        "description": "Official portable sources."
+        &#125;,
+        "sources": [
+        &#123;
+        "name": "Review workflows",
+        "description": "Review skill and database MCP server.",
+        "url": "https://nexus.example.com/repository/raw/sources/review-latest.zip"
+        &#125;
+        ]
+        &#125;</code></pre>
+
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Field</th>
+                      <th>Rule</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><code>version</code></td>
+                      <td>Required integer. Must be <code>1</code>.</td>
+                    </tr>
+                    <tr>
+                      <td><code>repository.id</code></td>
+                      <td>2–32 lowercase letters, digits, or single hyphens. Must begin with a letter.</td>
+                    </tr>
+                    <tr>
+                      <td><code>repository.name</code></td>
+                      <td>Required display name, 1–120 characters.</td>
+                    </tr>
+                    <tr>
+                      <td><code>repository.description</code></td>
+                      <td>Required description, 1–1,024 characters.</td>
+                    </tr>
+                    <tr>
+                      <td><code>sources[].url</code></td>
+                      <td>HTTPS archive URL. No credentials. Query strings are kept.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p>Unknown fields are rejected. Duplicate URLs after canonicalization are rejected. At most 200 listed sources. Nested catalogs are not accepted.</p>
+            </li>
+
+            <li>
+              <h2>Validate and publish</h2>
+              <p>Check the JSON before publishing it:</p>
+              <pre><code>jq empty agent-plugins-repository.json</code></pre>
+              <p>For structural validation, save the <a href="/schema/v1/source-repository.schema.json">catalog JSON Schema</a> beside the document and run:</p>
+              <pre><code>npx ajv-cli validate --spec=draft2020 --strict=false \
+        -s source-repository.schema.json \
+        -d agent-plugins-repository.json</code></pre>
+              <p>
+                Host the JSON at a stable HTTPS URL. In Agent Plugins, listed sources appear in Manage Sources by name and description. Select Add on a listed source. Adding a source does not install
+                its packages.
+              </p>
+            </li>
+          </ol>
+        </section>
+      }
+      @default {
+        <header class="intro">
+          <h1>Publishing from the command line</h1>
+          <p class="spec-intro">
+            Everything the portal does, the <code>agent-plugins</code> command does too, signed in as you. Use it from a terminal, a script, or a coding agent. The desktop app puts it on your
+            <code>PATH</code> the first time it runs.
+          </p>
+        </header>
+
+        <section aria-labelledby="who-heading">
+          <ol class="spec-steps">
+            <li>
+              <h2 id="who-heading">Check who you publish as</h2>
+              <pre><code>agent-plugins whoami</code></pre>
+              <p><code>publishes to</code> lists every space you may publish to: your own, your team spaces, and <code>official</code> if you are an approved publisher.</p>
+            </li>
+            <li>
+              <h2>Publish</h2>
+              <p>Point <code>publish</code> at what you have. It is wrapped into one package, checked for credentials, validated, and uploaded.</p>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>You have</th>
+                      <th>Command</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>One skill (a folder with <code>SKILL.md</code>)</td>
+                      <td><code>agent-plugins publish ./meeting-notes --version 1.0.0</code></td>
+                    </tr>
+                    <tr>
+                      <td>A skill pack (a folder of skill folders)</td>
+                      <td><code>agent-plugins publish ./writing-helpers --version 1.0.0</code></td>
+                    </tr>
+                    <tr>
+                      <td>An MCP server (one <code>mcp.json</code>-shaped file)</td>
+                      <td><code>agent-plugins publish ./database.json --version 1.0.0</code></td>
+                    </tr>
+                    <tr>
+                      <td>A source tree with <code>agent-plugins.json</code></td>
+                      <td><code>agent-plugins publish ./source --version 1.0.0</code></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p>
+                Add <code>--namespace team-data</code> to publish to a team space, <code>--package-id</code> to choose the ID, <code>--tags a,b</code>, <code>--changelog "…"</code>, and
+                <code>--yes</code> to skip the confirmation.
+              </p>
+            </li>
+            <li>
+              <h2>Review</h2>
+              <p>
+                A package's first version, and every version that contains an MCP server, waits for an admin. The command prints <code>submitted … for review</code>; later skill-only versions of an
+                approved package go live at once. The result shows on <a routerLink="/mine">My skills</a>.
+              </p>
+            </li>
+            <li>
+              <h2>Choose who can see it</h2>
+              <pre><code>agent-plugins access jacob/review --group "Finance Team" --user CORP\jane
+        agent-plugins access jacob/review --public</code></pre>
+              <p>Without a list, everyone who signs in can see a package. A package's list replaces its space's list.</p>
+            </li>
+            <li>
+              <h2>Install</h2>
+              <pre><code>agent-plugins search meeting
+        agent-plugins install jacob/meeting-notes</code></pre>
+              <p>Installing an MCP server needs <code>--approve-mcp</code>, after you have read what it runs.</p>
+            </li>
+          </ol>
+        </section>
+      }
+    }
+  </article>
+</div>

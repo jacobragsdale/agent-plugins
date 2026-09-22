@@ -1,0 +1,38 @@
+<div class="page stack">
+  <a class="back" routerLink="/browse"><app-icon name="arrowBack" />All skills</a>
+
+  @if (detail.hasValue()) {
+    @let item = detail.value();
+    <app-package-header [item]="item" [entry]="entry()" [kinds]="kinds()" />
+
+    @if (ownerStatus(); as status) {
+      <app-owner-panel [ns]="ns()" [pkg]="pkg()" [name]="item.name" [status]="status" [editable]="editable()" (changed)="listing.reload()" />
+    }
+
+    <div class="columns">
+      <mat-tab-group mat-stretch-tabs="false" animationDuration="0ms" class="main">
+        <mat-tab label="Instructions and files">
+          <app-version-files [ns]="ns()" [pkg]="pkg()" [versions]="versions()" [owner]="owner()" [(shown)]="shown" />
+        </mat-tab>
+        <mat-tab label="Versions">
+          <app-version-list [versions]="versions()" [liveVersion]="item.liveVersion" [owner]="owner()" (withdraw)="withdraw($event)" />
+        </mat-tab>
+        @if (usage(); as stats) {
+          <mat-tab label="Usage">
+            <app-package-usage [stats]="stats" />
+          </mat-tab>
+        }
+      </mat-tab-group>
+
+      <app-package-side [item]="item" [entry]="entry()" [version]="shownVersion()" [canReport]="canReport()" (report)="report()" />
+    </div>
+  } @else if (detail.error()) {
+    <div class="card">
+      <h1>Not found</h1>
+      <p class="muted">This skill doesn't exist, was withdrawn, or isn't shared with you.</p>
+      <a mat-stroked-button routerLink="/browse">Browse skills</a>
+    </div>
+  } @else {
+    <mat-progress-bar mode="indeterminate" aria-label="Loading" />
+  }
+</div>

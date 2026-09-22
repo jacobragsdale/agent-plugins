@@ -12,6 +12,7 @@ The .NET 10 API that the Agent Plugins app and CLI talk to. It keeps the package
 | `Dockerfile`                          | Multi-stage image: Rust validator, .NET publish, ASP.NET runtime + krb5. |
 | `compose.yaml`                        | Local Development stack with the `X-Dev-User` header enabled.            |
 | `openapi.json`                        | Generated from `/openapi/v1.json`; regenerate after changing endpoints.  |
+| `releases/`                           | Installers and `manifest.json` for the portal's download page.           |
 
 ## Run locally
 
@@ -22,6 +23,8 @@ curl -H 'X-Dev-User: CORP\jacob' http://localhost:8080/api/me
 ```
 
 Or `docker compose up --build` from this directory. Publishing needs a reachable Artifact Keeper (`ArtifactKeeper__*`).
+
+The image also carries the web portal (`website/`, built in the Dockerfile's `web` stage) under `wwwroot` and the JSON Schemas under `wwwroot/schema`, and serves installers from `Server__DownloadsPath` at `/downloads` (`releases/` in the compose file). Running with `dotnet run` serves the API only unless you copy a portal build into `src/Marketplace.Api/wwwroot`; for portal work use the Angular dev server ([website/README.md](../website/README.md)).
 
 ## Authentication
 

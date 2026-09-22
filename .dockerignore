@@ -1,5 +1,7 @@
 .git
-node_modules
+**/node_modules
+website/.angular
+website/dist
 dist
 src-tauri/target
 src-tauri/gen

@@ -42,11 +42,11 @@ public sealed class AccessService(MarketplaceDbContext db, TimeProvider timeProv
             || rule.Groups.Any(identity.InGroup);
     }
 
-    /// <summary>Every (namespace, package) with a non-yanked version: the set each namespace archive was built from.</summary>
+    /// <summary>Every (namespace, package) with an approved, non-yanked version: the set each namespace archive was built from.</summary>
     public async Task<List<(string Namespace, string PackageId)>> LivePackagesAsync(string? ns, CancellationToken cancellationToken)
     {
         var rows = await db.PackageVersions.AsNoTracking()
-            .Where(version => !version.Yanked && (ns == null || version.Package.Namespace == ns))
+            .Where(version => !version.Yanked && version.ReviewState == ReviewState.Approved && (ns == null || version.Package.Namespace == ns))
             .Select(version => new { version.Package.Namespace, version.Package.PackageId })
             .Distinct()
             .ToListAsync(cancellationToken);

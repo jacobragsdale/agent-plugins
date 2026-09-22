@@ -1,0 +1,312 @@
+@use "@angular/material" as mat;
+@use "./theme-colors" as brand;
+
+$font:
+  "Segoe UI Variable Text",
+  "Segoe UI",
+  system-ui,
+  -apple-system,
+  "Helvetica Neue",
+  Arial,
+  sans-serif;
+$display-font:
+  "Segoe UI Variable Display",
+  "Segoe UI",
+  system-ui,
+  -apple-system,
+  "Helvetica Neue",
+  Arial,
+  sans-serif;
+
+html {
+  // Follow the Windows light or dark setting.
+  color-scheme: light dark;
+  @include mat.theme(
+    (
+      color: (
+        primary: brand.$primary-palette,
+        tertiary: brand.$tertiary-palette
+      ),
+      typography: (
+        plain-family: $font,
+        brand-family: $display-font
+      ),
+      density: 0
+    )
+  );
+
+  --page-width: 1120px;
+  --radius: 16px;
+  --radius-small: 10px;
+  --border: 1px solid var(--mat-sys-outline-variant);
+  --muted: var(--mat-sys-on-surface-variant);
+  --card: var(--mat-sys-surface-container-lowest);
+  --success: light-dark(#1b7a3d, #7ad99a);
+  --success-container: light-dark(#dcf5e4, #103d21);
+  --warning: light-dark(#8a5a00, #ffc56b);
+  --warning-container: light-dark(#fff0d4, #3d2a05);
+  --code-surface: light-dark(#f3f6f8, #161b1f);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--mat-sys-surface);
+  color: var(--mat-sys-on-surface);
+  font: var(--mat-sys-body-large);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--mat-sys-primary);
+}
+
+h1,
+h2,
+h3 {
+  font-family: $display-font;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.5rem;
+}
+
+h1 {
+  font: var(--mat-sys-headline-large);
+  font-family: $display-font;
+  font-weight: 600;
+}
+
+h2 {
+  font: var(--mat-sys-headline-small);
+  font-family: $display-font;
+  font-weight: 600;
+}
+
+h3 {
+  font: var(--mat-sys-title-medium);
+  font-family: $display-font;
+}
+
+p {
+  margin: 0 0 1rem;
+}
+
+code,
+pre,
+kbd {
+  font-family: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: 0.9em;
+}
+
+code {
+  background: var(--code-surface);
+  border-radius: 6px;
+  padding: 0.1em 0.35em;
+}
+
+pre {
+  background: var(--code-surface);
+  border: var(--border);
+  border-radius: var(--radius-small);
+  padding: 1rem;
+  overflow-x: auto;
+  line-height: 1.5;
+
+  code {
+    background: none;
+    padding: 0;
+  }
+}
+
+.page {
+  width: min(var(--page-width), 100% - 32px);
+  margin: 0 auto;
+  padding: 2rem 0 4rem;
+}
+
+.lead {
+  font: var(--mat-sys-title-medium);
+  color: var(--muted);
+  max-width: 62ch;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.card {
+  background: var(--card);
+  border: var(--border);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+}
+
+.stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  font: var(--mat-sys-label-medium);
+  background: var(--mat-sys-surface-container-high);
+  color: var(--mat-sys-on-surface-variant);
+  white-space: nowrap;
+
+  &.official {
+    background: var(--mat-sys-primary-container);
+    color: var(--mat-sys-on-primary-container);
+  }
+
+  &.team {
+    background: var(--mat-sys-tertiary-container);
+    color: var(--mat-sys-on-tertiary-container);
+  }
+
+  &.live {
+    background: var(--success-container);
+    color: var(--success);
+  }
+
+  &.pending {
+    background: var(--warning-container);
+    color: var(--warning);
+  }
+
+  &.rejected {
+    background: var(--mat-sys-error-container);
+    color: var(--mat-sys-on-error-container);
+  }
+}
+
+.problem {
+  border-radius: var(--radius-small);
+  background: var(--mat-sys-error-container);
+  color: var(--mat-sys-on-error-container);
+  padding: 0.75rem 1rem;
+
+  ul {
+    margin: 0.5rem 0 0;
+    padding-left: 1.25rem;
+  }
+}
+
+.notice {
+  border-radius: var(--radius-small);
+  background: var(--mat-sys-secondary-container);
+  color: var(--mat-sys-on-secondary-container);
+  padding: 0.75rem 1rem;
+}
+
+details.technical {
+  border: var(--border);
+  border-radius: var(--radius-small);
+  padding: 0.5rem 1rem;
+
+  summary {
+    cursor: pointer;
+    font: var(--mat-sys-label-large);
+    color: var(--muted);
+    padding: 0.25rem 0;
+  }
+
+  dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.35rem 1rem;
+    margin: 0.75rem 0 0.25rem;
+  }
+
+  dt {
+    color: var(--muted);
+  }
+
+  dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+}
+
+.markdown {
+  line-height: 1.6;
+
+  :first-child {
+    margin-top: 0;
+  }
+
+  h1 {
+    font: var(--mat-sys-headline-small);
+  }
+
+  h2 {
+    font: var(--mat-sys-title-large);
+    margin-top: 1.5rem;
+  }
+
+  img {
+    max-width: 100%;
+  }
+
+  table {
+    border-collapse: collapse;
+  }
+
+  th,
+  td {
+    border: var(--border);
+    padding: 0.35rem 0.6rem;
+  }
+}
+
+// Icons inside Material buttons sit on the text's centre line.
+.mdc-button__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+mat-button-toggle-group {
+  justify-self: start;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -49,6 +49,9 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
             entity.Property(version => version.ManifestJson).HasColumnType("jsonb");
             entity.Property(version => version.PublishedBy).HasMaxLength(256);
             entity.Property(version => version.Changelog).HasMaxLength(4096);
+            entity.Property(version => version.ReviewState).HasConversion<string>().HasMaxLength(16);
+            entity.Property(version => version.ReviewedBy).HasMaxLength(256);
+            entity.Property(version => version.ReviewNote).HasMaxLength(2048);
             entity.HasIndex(version => new { version.PackageId, version.Version }).IsUnique();
             entity.HasOne(version => version.Package)
                 .WithMany(package => package.Versions)
@@ -96,6 +99,7 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
             entity.Property(report => report.Account).HasMaxLength(256);
             entity.Property(report => report.PackageId).HasMaxLength(81);
             entity.Property(report => report.Reason).HasMaxLength(2048);
+            entity.Property(report => report.ResolvedBy).HasMaxLength(256);
         });
     }
 }

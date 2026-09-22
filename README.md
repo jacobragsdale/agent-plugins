@@ -6,6 +6,8 @@ A **source** is an HTTPS archive with `agent-plugins.json` at its root. That fil
 
 The app plans the files and config each detected agent needs, shows compatibility and trust, then applies the change in one recovery journal and ownership-ledger commit. It never executes source content.
 
+The **web portal**, served by the marketplace, is where people browse skills, download the app, write or upload their own skills and skill packs, and where admins review new ones before they go live.
+
 The `agent-plugins` command line (`validate`, `publish`, `search`, `install`, `whoami`) does the same work from a terminal or from an agent; the official `publish` and `marketplace` skills wrap it.
 
 ## Learn
@@ -20,6 +22,7 @@ The `agent-plugins` command line (`validate`, `publish`, `search`, `install`, `w
 - [Troubleshooting](docs/troubleshoot.md) — a refused install, a skill an agent cannot see, a red status button.
 - [Work on Agent Plugins](docs/development.md) — set up, verify, add an adapter, change a contract, run the server.
 - [Run the marketplace server](server/README.md) — configuration, Kerberos, Artifact Keeper, Docker.
+- [Work on the web portal](website/README.md) — the Angular dev loop against a local server.
 
 ## Look up
 
@@ -40,6 +43,8 @@ The `agent-plugins` command line (`validate`, `publish`, `search`, `install`, `w
 - [ADR 0002](docs/decisions/0002-source-repositories-and-locators.md) — catalogs and locators.
 - [ADR 0003](docs/decisions/0003-artifact-only-catalog.md) — artifact-only distribution.
 - [ADR 0004](docs/decisions/0004-internal-marketplace.md) — the marketplace server, Windows identity, metrics, and publishing.
+- [ADR 0005](docs/decisions/0005-marketplace-access-control.md) — per-user and per-team access.
+- [ADR 0006](docs/decisions/0006-web-portal-and-review.md) — the web portal and review before publishing.
 
 ## Develop
 

@@ -75,17 +75,17 @@ jacob/review                     1.2.0      Jacob Ragsdale           47     31  
 
 Stages `<path>` into a one-package source tree, refuses anything that looks like a credential, validates it, and uploads it to your namespace.
 
-| Argument             | Required | Meaning                                                                                                                                                     |
-| -------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `<path>`             | yes      | A skill directory containing `SKILL.md`, an MCP document in the `mcp.json` shape, or a source tree with `agent-plugins.json` declaring exactly one package. |
-| `--version <semver>` | yes      | `major.minor.patch`. Immutable once published.                                                                                                              |
-| `--namespace <ns>`   | no       | Publish somewhere other than your own namespace. You must be allowlisted for it, or an admin.                                                               |
-| `--package-id <id>`  | no       | Override the derived package ID.                                                                                                                            |
-| `--tags a,b`         | no       | Comma-separated. Blank entries are dropped.                                                                                                                 |
-| `--changelog <text>` | no       | One line recorded against this version.                                                                                                                     |
-| `--yes`, `-y`        | no       | Skip the confirmation prompt.                                                                                                                               |
+| Argument             | Required | Meaning                                                                                                                                                                                                   |
+| -------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<path>`             | yes      | A skill directory containing `SKILL.md`, a folder of skill directories (a skill pack), an MCP document in the `mcp.json` shape, or a source tree with `agent-plugins.json` declaring exactly one package. |
+| `--version <semver>` | yes      | `major.minor.patch`. Immutable once published.                                                                                                                                                            |
+| `--namespace <ns>`   | no       | Publish somewhere other than your own namespace. You must be allowlisted for it, or an admin.                                                                                                             |
+| `--package-id <id>`  | no       | Override the derived package ID.                                                                                                                                                                          |
+| `--tags a,b`         | no       | Comma-separated. Blank entries are dropped.                                                                                                                                                               |
+| `--changelog <text>` | no       | One line recorded against this version.                                                                                                                                                                   |
+| `--yes`, `-y`        | no       | Skip the confirmation prompt.                                                                                                                                                                             |
 
-The package ID comes from the input: a skill directory uses the `SKILL.md` frontmatter `name` with a `<yourname>-` prefix stripped; an MCP document uses the file name; a source tree uses the declared package ID, and its `source.id` must equal the namespace.
+The package ID comes from the input: a skill directory uses the `SKILL.md` frontmatter `name` with a `<yourname>-` prefix stripped; a skill pack uses the folder name, and each subfolder becomes one skill component named by its `SKILL.md`; an MCP document uses the file name; a source tree uses the declared package ID, and its `source.id` must equal the namespace.
 
 It prints a summary and asks before uploading:
 
@@ -98,12 +98,21 @@ publish jacob/review 1.0.0
 Publish? [y/N]
 ```
 
-On success:
+On success, with the package's page in the web portal:
 
 ```text
-published jacob/review 1.0.0
-  https://marketplace.example.com/api/packages/jacob/review
+published jacob/review 1.1.0
+  https://marketplace.example.com/p/jacob/review
 ```
+
+A package's first version, and any version with an MCP server, waits for an admin ([ADR 0006](decisions/0006-web-portal-and-review.md)):
+
+```text
+submitted jacob/review 1.0.0 for review; it goes live when an admin approves it
+  https://marketplace.example.com/p/jacob/review
+```
+
+The server repeats the credential scan, so a file that slips past this one is still refused.
 
 Refusals, before anything is uploaded:
 

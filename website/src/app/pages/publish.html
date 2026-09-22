@@ -1,0 +1,67 @@
+<div class="page stack">
+  <header>
+    <h1>{{ heading() }}</h1>
+    <p class="lead">{{ lead() }}</p>
+  </header>
+
+  @if (session.state().kind === "loading") {
+    <mat-progress-bar mode="indeterminate" aria-label="Loading" />
+  } @else if (session.me() === null) {
+    <div class="card">
+      <h2>Sign in to share skills</h2>
+      <p class="muted">Open this page on your work PC; Windows signs you in automatically.</p>
+    </div>
+  } @else {
+    <form class="stack" (submit)="submit($event)">
+      @if (mode() === "new") {
+        <section class="card stack">
+          <h2>Where should it live?</h2>
+          <mat-form-field appearance="outline" subscriptSizing="dynamic" class="narrow">
+            <mat-label>Space</mat-label>
+            <mat-select [value]="space()" (selectionChange)="setSpace($event.value)">
+              @for (option of spaces(); track option.namespace) {
+                <mat-option [value]="option.namespace">{{ option.label }}</mat-option>
+              }
+            </mat-select>
+            <mat-hint>Your own space shows your name. A team space is shared with everyone on the team.</mat-hint>
+          </mat-form-field>
+          <mat-button-toggle-group aria-label="How to add it" [value]="method()" (change)="setMethod($event.value)">
+            <mat-button-toggle value="write"><app-icon name="write" /> Write it here</mat-button-toggle>
+            <mat-button-toggle value="upload"><app-icon name="upload" /> Upload files</mat-button-toggle>
+          </mat-button-toggle-group>
+        </section>
+      }
+
+      @if (method() === "write") {
+        <app-edit-status [loading]="base.isLoading()" [error]="baseError()" />
+        <!-- Editing waits for the published text, so nothing typed is overwritten when it arrives. -->
+        @if (mode() !== "edit" || base.hasValue()) {
+          <app-write-form [editing]="mode() === 'edit'" [(drafts)]="drafts" [(packTitle)]="packTitle" [(packDescription)]="packDescription" />
+        }
+      } @else {
+        <app-upload-picker [showName]="mode() === 'new'" [(picked)]="picked" [(title)]="uploadTitle" />
+      }
+
+      <app-version-fields
+        [isNew]="mode() === 'new'"
+        [reviewed]="reviewed()"
+        [version]="version()"
+        [space]="space()"
+        [spaceLabel]="spaceLabel()"
+        [packageId]="packageId()"
+        [taken]="taken()"
+        [(bump)]="bump"
+        [(changelog)]="changelog"
+        [(tags)]="tags"
+        [(idOverride)]="idOverride"
+      />
+
+      <app-problem [problem]="problem()" />
+
+      <div class="row submit">
+        <button mat-flat-button type="submit" [disabled]="!ready()"><app-icon name="check" />{{ submitLabel() }}</button>
+        <a mat-button [routerLink]="cancelLink()">Cancel</a>
+      </div>
+    </form>
+  }
+</div>

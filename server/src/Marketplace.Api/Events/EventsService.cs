@@ -258,12 +258,12 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
             Active(7),
             Active(30),
             await db.Publishers.CountAsync(cancellationToken),
-            await db.Packages.CountAsync(package => package.Versions.Any(version => !version.Yanked), cancellationToken),
+            await db.Packages.CountAsync(package => package.Versions.Any(version => !version.Yanked && version.ReviewState == ReviewState.Approved), cancellationToken),
             recent.GroupBy(heartbeat => heartbeat.ClientVersion, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal),
             recent.SelectMany(heartbeat => heartbeat.Agents.Distinct(StringComparer.Ordinal)).GroupBy(agent => agent, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal),
             installedBase,
             preflight,
-            await db.Reports.CountAsync(cancellationToken));
+            await db.Reports.CountAsync(report => report.ResolvedAt == null, cancellationToken));
     }
 
     private static string[] Clean(string[]? values, int maxCount, int maxLength) =>
