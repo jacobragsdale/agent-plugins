@@ -3,8 +3,9 @@
 //   pnpm icons
 //
 // Writes assets/icon/*.svg (the readable sources), assets/icon/app-icon.png
-// (the 1024px master that `tauri icon` expands into the platform set) and
-// src-tauri/icons/tray.png (the macOS menu bar template image).
+// (the 1024px master that `tauri icon` expands into the platform set),
+// src-tauri/icons/tray.png (the macOS menu bar template image), and the web
+// portal's website/public/icon.svg and og.png.
 
 import { Resvg } from "@resvg/resvg-js";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -14,82 +15,53 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const assets = join(root, "assets", "icon");
 const trayOut = join(root, "src-tauri", "icons", "tray.png");
+const webPublic = join(root, "website", "public");
 
-// The mark: three rounded squares (installed skills) and a spark (the live one).
-//
-// Laid out on a 24 unit grid chosen so the block lands on whole pixels when
-// rendered at 16px for the menu bar: origin 1.5u -> 1px, cell 9u -> 6px,
-// gap 3u -> 2px. Corner radius stays small so the squares still read as
-// squares rather than dots once they are six pixels wide.
-const ORIGIN = 1.5;
-const CELL = 9;
-const GAP = 3;
-const RADIUS = 2;
-const SPARK_RADIUS = 5;
-// How far the bezier controls pull toward the centre. Lower is pointier;
-// below about 0.25 the points disappear at 16px.
-const SPARK_PINCH = 0.28;
+// The mark: a chat bubble (the agent) with plug prongs (a plugin). Drawn on
+// the 1024 unit app icon grid.
+const PRONGS = `<rect x="396" y="176" width="64" height="200" rx="32"/><rect x="564" y="176" width="64" height="200" rx="32"/>`;
+const BUBBLE = `<path d="M372 330 H652 A140 140 0 0 1 792 470 V630 A140 140 0 0 1 652 770 H470 L322 862 L346 770 A140 140 0 0 1 232 630 V470 A140 140 0 0 1 372 330Z"/>`;
 
-function sparkPath(cx, cy, r, pinch) {
-  const c = r * pinch;
-  return [`M${cx} ${cy - r}`, `Q${cx + c} ${cy - c} ${cx + r} ${cy}`, `Q${cx + c} ${cy + c} ${cx} ${cy + r}`, `Q${cx - c} ${cy + c} ${cx - r} ${cy}`, `Q${cx - c} ${cy - c} ${cx} ${cy - r}`, "Z"].join(
-    " "
-  );
-}
+// Radix blue 9 to blue 11, the app's own accent (main.tsx accentColor="blue").
+const BLUE = "#0090ff";
+const DEEP_BLUE = "#0d74ce";
 
-// The spark takes its own fill so the app icon can highlight it. The tray
-// image passes a single colour, since template mode is a silhouette.
-function mark(blockFill, sparkFill = blockFill) {
-  const second = ORIGIN + CELL + GAP;
-  const square = (x, y) => `<rect x="${x}" y="${y}" width="${CELL}" height="${CELL}" rx="${RADIUS}" fill="${blockFill}"/>`;
-  return `${square(ORIGIN, ORIGIN)}
-    ${square(ORIGIN, second)}
-    ${square(second, second)}
-    <path d="${sparkPath(second + CELL / 2, ORIGIN + CELL / 2, SPARK_RADIUS, SPARK_PINCH)}" fill="${sparkFill}"/>`;
-}
-
-// Full bleed rounded square on a graphite tile. The blocks sit back in muted
-// slate so the spark reads as the highlight on both colour and brightness.
 const APP_SIZE = 1024;
 const APP_CORNER = 224;
-const GLYPH_BOX = 560;
-const glyphScale = GLYPH_BOX / 24;
-const glyphOffset = (APP_SIZE - GLYPH_BOX) / 2;
-
-const TILE_TOP = "#262e35";
-const TILE_BOTTOM = "#0d1114";
-const BLOCK_COLOR = "#8e9da8";
-const SPARK_COLOR = "#3fbcf5";
-// A dark icon reads as a hole punched in a dark dock. This rim is too faint to
-// register as a border but gives the silhouette an edge.
-const RIM_COLOR = "rgba(255,255,255,0.10)";
-const RIM_WIDTH = 3;
 
 const appIconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${APP_SIZE}" height="${APP_SIZE}" viewBox="0 0 ${APP_SIZE} ${APP_SIZE}">
   <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="0.45" y2="1">
-      <stop offset="0" stop-color="${TILE_TOP}"/>
-      <stop offset="1" stop-color="${TILE_BOTTOM}"/>
+    <linearGradient id="tile" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="${BLUE}"/>
+      <stop offset="1" stop-color="${DEEP_BLUE}"/>
     </linearGradient>
   </defs>
   <rect width="${APP_SIZE}" height="${APP_SIZE}" rx="${APP_CORNER}" fill="url(#tile)"/>
-  <rect x="${RIM_WIDTH / 2}" y="${RIM_WIDTH / 2}" width="${APP_SIZE - RIM_WIDTH}" height="${APP_SIZE - RIM_WIDTH}" rx="${APP_CORNER - RIM_WIDTH / 2}" fill="none" stroke="${RIM_COLOR}" stroke-width="${RIM_WIDTH}"/>
-  <g transform="translate(${glyphOffset} ${glyphOffset}) scale(${glyphScale})">
-    ${mark(BLOCK_COLOR, SPARK_COLOR)}
-  </g>
-</svg>`;
+  <g fill="#ffffff">${PRONGS}${BUBBLE}</g>
+</svg>
+`;
 
 // The tray image is a silhouette: macOS template mode throws away colour and
-// keeps only the alpha channel. The 28 unit box insets the mark so it does not
-// crowd the menu bar.
-const TRAY_BOX = 28;
+// keeps only the alpha channel. The tray shows the plug bubble framed square
+// around its bounds.
 const TRAY_PX = 44;
-const trayInset = (TRAY_BOX - 24) / 2;
+const TRAY_VIEW = "132 139 760 760";
 
-const traySvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${TRAY_BOX}" height="${TRAY_BOX}" viewBox="0 0 ${TRAY_BOX} ${TRAY_BOX}">
-  <g transform="translate(${trayInset} ${trayInset})">
-    ${mark("#000000")}
-  </g>
+const traySvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${TRAY_PX}" height="${TRAY_PX}" viewBox="${TRAY_VIEW}">
+  <g fill="#000000">${PRONGS}${BUBBLE}</g>
+</svg>
+`;
+
+// Link preview card for the web portal: the icon and the name on a pale
+// ground. Text uses whatever system sans resvg finds.
+const OG_W = 1200;
+const OG_H = 630;
+const OG_FONT = "Segoe UI, Inter, Helvetica, Arial, Adwaita Sans, FreeSans, sans-serif";
+const ogSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${OG_W}" height="${OG_H}" viewBox="0 0 ${OG_W} ${OG_H}">
+  <rect width="${OG_W}" height="${OG_H}" fill="#f3f7fa"/>
+  <svg x="96" y="175" width="280" height="280" viewBox="0 0 ${APP_SIZE} ${APP_SIZE}">${appIconSvg.replace(/^<svg[^>]*>|<\/svg>\s*$/g, "")}</svg>
+  <text x="430" y="310" font-family="${OG_FONT}" font-size="92" font-weight="700" fill="#10212e">Agent Plugins</text>
+  <text x="432" y="380" font-family="${OG_FONT}" font-size="36" fill="${DEEP_BLUE}">Skills and MCP servers for your AI apps</text>
 </svg>`;
 
 function png(svg, width) {
@@ -101,7 +73,9 @@ writeFileSync(join(assets, "app-icon.svg"), appIconSvg);
 writeFileSync(join(assets, "tray.svg"), traySvg);
 writeFileSync(join(assets, "app-icon.png"), png(appIconSvg, APP_SIZE));
 writeFileSync(trayOut, png(traySvg, TRAY_PX));
+writeFileSync(join(webPublic, "icon.svg"), appIconSvg);
+writeFileSync(join(webPublic, "og.png"), png(ogSvg, OG_W));
 
 console.log(`assets/icon/app-icon.png (${APP_SIZE}px)`);
 console.log(`src-tauri/icons/tray.png (${TRAY_PX}px template)`);
-console.log("Now run: pnpm tauri icon assets/icon/app-icon.png");
+console.log("website/public/icon.svg, website/public/og.png");
