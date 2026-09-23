@@ -14,6 +14,12 @@ use std::path::{Component, Path};
 const LEDGER_FILE: &str = "installations.json";
 const LEDGER_BACKUP_FILE: &str = "installations.json.previous";
 const LEDGER_VERSION: u8 = 4;
+const CORRUPT_PREFIX: &str = "installations.json.corrupt-";
+/// Present after the ledger was restored from its one-transaction-old backup.
+/// Files on disk are then the better record, so the next repair pass forgets
+/// packages whose files are gone instead of putting them back.
+const RESTORED_MARKER_FILE: &str = "installations.json.restored";
+pub(crate) const NEWER_LEDGER_MESSAGE: &str = "A newer version of Agent Plugins manages the packages on this computer. Update Agent Plugins to install, update, or remove packages.";
 
 pub(crate) struct LegacyPathRoots<'a> {
     pub(crate) home: &'a Path,
@@ -23,6 +29,8 @@ pub(crate) struct LegacyPathRoots<'a> {
     pub(crate) cache: &'a Path,
 }
 
+// Record structs accept unknown fields so a ledger from a newer version still
+// shows its packages, read-only.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum OwnedPathKind {
@@ -31,7 +39,7 @@ pub(crate) enum OwnedPathKind {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct OwnedPath {
     pub(crate) path: String,
     pub(crate) kind: OwnedPathKind,
@@ -39,7 +47,7 @@ pub(crate) struct OwnedPath {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct OwnedStructuredEntry {
     pub(crate) document_path: String,
     pub(crate) format: StructuredFormat,
@@ -49,7 +57,7 @@ pub(crate) struct OwnedStructuredEntry {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct OwnedTextBlock {
     pub(crate) document_path: String,
     pub(crate) marker_id: String,
@@ -66,7 +74,7 @@ pub(crate) enum OwnedResource {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ResourceRecord {
     pub(crate) id: String,
     pub(crate) identity: String,
@@ -78,7 +86,7 @@ pub(crate) struct ResourceRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BindingRecord {
     pub(crate) id: String,
     pub(crate) installation_id: String,
@@ -91,7 +99,7 @@ pub(crate) struct BindingRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct InstallationRecord {
     pub(crate) source_key: String,
     pub(crate) source_url: String,
@@ -123,6 +131,8 @@ pub(crate) struct InstallationLedger {
     pub(crate) bindings: BTreeMap<String, BindingRecord>,
     pub(crate) resources: BTreeMap<String, ResourceRecord>,
     pub(crate) last_transaction_id: Option<String>,
+    /// A newer app version wrote this ledger. It is shown but never changed.
+    pub(crate) read_only: bool,
 }
 
 impl InstallationLedger {
@@ -183,70 +193,194 @@ pub(crate) fn read(
 ) -> Result<InstallationLedger, String> {
     recover(data_base)?;
     let path = data_base.join(LEDGER_FILE);
-    let contents = match fs::read(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(InstallationLedger::default());
+    // The live file first, then the last good copy it is replaced with when
+    // it cannot be parsed.
+    for _ in 0..2 {
+        let contents = match fs::read(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(InstallationLedger::default());
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Could not read the list of installed packages at {}: {}",
+                    path.display(),
+                    fs_retry::plain(&error)
+                ))
+            }
+        };
+        match parse(&path, &contents, &legacy_roots) {
+            Ok((ledger, migrated)) => {
+                if migrated {
+                    persist_migration(data_base, &path, &ledger)?;
+                }
+                return Ok(ledger);
+            }
+            Err(error) => {
+                let quarantine = quarantine(data_base, &path)?;
+                eprintln!(
+                    "Moved the unreadable {} aside to {}: {error}",
+                    path.display(),
+                    quarantine.display()
+                );
+                recover(data_base)?;
+            }
         }
-        Err(error) => return Err(format!("Could not read {}: {error}", path.display())),
-    };
-    let mut value = serde_json::from_slice::<serde_json::Value>(&contents)
+    }
+    Ok(InstallationLedger::default())
+}
+
+fn parse(
+    path: &Path,
+    contents: &[u8],
+    legacy_roots: &LegacyPathRoots<'_>,
+) -> Result<(InstallationLedger, bool), String> {
+    let mut value = serde_json::from_slice::<serde_json::Value>(contents)
         .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
     let mut version = value
         .get("version")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| format!("{} has no valid ledger version.", path.display()))?;
     if version == 2 {
-        migrate_legacy_destinations(&mut value, &legacy_roots)?;
+        migrate_legacy_destinations(&mut value, legacy_roots)?;
         version = 3;
     }
-    let (ledger, migrated) = match version {
+    let (mut ledger, migrated) = match version {
         3 => {
             let legacy = serde_json::from_value::<LedgerFileV3>(value)
                 .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
-            (migrate_v3(legacy, &legacy_roots)?, true)
+            (migrate_v3(legacy, legacy_roots)?, true)
         }
-        4 => {
-            let file = serde_json::from_value::<LedgerFileV4>(value)
-                .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
-            (
-                InstallationLedger {
-                    items: file.items,
-                    bindings: file.bindings,
-                    resources: file.resources,
-                    last_transaction_id: file.last_transaction_id,
-                },
-                false,
-            )
+        version if version >= u64::from(LEDGER_VERSION) => {
+            let mut ledger = InstallationLedger {
+                items: records(path, &value, "items")?,
+                bindings: records(path, &value, "bindings")?,
+                resources: records(path, &value, "resources")?,
+                last_transaction_id: value
+                    .get("lastTransactionId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                read_only: false,
+            };
+            ledger.read_only = version > u64::from(LEDGER_VERSION);
+            (ledger, false)
         }
         _ => {
             return Err(format!(
-                "{} uses an unsupported ledger version; restore a supported backup.",
+                "{} uses an unsupported ledger version.",
                 path.display()
             ));
         }
     };
-    validate(&path, &ledger)?;
-    if migrated {
-        let migration_backup = data_base.join("installations.v3.json");
-        if !migration_backup.exists() {
-            fs::copy(&path, &migration_backup).map_err(|error| {
-                format!(
-                    "Could not preserve the v3 ledger at {}: {error}",
-                    migration_backup.display()
-                )
-            })?;
-        }
-        write(data_base, &ledger)?;
-        let reread = fs::read(data_base.join(LEDGER_FILE))
-            .map_err(|error| format!("Could not reread the migrated ledger: {error}"))?;
-        let migrated_file = serde_json::from_slice::<LedgerFileV4>(&reread)
-            .map_err(|error| format!("Could not verify the migrated ledger: {error}"))?;
-        if migrated_file.version != LEDGER_VERSION {
-            return Err("The migrated ledger did not retain version 4.".to_string());
+    prune(path, &mut ledger);
+    Ok((ledger, migrated))
+}
+
+/// Reads one record map, skipping the records that do not parse so one bad
+/// entry costs only that package.
+fn records<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    value: &serde_json::Value,
+    key: &str,
+) -> Result<BTreeMap<String, T>, String> {
+    let map = value
+        .get(key)
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("{} has no {key} object.", path.display()))?;
+    let mut records = BTreeMap::new();
+    for (id, record) in map {
+        match serde_json::from_value::<T>(record.clone()) {
+            Ok(record) => {
+                records.insert(id.clone(), record);
+            }
+            Err(error) => eprintln!(
+                "Ignored the unreadable {key} entry {id} in {}: {error}",
+                path.display()
+            ),
         }
     }
-    Ok(ledger)
+    Ok(records)
+}
+
+fn persist_migration(
+    data_base: &Path,
+    path: &Path,
+    ledger: &InstallationLedger,
+) -> Result<(), String> {
+    let migration_backup = data_base.join("installations.v3.json");
+    if !migration_backup.exists() {
+        fs_retry::copy(path, &migration_backup).map_err(|error| {
+            format!(
+                "Could not preserve the v3 ledger at {}: {}",
+                migration_backup.display(),
+                fs_retry::plain(&error)
+            )
+        })?;
+    }
+    write(data_base, ledger)?;
+    let reread = fs::read(data_base.join(LEDGER_FILE))
+        .map_err(|error| format!("Could not reread the migrated ledger: {error}"))?;
+    let migrated_file = serde_json::from_slice::<LedgerFileV4>(&reread)
+        .map_err(|error| format!("Could not verify the migrated ledger: {error}"))?;
+    if migrated_file.version != LEDGER_VERSION {
+        return Err("The migrated ledger did not retain version 4.".to_string());
+    }
+    Ok(())
+}
+
+/// Moves an unparsable ledger aside, keeping it for support instead of
+/// deleting what may be the only record of an install.
+fn quarantine(data_base: &Path, path: &Path) -> Result<std::path::PathBuf, String> {
+    let target = quarantine_path(data_base, CORRUPT_PREFIX);
+    fs_retry::rename(path, &target).map_err(|error| {
+        format!(
+            "The list of installed packages at {} is damaged and could not be moved aside: {}",
+            path.display(),
+            fs_retry::plain(&error)
+        )
+    })?;
+    sync_directory(data_base)?;
+    Ok(target)
+}
+
+/// `<directory>/<prefix><seconds>`, with a `-<n>` suffix when that name is
+/// taken, so a second quarantine in the same second never replaces the first.
+pub(crate) fn quarantine_path(directory: &Path, prefix: &str) -> std::path::PathBuf {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut target = directory.join(format!("{prefix}{seconds}"));
+    let mut suffix = 1;
+    while target.exists() {
+        target = directory.join(format!("{prefix}{seconds}-{suffix}"));
+        suffix += 1;
+    }
+    target
+}
+
+/// True once, after a read restored the ledger from its backup; clears it.
+pub(crate) fn take_restored_marker(data_base: &Path) -> bool {
+    fs_retry::remove_file(&data_base.join(RESTORED_MARKER_FILE)).is_ok()
+}
+
+/// Removes the ledger and its backup, backup first, so an interrupted wipe
+/// cannot leave only the older copy for the next read to restore.
+pub(crate) fn remove_files(data_base: &Path) -> Result<(), String> {
+    for name in [LEDGER_BACKUP_FILE, LEDGER_FILE] {
+        match fs_retry::remove_file(&data_base.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Could not remove {}: {}",
+                    data_base.join(name).display(),
+                    fs_retry::plain(&error)
+                ))
+            }
+        }
+    }
+    Ok(())
 }
 
 fn migrate_v3(
@@ -383,70 +517,88 @@ fn migrate_v3(
     Ok(ledger)
 }
 
-fn validate(path: &Path, ledger: &InstallationLedger) -> Result<(), String> {
-    for (id, record) in &ledger.items {
-        if id != &format!("{}/{}", record.source_id, record.local_id)
-            || record.source_key.is_empty()
-            || record.source_url.is_empty()
-            || record.commit.is_empty()
-            || record.name.is_empty()
-            || record.description.is_empty()
-            || record.source.is_empty()
-            || record.destination.path.is_empty()
-            || !Path::new(&record.destination.path).is_absolute()
-            || !valid_digest(&record.item_digest)
-            || !valid_digest(&record.destination.installed_digest)
-            || record.manifest_version == 0
-        {
-            return Err(format!(
-                "{} contains an invalid installation record for {id}.",
-                path.display()
-            ));
+fn valid_item(id: &str, record: &InstallationRecord) -> bool {
+    id == format!("{}/{}", record.source_id, record.local_id)
+        && !record.source_key.is_empty()
+        && !record.source_url.is_empty()
+        && !record.commit.is_empty()
+        && !record.name.is_empty()
+        && !record.description.is_empty()
+        && !record.source.is_empty()
+        && !record.destination.path.is_empty()
+        && Path::new(&record.destination.path).is_absolute()
+        && valid_digest(&record.item_digest)
+        && valid_digest(&record.destination.installed_digest)
+        && record.manifest_version != 0
+}
+
+/// Drops the records that are invalid or point at nothing, keeping the rest.
+/// References to a dropped record are removed rather than dropping their
+/// owner, so one bad resource does not take its whole package with it.
+fn prune(path: &Path, ledger: &mut InstallationLedger) {
+    let mut dropped = Vec::new();
+    ledger.items.retain(|id, record| {
+        let keep = valid_item(id, record);
+        if !keep {
+            dropped.push(format!("package {id}"));
         }
-        if record
-            .binding_ids
-            .iter()
-            .any(|binding_id| !ledger.bindings.contains_key(binding_id))
-        {
-            return Err(format!(
-                "{} has a dangling binding for {id}.",
-                path.display()
-            ));
-        }
-    }
+        keep
+    });
     let mut identities = BTreeSet::new();
-    for (id, resource) in &ledger.resources {
-        if id != &resource.id
-            || resource.identity.is_empty()
-            || !valid_digest(&resource.desired_digest)
-            || !identities.insert(&resource.identity)
-            || resource.consumer_binding_ids.is_empty()
-            || resource
+    ledger.resources.retain(|id, resource| {
+        let keep = id == &resource.id
+            && !resource.identity.is_empty()
+            && valid_digest(&resource.desired_digest)
+            && identities.insert(resource.identity.clone());
+        if !keep {
+            dropped.push(format!("resource {id}"));
+        }
+        keep
+    });
+    loop {
+        let before = (ledger.bindings.len(), ledger.resources.len());
+        let items = &ledger.items;
+        ledger.bindings.retain(|id, binding| {
+            let keep = id == &binding.id && items.contains_key(&binding.installation_id);
+            if !keep {
+                dropped.push(format!("binding {id}"));
+            }
+            keep
+        });
+        let bindings = &ledger.bindings;
+        ledger.resources.retain(|id, resource| {
+            resource
                 .consumer_binding_ids
-                .iter()
-                .any(|binding_id| !ledger.bindings.contains_key(binding_id))
-        {
-            return Err(format!(
-                "{} contains an invalid resource {id}.",
-                path.display()
-            ));
-        }
-    }
-    for (id, binding) in &ledger.bindings {
-        if id != &binding.id
-            || !ledger.items.contains_key(&binding.installation_id)
-            || binding
+                .retain(|binding_id| bindings.contains_key(binding_id));
+            let keep = !resource.consumer_binding_ids.is_empty();
+            if !keep {
+                dropped.push(format!("resource {id}"));
+            }
+            keep
+        });
+        let resources = &ledger.resources;
+        for binding in ledger.bindings.values_mut() {
+            binding
                 .resource_ids
-                .iter()
-                .any(|resource_id| !ledger.resources.contains_key(resource_id))
-        {
-            return Err(format!(
-                "{} contains an invalid binding {id}.",
-                path.display()
-            ));
+                .retain(|resource_id| resources.contains_key(resource_id));
+        }
+        if before == (ledger.bindings.len(), ledger.resources.len()) {
+            break;
         }
     }
-    Ok(())
+    let bindings = &ledger.bindings;
+    for record in ledger.items.values_mut() {
+        record
+            .binding_ids
+            .retain(|binding_id| bindings.contains_key(binding_id));
+    }
+    if !dropped.is_empty() {
+        eprintln!(
+            "Ignored invalid entries in {}: {}",
+            path.display(),
+            dropped.join(", ")
+        );
+    }
 }
 
 fn migrate_legacy_destinations(
@@ -505,8 +657,16 @@ fn migrate_legacy_destinations(
 }
 
 pub(crate) fn write(data_base: &Path, ledger: &InstallationLedger) -> Result<(), String> {
-    fs::create_dir_all(data_base)
-        .map_err(|error| format!("Could not create {}: {error}", data_base.display()))?;
+    if ledger.read_only {
+        return Err(NEWER_LEDGER_MESSAGE.to_string());
+    }
+    fs_retry::create_dir_all(data_base).map_err(|error| {
+        format!(
+            "Could not create {}: {}",
+            data_base.display(),
+            fs_retry::plain(&error)
+        )
+    })?;
     recover(data_base)?;
     let file = LedgerFileV4 {
         version: LEDGER_VERSION,
@@ -555,44 +715,63 @@ fn atomic_write(
     contents: &[u8],
 ) -> Result<(), String> {
     let staging = temporary_path(directory, "installations-writing");
-    let mut file = OpenOptions::new()
+    let staged = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&staging)
-        .map_err(|error| format!("Could not create {}: {error}", staging.display()))?;
-    file.write_all(contents)
-        .and_then(|()| file.sync_all())
-        .map_err(|error| format!("Could not write {}: {error}", staging.display()))?;
+        .and_then(|mut file| file.write_all(contents).and_then(|()| file.sync_all()));
+    if let Err(error) = staged {
+        let _ = fs::remove_file(&staging);
+        return Err(format!(
+            "Could not save the list of installed packages in {}: {}",
+            directory.display(),
+            fs_retry::plain(&error)
+        ));
+    }
     if path.exists() {
-        if backup.exists() {
-            fs_retry::remove_file(backup)
-                .map_err(|error| format!("Could not remove {}: {error}", backup.display()))?;
+        // The replaced file stays behind as the last good copy that a damaged
+        // ledger falls back to.
+        if let Err(error) = fs_retry::rename(path, backup) {
+            let _ = fs::remove_file(&staging);
+            return Err(format!(
+                "Could not stage {}: {}",
+                path.display(),
+                fs_retry::plain(&error)
+            ));
         }
-        fs_retry::rename(path, backup)
-            .map_err(|error| format!("Could not stage {}: {error}", path.display()))?;
-        sync_directory(directory)?;
+        if let Err(error) = sync_directory(directory) {
+            eprintln!("{error}");
+        }
         if let Err(error) = fs_retry::rename(&staging, path) {
+            let _ = fs::remove_file(&staging);
             let restore = fs_retry::rename(backup, path);
             return match restore {
-                Ok(()) => Err(format!("Could not activate {}: {error}", path.display())),
+                Ok(()) => Err(format!(
+                    "Could not save {}: {}",
+                    path.display(),
+                    fs_retry::plain(&error)
+                )),
                 Err(restore_error) => Err(format!(
-                    "Could not activate {} ({error}) or restore it ({restore_error}).",
-                    path.display()
+                    "Could not save {} ({}) or restore it ({restore_error}).",
+                    path.display(),
+                    fs_retry::plain(&error)
                 )),
             };
         }
-        sync_directory(directory)?;
-        fs_retry::remove_file(backup).map_err(|error| {
-            format!(
-                "The ledger updated, but {} could not be removed: {error}",
-                backup.display()
-            )
-        })?;
-    } else {
-        fs_retry::rename(&staging, path)
-            .map_err(|error| format!("Could not activate {}: {error}", path.display()))?;
+    } else if let Err(error) = fs_retry::rename(&staging, path) {
+        let _ = fs::remove_file(&staging);
+        return Err(format!(
+            "Could not save {}: {}",
+            path.display(),
+            fs_retry::plain(&error)
+        ));
     }
-    sync_directory(directory)
+    // The ledger is committed once the rename succeeds. A failed flush now is
+    // a warning, never an error that would roll back files the ledger owns.
+    if let Err(error) = sync_directory(directory) {
+        eprintln!("The ledger was saved, but {error}");
+    }
+    Ok(())
 }
 
 fn recover(data_base: &Path) -> Result<(), String> {
@@ -602,7 +781,10 @@ fn recover(data_base: &Path) -> Result<(), String> {
     }
     let backup = data_base.join(LEDGER_BACKUP_FILE);
     match fs_retry::rename(&backup, &path) {
-        Ok(()) => sync_directory(data_base),
+        Ok(()) => {
+            let _ = fs::write(data_base.join(RESTORED_MARKER_FILE), b"");
+            sync_directory(data_base)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("Could not recover {}: {error}", path.display())),
     }
@@ -678,6 +860,78 @@ mod tests {
             selected_component_ids: Vec::new(),
             conflicts_with: Vec::new(),
         }
+    }
+
+    fn roots(root: &Path) -> LegacyPathRoots<'_> {
+        LegacyPathRoots {
+            home: root,
+            config: root,
+            data: root,
+            local_data: root,
+            cache: root,
+        }
+    }
+
+    fn one_item_ledger(root: &Path, local_id: &str) -> InstallationLedger {
+        let mut ledger = InstallationLedger::default();
+        let mut item = record(&root.join(local_id));
+        item.local_id = local_id.to_string();
+        item.binding_ids.clear();
+        ledger.items.insert(format!("acme/{local_id}"), item);
+        ledger
+    }
+
+    #[test]
+    fn write_keeps_the_previous_ledger_and_a_damaged_one_falls_back_to_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write(root.path(), &one_item_ledger(root.path(), "first")).expect("first");
+        write(root.path(), &one_item_ledger(root.path(), "second")).expect("second");
+        assert!(root.path().join(LEDGER_BACKUP_FILE).exists());
+
+        fs::write(root.path().join(LEDGER_FILE), "{\"version\":4,").expect("damage");
+        let recovered = read(root.path(), roots(root.path())).expect("read");
+        assert!(recovered.items.contains_key("acme/first"));
+        assert!(fs::read_dir(root.path())
+            .expect("dir")
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(CORRUPT_PREFIX)));
+    }
+
+    #[test]
+    fn invalid_records_are_dropped_and_the_rest_are_kept() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut ledger = one_item_ledger(root.path(), "good");
+        let mut bad = record(&root.path().join("bad"));
+        bad.local_id = "bad".to_string();
+        bad.description.clear();
+        bad.binding_ids.clear();
+        ledger.items.insert("acme/bad".to_string(), bad);
+        write(root.path(), &ledger).expect("write");
+        let reread = read(root.path(), roots(root.path())).expect("read");
+        assert_eq!(reread.items.keys().collect::<Vec<_>>(), vec!["acme/good"]);
+    }
+
+    #[test]
+    fn a_newer_ledger_is_read_only() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write(root.path(), &one_item_ledger(root.path(), "first")).expect("write");
+        let path = root.path().join(LEDGER_FILE);
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&path).expect("read"))
+                .expect("json");
+        value["version"] = serde_json::json!(LEDGER_VERSION + 1);
+        value["items"]["acme/first"]["futureField"] = serde_json::json!(true);
+        fs::write(&path, serde_json::to_vec(&value).expect("json")).expect("newer");
+        let ledger = read(root.path(), roots(root.path())).expect("read");
+        assert!(ledger.read_only);
+        assert!(ledger.items.contains_key("acme/first"));
+        assert_eq!(
+            write(root.path(), &ledger).expect_err("refused"),
+            NEWER_LEDGER_MESSAGE
+        );
     }
 
     #[test]
@@ -825,5 +1079,19 @@ mod tests {
         };
         let recovered = read(&data_base, roots).expect("recover backup");
         assert_eq!(recovered.items, migrated.items);
+    }
+
+    #[test]
+    fn quarantine_names_never_collide_and_a_wipe_removes_the_backup_first() {
+        let dir = tempfile::tempdir().expect("dir");
+        let first = quarantine_path(dir.path(), "x.corrupt-");
+        fs::write(&first, "a").expect("first");
+        let second = quarantine_path(dir.path(), "x.corrupt-");
+        assert_ne!(first, second);
+
+        fs::write(dir.path().join(LEDGER_BACKUP_FILE), "{}").expect("backup");
+        remove_files(dir.path()).expect("remove");
+        assert!(!dir.path().join(LEDGER_BACKUP_FILE).exists());
+        assert!(!take_restored_marker(dir.path()));
     }
 }

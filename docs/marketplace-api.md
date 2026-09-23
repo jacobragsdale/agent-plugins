@@ -13,13 +13,21 @@ Every endpoint except `GET /api/health` requires an authenticated principal.
 | `Negotiate` | Production. Kerberos validated with a keytab. | `Authorization: Negotiate <token>`                     |
 | `DevHeader` | Development, or `Auth:AllowDevHeader`.        | `X-Dev-User: <username>`, optional `X-Dev-Groups: a,b` |
 
-The principal's namespace is its lowercase sAMAccountName. Group claims come from LDAP when `Auth:LdapDomain` is configured; the claim value is the AD group's CN, and every group comparison is case-insensitive. A configured or listed account matches by username, so `CORP\jane`, `jane@corp.example`, and `jane` name the same person.
+`Auth:AllowDevHeader` beside Negotiate outside Development logs a startup warning: anyone who can reach the server can claim any account. The server still starts, because the home lab runs that way on purpose.
+
+Group claims come from LDAP when `Auth:LdapDomain` is configured; the claim value is the AD group's CN, and every group comparison is case-insensitive. A configured or listed account matches by username, so `CORP\jane`, `jane@corp.example`, and `jane` name the same person.
+
+### Personal namespaces
+
+The principal's personal namespace is derived from its sAMAccountName: lowercased, each run of other characters replaced by one hyphen, prefixed `u-` when it does not start with a letter, and cut to 16 characters. A derived name equal to `official` or a configured team namespace becomes `u-<name>` (`u-official`).
+
+Two accounts can derive the same name: `christopher.johnson` and `christopher.johnston` both derive `christopher-john`. The first account to publish claims it. Any other account gets the first of `<first 14 characters>-2` through `-9` that it has claimed or that is still free (`christopher-jo-2`); when all are taken, every authenticated request answers `409`. Clients read `namespace` from [`GET /api/me`](#get-apime) and never derive it locally.
 
 ### Access
 
 Who may see and install what is server policy ([ADR 0005](decisions/0005-marketplace-access-control.md)). A namespace (`ns`) or one package (`ns/packageId`) may carry an allowlist of accounts and groups. No list means public. A package list replaces its namespace list. Owners of a namespace and admins always see it. Everything the caller may not see answers `404`, never `403`, so the desktop app treats it as gone.
 
-A **team namespace** is a `source.id` owned by an AD group: `Auth:TeamNamespaces` lists `{ namespace, group, displayName }` entries, and every member of `group` may publish and yank there and manage its access lists. Who may _read_ a team namespace is a separate access list. Use a `team-` prefix so a team never collides with a person's derived namespace.
+A **team namespace** is a `source.id` owned by an AD group: `Auth:TeamNamespaces` lists `{ namespace, group, displayName }` entries, and every member of `group` may publish and yank there and manage its access lists. Who may _read_ a team namespace is a separate access list. Use a `team-` prefix by convention; a person whose name derives to a team namespace gets `u-<name>` instead.
 
 ### Review
 
@@ -35,7 +43,7 @@ Anonymous. Returns server version and client version policy.
 { "serverVersion": "0.1.0", "minimumClientVersion": "0.1.0", "latestClientVersion": "0.1.0", "environment": "Production", "authSchemes": ["Negotiate"] }
 ```
 
-`authSchemes` lets the preflight report `warn` instead of `fail` for a workgroup machine talking to a development server.
+`authSchemes` lets the preflight report `warn` instead of `fail` for a workgroup machine talking to a development server. `503` with a problem document when the database is unreachable.
 
 ### `GET /api/me`
 
@@ -45,7 +53,7 @@ Returns the caller's identity.
 { "account": "CORP\\jacob", "namespace": "jacob", "displayName": "Jacob Ragsdale", "namespaces": ["jacob", "team-data"], "admin": false, "groups": ["Data Engineering"] }
 ```
 
-`namespaces` includes every team namespace the caller's groups own; `groups` is the resolved group claims, useful when a team-restricted package is unexpectedly missing.
+`namespace` is the caller's settled [personal namespace](#personal-namespaces), which can differ from their account name. `namespaces` includes every team namespace the caller's groups own; `groups` is the resolved group claims, useful when a team-restricted package is unexpectedly missing.
 
 ### `GET /api/catalog`
 
@@ -84,15 +92,19 @@ Per-package marketplace metadata joined by canonical ID.
 }
 ```
 
-Only packages the caller may see are listed. `lane` is `official`, `team`, or `personal`. `restricted` is true when the package or its namespace carries an access list. `installs` counts install events over all time; `installedBase` counts principals whose latest heartbeat includes the package.
+Only packages the caller may see are listed. `lane` is `official`, `team`, or `personal`. `publisher.account` is the account that claimed a personal namespace, and the namespace itself (`official`, `team-platform`) for the other lanes. `restricted` is true when the package or its namespace carries an access list. `installs` counts install events over all time; `installedBase` counts principals whose latest heartbeat includes the package.
 
 ### `GET /api/packages/{namespace}/{packageId}`
 
 The package and its versions, newest first: `liveVersion` (null until one is approved) and, per version, `archiveDigest`, `sizeBytes`, `publishedBy`, `publishedAt`, `changelog`, `yanked`, `componentKinds`, `reviewState`, and `reviewNote`. Owners and admins see every version and the reviewer's note; everyone else sees approved versions only. `404` when the caller may not see the package.
 
+### `GET /api/packages/{namespace}/{packageId}/versions/{version}/archive`
+
+The version's stored zip, as published. `Content-Disposition: attachment; filename="{namespace}-{packageId}-{version}.zip"`. Supports `HEAD`; `ETag` is the strong archive digest and `If-None-Match` answers `304`. Readable by owners and admins for any version, and by others only for live versions they may see; otherwise `404`.
+
 ### `GET /api/packages/{namespace}/{packageId}/versions/{version}/files`
 
-The version's files as `[{ "path": "skills/review/SKILL.md", "size": 812 }]`, relative to the source root. `GET …/files/{path}` returns one file: UTF-8 text as `text/plain; charset=utf-8`, anything else as an `application/octet-stream` attachment, `413` above 1 MB. Readable by owners and admins, and by others only for live versions they may see.
+The version's files as `[{ "path": "skills/review/SKILL.md", "size": 812 }]`, relative to the source root. `GET …/files/{path}` returns one file: UTF-8 text up to 1 MB as `text/plain; charset=utf-8`, anything else (binary, or larger than 1 MB) as an `application/octet-stream` attachment. Readable by owners and admins, and by others only for live versions they may see.
 
 ### `GET /api/mine`
 
@@ -100,17 +112,32 @@ What the portal's My skills page shows: `spaces[]` (`namespace`, `displayName`, 
 
 ### `POST /api/packages/{namespace}/{packageId}/versions`
 
-Publishes a version. Multipart form: `version` (semver string), optional `tags` (comma separated), optional `changelog` (text), and the content as one of:
+Publishes a version. Multipart form: `version`, optional `tags` (comma separated), optional `changelog` (text), and the content as one of:
 
 - `archive`: a zip. With `agent-plugins.json` at its root it must declare exactly one package; without one, its contents are wrapped as below.
 - `files` with one `paths` value each (relative, forward slashes): a skill directory (`SKILL.md` at the root), a folder of skill directories (a skill pack), one MCP document (`.json`), or a source tree. A single top-level folder shared by every path is dropped. Optional `name` and `description` label a wrapped package.
-- `files` and `paths` with `base` set to a published version: the files replace or add to that version's files, which is how the portal edits a skill.
 
-Wrapping is `validate-source stage`, the same code as `agent-plugins publish`. Server checks, in order: caller owns `{namespace}`; upload within 50 MB and free of unsafe paths; `agent-plugins.json` with `source.id == namespace` and exactly one package whose `id == packageId`; the Rust validator, with its credential scan, reports no errors; the version was never published before (pending and rejected numbers stay used). On success the version is stored in Artifact Keeper and the response is `201` with the version document, whose `reviewState` says whether it is live or waiting. Only an approved version regenerates the namespace archive. Validation failures return `422` with the validator messages.
+| Field       | Rule                                                                                                                                     |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `version`   | A release version, `major.minor.patch`. A pre-release such as `1.0.0-beta.1` is refused.                                                 |
+| `tags`      | At most 10, each up to 32 lowercase letters, digits, and single hyphens. Lowercased and deduplicated; an invalid tag is refused by name. |
+| `changelog` | At most 4,096 characters.                                                                                                                |
 
-### `POST /api/packages/{namespace}/{packageId}/versions/{version}/yank`
+Wrapping is `validate-source stage`, the same code as `agent-plugins publish`. Server checks, in order:
 
-Hides a version from the namespace archive and index. Existing installations are unaffected. Owner or admin only.
+1. The upload is within 50 MB (`413`).
+2. The caller owns `{namespace}` (`403`).
+3. The upload is free of unsafe paths, and `version`, `tags`, and `changelog` follow the rules above (`422`).
+4. `agent-plugins.json` has `source.id == namespace` and exactly one package whose `id == packageId` (`422`).
+5. The Rust validator, with its credential scan, reports no errors (`422` with the validator messages).
+6. The version was never published before; pending, rejected, and yanked numbers stay used. `409` suggests the patch after the highest used version ("Publish 1.0.1 or later.").
+7. A personal namespace nobody has published to yet is created only by its owner, not by an admin publishing on their behalf (`403`).
+
+On success the version is stored in Artifact Keeper and the response is `201` with the version document, whose `reviewState` says whether it is live or waiting. Only an approved version regenerates the namespace archive. The first publish to a namespace claims it: a personal namespace for the publishing account, `official` and team namespaces for the namespace itself.
+
+### `PUT` and `DELETE /api/packages/{namespace}/{packageId}/versions/{version}/yank`
+
+`PUT` yanks a version: it leaves the namespace archive, the catalog, and the index. `DELETE` restores it. Both return `204` and are idempotent. Existing installations are unaffected. The package's name, description, and tags follow whichever version is live afterwards. Owner or admin only (`403`); `404` when the version does not exist.
 
 ### `POST /api/events`
 
@@ -123,7 +150,7 @@ Batched client events. Each event carries `kind`, `occurredAt`, `clientVersion`,
 | `update`    | `packageId`, `fromVersion`, `toVersion`, `agents`                                                           |
 | `uninstall` | `packageId`, `agents`                                                                                       |
 
-Returns `202`. The server deduplicates by `(principal, kind, occurredAt, packageId)`.
+Returns `202` with `{ accepted, duplicates, rejected, problems[] }`. The server deduplicates by `(principal, kind, occurredAt, packageId)`. A null event or a null string in an array counts as `rejected`. A batch holds at most 500 events (`422`).
 
 ### `GET /api/stats/packages/{namespace}/{packageId}`
 
@@ -153,19 +180,30 @@ Admins only. The pending versions, oldest first, with `firstVersion` (the packag
 
 ### `POST /api/admin/reviews/{namespace}/{packageId}/{version}`
 
-Admins only. Body `{ "decision": "approve" | "reject", "note": "…" }`; a rejection needs a note (at most 2,048 characters), which the publisher sees. Approval makes the version live and regenerates the namespace archive. `204`; `409` when the version is not pending; `404` when it does not exist.
+Admins only. Body `{ "decision": "approve" | "reject", "note": "…" }`; a rejection needs a note (at most 2,048 characters), which the publisher sees. Approval makes the version live and regenerates the namespace archive. `204`; `409` when the version is not pending, naming why (yanked, already approved, or already rejected); `404` when it does not exist.
 
 ### `GET /api/admin/reports` and `POST /api/admin/reports/{id}/resolve`
 
-Admins only. The latest 200 reports, unresolved first, with `resolvedAt` and `resolvedBy`; resolving one returns `204`.
+Admins only. The latest 200 reports, unresolved first: `id`, `account`, `packageId` (canonical `ns/id`), `reason`, `createdAt`, `resolvedAt`, and `resolvedBy`. Resolving one returns `204`.
 
-### `POST /api/reports`
+### `POST /api/packages/{namespace}/{packageId}/reports`
 
-Flags a package. Body: `packageId`, `reason`. Stored, counted in the admin summary until resolved, and listed at `/api/admin/reports`.
+Flags a package. Body `{ "reason": "…" }`, 1 to 2,048 characters (`422` otherwise). Returns `202`. Stored, counted in the admin summary until resolved, and listed at `/api/admin/reports`. `404` when the caller may not see the package.
 
 ## Errors
 
-Errors are RFC 9457 problem documents. `401` carries `WWW-Authenticate: Negotiate`. `403` names the namespace the caller does not own. `422` carries `errors[]` with `path` and `message`, matching the Rust validator's report.
+Errors are RFC 9457 problem documents. `title` is a full sentence written for the person using the client, so show it as it is. When `detail` is present, show it too.
+
+| Status | When                                                                                                                                                                             |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400`  | A malformed JSON body, route value, or upload form. `title` is `Failed to read parameter … as JSON.`; `detail` names the JSON path, for example `Path: $.events[0].occurredAt`.  |
+| `401`  | No credentials. Carries `WWW-Authenticate: Negotiate`.                                                                                                                           |
+| `403`  | The caller does not own the namespace; `title` names the account and the namespace.                                                                                              |
+| `404`  | The target is missing or hidden, with the same sentence either way: `The package jacob/review was not found, or you do not have access to it.`                                   |
+| `409`  | A conflict with stored state: a reused version number, a review of a version that is not pending, a personal namespace claimed by another account.                               |
+| `413`  | The request is above the 50 MB upload limit: `The request is larger than the 50 MB limit.`                                                                                       |
+| `422`  | The request breaks a rule; `title` says which. A validator failure also carries `errors[]` with `path` and `message`, matching the Rust validator's report.                      |
+| `503`  | PostgreSQL is unreachable, Artifact Keeper is unavailable after one automatic retry, or the package validator is missing or timed out. `title` says which and when to try again. |
 
 ## Configuration
 
@@ -176,6 +214,7 @@ Errors are RFC 9457 problem documents. `401` carries `WWW-Authenticate: Negotiat
 | `ArtifactKeeper:Repository`               | Generic repository name, for example `files`.                                                    |
 | `ArtifactKeeper:Prefix`                   | Path prefix inside the repository, for example `marketplace`.                                    |
 | `ArtifactKeeper:Username` / `Password`    | Service credential used to obtain a bearer token.                                                |
+| `Auth:AllowDevHeader`                     | Trusts `X-Dev-User` outside Development. Beside Negotiate it logs a startup warning.             |
 | `Auth:LdapDomain`                         | Optional. Enables LDAP group claims for Negotiate.                                               |
 | `Auth:AdminGroup`                         | AD group whose members may call `/api/admin/*`.                                                  |
 | `Auth:AdminAccounts`                      | Accounts that may call `/api/admin/*`.                                                           |

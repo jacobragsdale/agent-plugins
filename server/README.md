@@ -36,7 +36,7 @@ Production registers only `Negotiate` (Kerberos). The container needs:
 
 Negotiate on Linux is Kerberos-only: clients must use the fully qualified name in the URL, and clocks must agree within five minutes. The app's preflight checks both.
 
-`Auth__AllowDevHeader=true` trusts `X-Dev-User`; use it only where a domain is unavailable (the home lab). `ASPNETCORE_ENVIRONMENT=Development` forces it on. `Auth__EnableNegotiate=false` exists for the test host.
+`Auth__AllowDevHeader=true` trusts `X-Dev-User`; use it only where a domain is unavailable (the home lab). `ASPNETCORE_ENVIRONMENT=Development` turns it on regardless. Outside Development beside Negotiate the server logs a startup warning, because anyone who can reach it can then claim any account. `Auth__EnableNegotiate=false` exists for the test host.
 
 ## Configuration
 
@@ -55,6 +55,9 @@ The suite starts PostgreSQL through Testcontainers, replaces Artifact Keeper wit
 ```bash
 ASPNETCORE_ENVIRONMENT=Development Database__MigrateOnStartup=false Kestrel__Endpoints__Http__Url=http://127.0.0.1:5088 \
   dotnet run --project src/Marketplace.Api --no-launch-profile &
-curl -s http://127.0.0.1:5088/openapi/v1.json > openapi.json
-pnpm --dir .. format   # the checked-in document is Prettier-formatted
+curl -sf --retry 30 --retry-connrefused --retry-delay 1 -o openapi.json http://127.0.0.1:5088/openapi/v1.json
+kill $!
+pnpm --dir .. exec prettier --write server/openapi.json
 ```
+
+The document needs no database. Keep port 5088: the document records the URL it was served from, and CI regenerates it the same way and fails when the checked-in copy differs.

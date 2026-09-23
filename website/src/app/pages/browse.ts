@@ -4,6 +4,7 @@ import { MatButtonToggleModule } from "@angular/material/button-toggle";
 import { MatFormFieldModule } from "@angular/material/form-field";
 import { MatInputModule } from "@angular/material/input";
 import { MatProgressBarModule } from "@angular/material/progress-bar";
+import { MatSelectModule } from "@angular/material/select";
 import { RouterLink } from "@angular/router";
 import type { IndexPackage, Lane } from "../api";
 import { Api, ApiError } from "../api";
@@ -16,7 +17,7 @@ type LaneFilter = Lane | "all";
 
 @Component({
   selector: "app-browse",
-  imports: [RouterLink, MatButtonModule, MatButtonToggleModule, MatFormFieldModule, MatInputModule, MatProgressBarModule, Icon, PackageCard],
+  imports: [RouterLink, MatButtonModule, MatButtonToggleModule, MatFormFieldModule, MatInputModule, MatProgressBarModule, MatSelectModule, Icon, PackageCard],
   template: `
     <div class="page stack">
       <header class="row">
@@ -38,6 +39,14 @@ type LaneFilter = Lane | "all";
           <mat-button-toggle value="team">Teams</mat-button-toggle>
           <mat-button-toggle value="personal">People</mat-button-toggle>
         </mat-button-toggle-group>
+        <mat-form-field appearance="outline" subscriptSizing="dynamic" class="teams">
+          <mat-label>Teams</mat-label>
+          <mat-select multiple placeholder="All teams" [disabled]="teams().length === 0" [value]="selectedTeams()" (selectionChange)="setTeams($event.value)">
+            @for (team of teams(); track team.namespace) {
+              <mat-option [value]="team.namespace">{{ team.displayName }} ({{ team.count }})</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
       </div>
 
       @if (index.hasValue()) {
@@ -72,6 +81,9 @@ type LaneFilter = Lane | "all";
       flex: 1 1 20rem;
       max-width: 36rem;
     }
+    .teams {
+      flex: 0 1 16rem;
+    }
     .prefix {
       margin: 0 0.25rem 0 0.75rem;
       color: var(--muted);
@@ -90,9 +102,24 @@ export class BrowsePage {
   protected readonly session = inject(Session);
   protected readonly query = signal("");
   protected readonly lane = signal<LaneFilter>("all");
+  /** Team namespaces to show; only set while the Teams lane is on, and empty shows every team. */
+  protected readonly selectedTeams = signal<readonly string[]>([]);
   private readonly api = inject(Api);
 
   protected readonly index = resource({ loader: () => this.api.index() });
+
+  /** Every team with a visible skill, for the picker. */
+  protected readonly teams = computed(() => {
+    const teams = new Map<string, { namespace: string; displayName: string; count: number }>();
+    for (const item of this.index.hasValue() ? this.index.value() : []) {
+      if (item.lane === "team") {
+        const team = teams.get(item.namespace) ?? { namespace: item.namespace, displayName: item.publisher.displayName, count: 0 };
+        team.count += 1;
+        teams.set(item.namespace, team);
+      }
+    }
+    return [...teams.values()].toSorted((left, right) => left.displayName.localeCompare(right.displayName));
+  });
 
   protected readonly results = computed<readonly IndexPackage[]>(() => {
     if (!this.index.hasValue()) {
@@ -104,9 +131,11 @@ export class BrowsePage {
       .split(/\s+/u)
       .filter((word) => word.length > 0);
     const lane = this.lane();
+    const teams = this.selectedTeams();
     return this.index
       .value()
       .filter((item) => lane === "all" || item.lane === lane)
+      .filter((item) => teams.length === 0 || teams.includes(item.namespace))
       .filter((item) => {
         const haystack = [item.name, item.description, item.id, item.publisher.displayName, ...item.tags].join(" ").toLowerCase();
         return words.every((word) => haystack.includes(word));
@@ -128,6 +157,16 @@ export class BrowsePage {
   protected setLane(value: unknown): void {
     if (value === "all" || value === "official" || value === "team" || value === "personal") {
       this.lane.set(value);
+      if (value !== "team") {
+        this.selectedTeams.set([]);
+      }
+    }
+  }
+
+  protected setTeams(value: unknown): void {
+    if (Array.isArray(value)) {
+      this.selectedTeams.set(value.filter((team): team is string => typeof team === "string"));
+      this.lane.set("team");
     }
   }
 

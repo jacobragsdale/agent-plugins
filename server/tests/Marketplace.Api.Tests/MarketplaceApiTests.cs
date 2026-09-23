@@ -121,31 +121,57 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
     public async Task Duplicate_version_conflicts_and_newer_version_wins()
     {
         using var client = factory.ClientFor("TEST\\versioner");
-        using var first = SamplePackages.PublishForm(SamplePackages.SkillPackage("versioner", "tool"), "1.0.0");
+        var ct = TestContext.Current.CancellationToken;
+        var firstArchive = SamplePackages.SkillPackage("versioner", "tool", "Version one.");
+        using var first = SamplePackages.PublishForm(firstArchive, "1.0.0");
         await PublishLiveAsync(client, "versioner", "tool", first);
         using var again = SamplePackages.PublishForm(SamplePackages.SkillPackage("versioner", "tool"), "1.0.0");
-        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsync("/api/packages/versioner/tool/versions", again, TestContext.Current.CancellationToken)).StatusCode);
-        using var older = SamplePackages.PublishForm(SamplePackages.SkillPackage("versioner", "tool", extraFile: "old.txt"), "0.9.0");
+        var conflict = await client.PostAsync("/api/packages/versioner/tool/versions", again, ct);
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        Assert.Contains("Publish 1.0.1 or later", await Title(conflict));
+
+        // An older version goes live without review but must not take over the listing.
+        using var older = SamplePackages.PublishForm(SamplePackages.SkillPackage("versioner", "tool", "Old news.", extraFile: "old.txt"), "0.9.0");
         await PublishLiveAsync(client, "versioner", "tool", older);
-        using var newer = SamplePackages.PublishForm(SamplePackages.SkillPackage("versioner", "tool", extraFile: "new.txt"), "1.1.0");
+        Assert.Equal("Version one.", IndexEntry(await client.GetFromJsonAsync<JsonElement>("/api/index", Json, ct), "versioner/tool").GetProperty("description").GetString());
+        using var newer = SamplePackages.PublishForm(SamplePackages.SkillPackage("versioner", "tool", "Version two.", extraFile: "new.txt"), "1.1.0");
         await PublishLiveAsync(client, "versioner", "tool", newer);
 
         var index = await client.GetFromJsonAsync<JsonElement>("/api/index", Json, TestContext.Current.CancellationToken);
         var entry = index.GetProperty("packages").EnumerateArray().Single(candidate => candidate.GetProperty("id").GetString() == "versioner/tool");
         Assert.Equal("1.1.0", entry.GetProperty("version").GetString());
+        Assert.Equal("Version two.", entry.GetProperty("description").GetString());
+
+        var download = await client.GetAsync("/api/packages/versioner/tool/versions/1.0.0/archive", ct);
+        Assert.Equal(HttpStatusCode.OK, download.StatusCode);
+        Assert.Equal(firstArchive, await download.Content.ReadAsByteArrayAsync(ct));
+        Assert.Equal("versioner-tool-1.0.0.zip", download.Content.Headers.ContentDisposition?.FileName?.Trim('"'));
+        using var head = new HttpRequestMessage(HttpMethod.Head, "/api/packages/versioner/tool/versions/1.0.0/archive");
+        var headResponse = await client.SendAsync(head, ct);
+        Assert.Equal(HttpStatusCode.OK, headResponse.StatusCode);
+        Assert.Equal(download.Headers.ETag, headResponse.Headers.ETag);
 
         var archive = await client.GetByteArrayAsync("/api/sources/versioner/archive", TestContext.Current.CancellationToken);
         using var zip = new ZipArchive(new MemoryStream(archive));
         Assert.NotNull(zip.GetEntry("tool/skills/tool/new.txt"));
         Assert.Null(zip.GetEntry("tool/skills/tool/old.txt"));
 
-        var yank = await client.PostAsync("/api/packages/versioner/tool/versions/1.1.0/yank", null, TestContext.Current.CancellationToken);
+        var yank = await client.PutAsync("/api/packages/versioner/tool/versions/1.1.0/yank", null, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.NoContent, yank.StatusCode);
         var afterYank = await client.GetFromJsonAsync<JsonElement>("/api/index", Json, TestContext.Current.CancellationToken);
         var yanked = afterYank.GetProperty("packages").EnumerateArray().Single(candidate => candidate.GetProperty("id").GetString() == "versioner/tool");
         Assert.Equal("1.0.0", yanked.GetProperty("version").GetString());
+        Assert.Equal("Version one.", yanked.GetProperty("description").GetString());
         var detail = await client.GetFromJsonAsync<JsonElement>("/api/packages/versioner/tool", Json, TestContext.Current.CancellationToken);
         Assert.True(detail.GetProperty("versions").EnumerateArray().Single(candidate => candidate.GetProperty("version").GetString() == "1.1.0").GetProperty("yanked").GetBoolean());
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync("/api/packages/versioner/tool/versions/1.1.0/yank", ct)).StatusCode);
+        var restored = IndexEntry(await client.GetFromJsonAsync<JsonElement>("/api/index", Json, ct), "versioner/tool");
+        Assert.Equal("1.1.0", restored.GetProperty("version").GetString());
+        Assert.Equal("Version two.", restored.GetProperty("description").GetString());
+        var missing = await client.PutAsync("/api/packages/versioner/tool/versions/9.9.9/yank", null, ct);
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+        Assert.Equal("versioner/tool 9.9.9 was not found, or you do not have access to it.", await Title(missing));
     }
 
     [Fact]
@@ -454,10 +480,18 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
     {
         var ct = TestContext.Current.CancellationToken;
         using var reporter = factory.ClientFor("TEST\\reporter");
-        Assert.Equal(HttpStatusCode.Accepted, (await reporter.PostAsJsonAsync("/api/reports", new { packageId = "someone/thing", reason = "Leaks a token." }, Json, ct)).StatusCode);
         using var admin = factory.ClientFor("TEST\\admin");
+        using (var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("official", "flagged"), "1.0.0"))
+        {
+            await PublishLiveAsync(admin, "official", "flagged", form);
+        }
+
+        Assert.Equal(HttpStatusCode.NotFound, (await reporter.PostAsJsonAsync("/api/packages/someone/thing/reports", new { reason = "Leaks a token." }, Json, ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await reporter.PostAsJsonAsync("/api/packages/official/flagged/reports", new { reason = " " }, Json, ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await reporter.PostAsJsonAsync("/api/packages/official/flagged/reports", new { reason = "Leaks a token." }, Json, ct)).StatusCode);
         var open = (await admin.GetFromJsonAsync<JsonElement>("/api/admin/summary", Json, ct)).GetProperty("openReports").GetInt32();
         var report = (await admin.GetFromJsonAsync<JsonElement>("/api/admin/reports", Json, ct)).EnumerateArray().First(candidate => candidate.GetProperty("reason").GetString() == "Leaks a token.");
+        Assert.Equal("official/flagged", report.GetProperty("packageId").GetString());
         var id = report.GetProperty("id").GetInt64();
         Assert.Equal(HttpStatusCode.Forbidden, (await reporter.PostAsync($"/api/admin/reports/{id}/resolve", null, ct)).StatusCode);
         Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsync($"/api/admin/reports/{id}/resolve", null, ct)).StatusCode);
@@ -508,15 +542,6 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
         var entry = (await owner.GetFromJsonAsync<JsonElement>("/api/index", Json, ct)).GetProperty("packages").EnumerateArray().Single(candidate => candidate.GetProperty("id").GetString() == "uploader/writing");
         Assert.Equal("Writing Pack", entry.GetProperty("name").GetString());
         Assert.Equal("Everything for writing.", entry.GetProperty("description").GetString());
-
-        var edit = new Dictionary<string, string> { ["skills/tone/SKILL.md"] = SamplePackages.Skill("tone", "Writes in our house tone.", "Be warmer.") };
-        using (var form = SamplePackages.UploadForm("1.0.1", edit, new Dictionary<string, string> { ["base"] = "1.0.0" }))
-        {
-            Assert.Equal("approved", (await PublishLiveAsync(owner, "uploader", "tone", form)).GetProperty("reviewState").GetString());
-        }
-
-        Assert.Contains("Be warmer.", await owner.GetStringAsync("/api/packages/uploader/tone/versions/1.0.1/files/skills/tone/SKILL.md", ct));
-        Assert.Equal("Warm and brief.\n", await owner.GetStringAsync("/api/packages/uploader/tone/versions/1.0.1/files/skills/tone/examples/good.md", ct));
 
         var zipped = SamplePackages.Zip(new Dictionary<string, string> { ["lint/SKILL.md"] = SamplePackages.Skill("lint", "Checks style.") });
         using (var form = SamplePackages.PublishForm(zipped, "1.0.0"))
@@ -587,6 +612,165 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
         Assert.Equal("attachment", installer.Content.Headers.ContentDisposition?.DispositionType);
         Assert.Contains("immutable", installer.Headers.CacheControl?.ToString());
     }
+
+    [Fact]
+    public async Task Personal_namespaces_are_claimed_and_never_shared()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var first = factory.ClientFor("TEST\\christopher.johnson");
+        using (var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("christopher-john", "notes"), "1.0.0"))
+        {
+            await PublishLiveAsync(first, "christopher-john", "notes", form);
+        }
+
+        // Truncation gives the second account the same derived name; it gets the next free one instead.
+        using var second = factory.ClientFor("TEST\\christopher.johnston");
+        var me = await second.GetFromJsonAsync<JsonElement>("/api/me", Json, ct);
+        Assert.Equal("christopher-jo-2", me.GetProperty("namespace").GetString());
+        using (var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("christopher-john", "notes"), "1.0.1"))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, (await second.PostAsync("/api/packages/christopher-john/notes/versions", form, ct)).StatusCode);
+        }
+
+        Assert.Equal(HttpStatusCode.Forbidden, (await second.PutAsync("/api/packages/christopher-john/notes/versions/1.0.0/yank", null, ct)).StatusCode);
+        Assert.Equal("christopher-john", (await first.GetFromJsonAsync<JsonElement>("/api/me", Json, ct)).GetProperty("namespace").GetString());
+
+        // Until someone publishes, every account deriving a name owns it, so none may set its access list.
+        using var fresh = factory.ClientFor("TEST\\fresh");
+        Assert.Equal(HttpStatusCode.Conflict, (await fresh.PutAsJsonAsync("/api/access/fresh", new { users = new[] { "TEST\\fresh" } }, Json, ct)).StatusCode);
+
+        // Reserved names never become personal namespaces.
+        using var official = factory.ClientFor("TEST\\official");
+        var officialMe = await official.GetFromJsonAsync<JsonElement>("/api/me", Json, ct);
+        Assert.Equal("u-official", officialMe.GetProperty("namespace").GetString());
+        Assert.DoesNotContain("official", officialMe.GetProperty("namespaces").EnumerateArray().Select(ns => ns.GetString()));
+        using var team = factory.ClientFor("TEST\\team.platform");
+        Assert.Equal("u-team-platform", (await team.GetFromJsonAsync<JsonElement>("/api/me", Json, ct)).GetProperty("namespace").GetString());
+
+        // An admin may not create someone's personal namespace, which would claim it for the admin.
+        using var admin = factory.ClientFor("TEST\\admin");
+        using (var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("unclaimed", "tool"), "1.0.0"))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, (await admin.PostAsync("/api/packages/unclaimed/tool/versions", form, ct)).StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task A_retried_publish_adopts_its_own_stored_archive()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var client = factory.ClientFor("TEST\\retrier");
+        var archive = SamplePackages.SkillPackage("retrier", "tool");
+        await factory.Store.PutAsync("retrier/tool/1.0.0.zip", archive, ct);
+        using (var form = SamplePackages.PublishForm(archive, "1.0.0"))
+        {
+            await PublishLiveAsync(client, "retrier", "tool", form);
+        }
+
+        await factory.Store.PutAsync("retrier/tool/1.1.0.zip", SamplePackages.SkillPackage("retrier", "tool", "Something else."), ct);
+        using var different = SamplePackages.PublishForm(archive, "1.1.0");
+        var response = await client.PostAsync("/api/packages/retrier/tool/versions", different, ct);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains("different content", await Title(response));
+    }
+
+    [Fact]
+    public async Task Publish_input_is_checked_not_silently_changed()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var client = factory.ClientFor("TEST\\strict");
+        var archive = SamplePackages.SkillPackage("strict", "tool");
+        async Task<string> Rejected(string version, string? tags = null, string? changelog = null)
+        {
+            using var form = SamplePackages.PublishForm(archive, version, tags, changelog);
+            var response = await client.PostAsync("/api/packages/strict/tool/versions", form, ct);
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+            return await Title(response);
+        }
+
+        Assert.Contains("pre-release", await Rejected("1.0.0-beta.1"));
+        Assert.Contains("not a version number", await Rejected("1.0"));
+        Assert.Contains("\"Bad Tag!\"".ToLowerInvariant(), await Rejected("1.0.0", "ok, Bad Tag!"));
+        Assert.Contains("at most 10 tags", await Rejected("1.0.0", string.Join(',', Enumerable.Range(1, 11).Select(n => $"t{n}"))));
+        Assert.Contains("changelog", await Rejected("1.0.0", changelog: new string('x', 4097)));
+    }
+
+    [Fact]
+    public async Task Malformed_input_is_a_client_error_with_a_reason()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var client = factory.ClientFor("TEST\\sloppy");
+        using var badJson = new StringContent("""{"events":[{"kind":"install","occurredAt":"nope"}]}""", System.Text.Encoding.UTF8, "application/json");
+        var response = await client.PostAsync("/api/events", badJson, ct);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
+        Assert.Contains("occurredAt", problem.GetProperty("detail").GetString());
+
+        var heartbeat = new { kind = "heartbeat", occurredAt = DateTimeOffset.UtcNow, clientVersion = "0.1.0", agents = new string?[] { null, "cursor" }, installed = new string?[] { null } };
+        var accepted = await client.PostAsJsonAsync("/api/events", new { events = new object?[] { null, heartbeat } }, Json, ct);
+        Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
+        var counts = await accepted.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
+        Assert.Equal(1, counts.GetProperty("accepted").GetInt32());
+        Assert.Equal(1, counts.GetProperty("rejected").GetInt32());
+
+        async Task<string> Rejected(byte[] archive)
+        {
+            using var form = SamplePackages.PublishForm(archive, "1.0.0");
+            var rejected = await client.PostAsync("/api/packages/sloppy/tool/versions", form, ct);
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rejected.StatusCode);
+            return await Title(rejected);
+        }
+
+        Assert.Contains("source.id", await Rejected(SamplePackages.Zip(new Dictionary<string, string> { ["agent-plugins.json"] = """{"version":2,"source":[],"packages":[]}""" })));
+        Assert.Contains("version 2", await Rejected(SamplePackages.Zip(new Dictionary<string, string> { ["agent-plugins.json"] = """{"version":2.5}""" })));
+        Assert.Contains("package has no id", await Rejected(SamplePackages.Zip(new Dictionary<string, string> { ["agent-plugins.json"] = """{"version":2,"source":{"id":"sloppy"},"packages":[{"id":7}]}""" })));
+        Assert.Contains("more than once", await Rejected(DuplicateEntryZip()));
+    }
+
+    [Fact]
+    public async Task Large_files_download_instead_of_failing()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var client = factory.ClientFor("TEST\\bigfile");
+        var archive = SamplePackages.Zip(new Dictionary<string, string>
+        {
+            ["agent-plugins.json"] = """{"version":2,"source":{"id":"bigfile","name":"b","description":"b"},"packages":[{"id":"tool","name":"Tool","description":"Has a big file.","components":[{"kind":"skill","path":"skills/tool"}]}]}""",
+            ["skills/tool/SKILL.md"] = SamplePackages.Skill("tool", "Has a big file."),
+            ["skills/tool/data.txt"] = new string('a', MarketplaceEndpointsMaxFileView + 1),
+        });
+        using (var form = SamplePackages.PublishForm(archive, "1.0.0"))
+        {
+            await PublishLiveAsync(client, "bigfile", "tool", form);
+        }
+
+        var response = await client.GetAsync("/api/packages/bigfile/tool/versions/1.0.0/files/skills/tool/data.txt", ct);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/octet-stream", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(MarketplaceEndpointsMaxFileView + 1, (await response.Content.ReadAsByteArrayAsync(ct)).Length);
+    }
+
+    private const int MarketplaceEndpointsMaxFileView = Endpoints.MarketplaceEndpoints.MaxFileView;
+
+    private static byte[] DuplicateEntryZip()
+    {
+        using var output = new MemoryStream();
+        using (var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var name in new[] { "agent-plugins.json", "skills/a/SKILL.md", "skills/a/skill.md" })
+            {
+                using var stream = zip.CreateEntry(name).Open();
+                stream.Write("{}"u8);
+            }
+        }
+
+        return output.ToArray();
+    }
+
+    private static async Task<string> Title(HttpResponseMessage response) =>
+        (await response.Content.ReadFromJsonAsync<JsonElement>(Json, TestContext.Current.CancellationToken)).GetProperty("title").GetString()!;
+
+    private static JsonElement IndexEntry(JsonElement index, string id) =>
+        index.GetProperty("packages").EnumerateArray().Single(candidate => candidate.GetProperty("id").GetString() == id);
 
     /// <summary>Publishes and, when the version waits for review, approves it as an admin.</summary>
     private async Task<JsonElement> PublishLiveAsync(HttpClient client, string ns, string packageId, MultipartFormDataContent form)

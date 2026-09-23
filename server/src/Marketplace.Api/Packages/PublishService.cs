@@ -10,15 +10,6 @@ using Microsoft.Extensions.Options;
 
 namespace Marketplace.Api.Packages;
 
-public sealed class PublishRejectedException(int status, string title, IReadOnlyList<ValidationError>? errors = null) : Exception(title)
-{
-    public int Status { get; } = status;
-
-    public string Title { get; } = title;
-
-    public IReadOnlyList<ValidationError> Errors { get; } = errors ?? [];
-}
-
 public sealed record PublishRequest(
     string Namespace,
     string PackageId,
@@ -28,15 +19,14 @@ public sealed record PublishRequest(
     ReadOnlyMemory<byte> Archive);
 
 /// <summary>
-/// A browser upload: files with their relative paths (optionally laid over a published
-/// <see cref="BaseVersion"/>), or a zip. Anything without a manifest is wrapped into one package.
+/// A browser upload: files with their relative paths, or a zip. Anything without a manifest is
+/// wrapped into one package.
 /// </summary>
 public sealed record UploadRequest(
     string Namespace,
     string PackageId,
     IReadOnlyList<(string Path, IFormFile File)> Files,
     byte[]? Archive,
-    string? BaseVersion,
     string? Name,
     string? Description);
 
@@ -78,6 +68,8 @@ public sealed partial class PublishService(
     public const int MaxTags = 10;
     public const int MaxReviewNote = 2048;
     public const int MaxUploadFiles = 2000;
+    public const int MaxChangelog = 4096;
+    public const int MaxTagLength = 32;
     public const string McpServerKind = "mcpServer";
 
     public async Task<PublishedVersion> PublishAsync(MarketplaceIdentity identity, PublishRequest request, CancellationToken cancellationToken)
@@ -86,35 +78,34 @@ public sealed partial class PublishService(
 
         if (!SemVer.TryParse(request.Version, out var semver))
         {
-            throw new PublishRejectedException(422, $"{request.Version} is not a semantic version (major.minor.patch).");
+            throw new ProblemException(422, request.Version.Contains('-')
+                ? $"{request.Version} is a pre-release. The marketplace takes release versions only (major.minor.patch, for example 1.2.0)."
+                : $"{request.Version} is not a version number. Use major.minor.patch, for example 1.2.0.");
         }
 
         var tags = NormalizeTags(request.Tags);
-        InspectedArchive inspected;
-        try
+        if (request.Changelog is { Length: > MaxChangelog } changelog)
         {
-            inspected = ArchiveInspector.Inspect(request.Archive);
+            throw new ProblemException(422, $"The changelog is at most {MaxChangelog:N0} characters; this one has {changelog.Length:N0}.");
         }
-        catch (ArchiveRejectedException error)
-        {
-            throw new PublishRejectedException(422, error.Message);
-        }
+
+        var inspected = ArchiveInspector.Inspect(request.Archive);
 
         if (inspected.SourceId != request.Namespace)
         {
-            throw new PublishRejectedException(422, $"agent-plugins.json declares source.id {inspected.SourceId}; the namespace is {request.Namespace}.");
+            throw new ProblemException(422, $"agent-plugins.json declares source.id {inspected.SourceId}; the namespace is {request.Namespace}.");
         }
 
         if (inspected.PackageId != request.PackageId)
         {
-            throw new PublishRejectedException(422, $"agent-plugins.json declares package {inspected.PackageId}; the request names {request.PackageId}.");
+            throw new ProblemException(422, $"agent-plugins.json declares package {inspected.PackageId}; the request names {request.PackageId}.");
         }
 
         var outcome = await ValidateAsync(request.Archive, inspected.RootPrefix, cancellationToken);
         if (!outcome.Accepted)
         {
             var errors = outcome.Errors.Count > 0 ? outcome.Errors : [new ValidationError("", "The package has no valid install.")];
-            throw new PublishRejectedException(422, "The package failed validation.", errors);
+            throw new ProblemException(422, "The package failed validation.", errors);
         }
 
         var now = timeProvider.GetUtcNow().UtcDateTime;
@@ -127,18 +118,13 @@ public sealed partial class PublishService(
             .SingleOrDefaultAsync(candidate => candidate.Namespace == request.Namespace && candidate.PackageId == request.PackageId, cancellationToken);
         if (package?.Versions.Any(existing => existing.Version == semver.ToString()) == true)
         {
-            throw new PublishRejectedException(409, $"{request.Namespace}/{request.PackageId} {semver} is already published.");
+            var highest = package.Versions.Select(existing => SemVer.Parse(existing.Version)).Max()!;
+            var next = highest with { Patch = highest.Patch + 1 };
+            throw new ProblemException(409, $"{request.Namespace}/{request.PackageId} {semver} was already published, and version numbers are never reused (even after a yank or a rejection). Publish {next} or later.");
         }
 
-        StoredArtifact stored;
-        try
-        {
-            stored = await store.PutAsync(storagePath, request.Archive, cancellationToken);
-        }
-        catch (ArtifactConflictException)
-        {
-            throw new PublishRejectedException(409, $"{request.Namespace}/{request.PackageId} {semver} already exists in the artifact store.");
-        }
+        var publisher = await ClaimPublisherAsync(identity, request.Namespace, now, cancellationToken);
+        var stored = await StoreAsync(storagePath, request.Archive, $"{request.Namespace}/{request.PackageId} {semver}", cancellationToken);
 
         // A package's first version and every version with an MCP server wait for an admin (ADR 0006).
         var approved = identity.IsAdmin || (package is not null && LatestVersion(package) is not null && !inspected.ComponentKinds.Contains(McpServerKind));
@@ -164,38 +150,20 @@ public sealed partial class PublishService(
             Tags = tags,
             PublishedBy = identity.Account,
             PublishedAt = now,
-            Changelog = request.Changelog is { Length: > 0 } changelog ? changelog[..Math.Min(changelog.Length, 4096)] : null,
+            Changelog = request.Changelog is { Length: > 0 } text ? text : null,
             ReviewState = approved ? ReviewState.Approved : ReviewState.Pending,
             ReviewedBy = approved ? identity.Account : null,
             ReviewedAt = approved ? now : null,
         };
         package.Versions.Add(version);
 
-        // A pending version leaves the listing alone; a brand-new package is hidden until approved anyway.
-        if (approved || isNew)
+        // The listing follows the live version; a brand-new package takes its pending version's so the owner sees a name.
+        if (isNew || LatestVersion(package) == version)
         {
             ApplyListing(package, version, now);
         }
 
-        var displayName = IdentityResolver.NamespaceDisplayName(auth.Value, identity, request.Namespace);
-        var publisher = await db.Publishers.FindAsync([request.Namespace], cancellationToken);
-        if (publisher is null)
-        {
-            db.Publishers.Add(new Publisher
-            {
-                Namespace = request.Namespace,
-                Account = request.Namespace == MarketplaceIdentity.OfficialNamespace ? MarketplaceIdentity.OfficialNamespace : identity.Account,
-                DisplayName = displayName,
-                FirstSeenAt = now,
-                LastPublishedAt = now,
-            });
-        }
-        else
-        {
-            publisher.LastPublishedAt = now;
-            publisher.DisplayName = displayName;
-        }
-
+        publisher.LastPublishedAt = now;
         await db.SaveChangesAsync(cancellationToken);
         if (approved)
         {
@@ -216,7 +184,7 @@ public sealed partial class PublishService(
         CheckTarget(identity, upload.Namespace, upload.PackageId);
         if (upload.Files.Count > MaxUploadFiles)
         {
-            throw new PublishRejectedException(422, $"An upload holds at most {MaxUploadFiles} files.");
+            throw new ProblemException(422, $"An upload holds at most {MaxUploadFiles:N0} files; this one has {upload.Files.Count:N0}.");
         }
 
         var directory = Path.Combine(Path.GetTempPath(), "marketplace-upload-" + Guid.NewGuid().ToString("N"));
@@ -226,7 +194,7 @@ public sealed partial class PublishService(
             if (upload.Archive is { } archive)
             {
                 var (prefix, hasManifest) = ArchiveInspector.Survey(archive);
-                if (hasManifest && upload.Files.Count == 0 && upload.BaseVersion is null)
+                if (hasManifest && upload.Files.Count == 0)
                 {
                     return archive;
                 }
@@ -234,17 +202,8 @@ public sealed partial class PublishService(
                 ArchiveInspector.ExtractTo(archive, prefix, input);
             }
 
-            if (upload.BaseVersion is { } baseVersion)
-            {
-                var stored = await db.PackageVersions.AsNoTracking()
-                    .SingleOrDefaultAsync(version => version.Package.Namespace == upload.Namespace && version.Package.PackageId == upload.PackageId && version.Version == baseVersion, cancellationToken)
-                    ?? throw new PublishRejectedException(422, $"{upload.Namespace}/{upload.PackageId} {baseVersion} is not published, so it cannot be edited.");
-                var bytes = await store.GetAsync(stored.StoragePath, cancellationToken);
-                ArchiveInspector.ExtractTo(bytes, ArchiveInspector.Survey(bytes).Prefix, input);
-            }
-
-            // A chosen folder arrives as folder/..., so strip a shared top directory; edits name paths from the source root.
-            var strip = upload.BaseVersion is null ? ArchiveInspector.RootPrefix(upload.Files.Select(file => file.Path).ToArray()) : string.Empty;
+            // A chosen folder arrives as folder/..., so strip a shared top directory.
+            var strip = ArchiveInspector.RootPrefix(upload.Files.Select(file => file.Path).ToArray());
             var root = Path.GetFullPath(input) + Path.DirectorySeparatorChar;
             var written = new List<string>(upload.Files.Count);
             foreach (var (path, file) in upload.Files)
@@ -253,7 +212,7 @@ public sealed partial class PublishService(
                 var target = Path.GetFullPath(Path.Combine(root, path[strip.Length..]));
                 if (!target.StartsWith(root, StringComparison.Ordinal) || target.Length == root.Length)
                 {
-                    throw new ArchiveRejectedException($"{path} is not a file path inside the upload.");
+                    throw new ProblemException(422, $"{path} is not a file path inside the upload.");
                 }
 
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
@@ -264,14 +223,10 @@ public sealed partial class PublishService(
             }
 
             // One uploaded .json is an MCP document to wrap on its own.
-            var stageInput = written is [var only] && upload.BaseVersion is null && upload.Archive is null && only.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ? only : input;
+            var stageInput = written is [var only] && upload.Archive is null && only.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ? only : input;
             var output = Path.Combine(directory, "source.zip");
             await validator.StageAsync(new StagingRequest(stageInput, output, upload.Namespace, upload.PackageId, upload.Name, upload.Description), cancellationToken);
             return await File.ReadAllBytesAsync(output, cancellationToken);
-        }
-        catch (ArchiveRejectedException error)
-        {
-            throw new PublishRejectedException(422, error.Message);
         }
         finally
         {
@@ -306,33 +261,26 @@ public sealed partial class PublishService(
     }
 
     /// <summary>Approves or rejects a pending version. Approval makes it live and rebuilds the namespace archive.</summary>
-    public async Task<bool> ReviewAsync(MarketplaceIdentity identity, string ns, string packageId, string versionText, bool approve, string? note, CancellationToken cancellationToken)
+    public async Task ReviewAsync(MarketplaceIdentity identity, string ns, string packageId, string versionText, bool approve, string? note, CancellationToken cancellationToken)
     {
         note = string.IsNullOrWhiteSpace(note) ? null : note.Trim();
         if (!approve && note is null)
         {
-            throw new PublishRejectedException(422, "Say why the version is rejected; the publisher sees the note.");
+            throw new ProblemException(422, "Say why the version is rejected; the publisher sees the note.");
         }
 
         if (note is { Length: > MaxReviewNote })
         {
-            throw new PublishRejectedException(422, $"A review note is at most {MaxReviewNote} characters.");
+            throw new ProblemException(422, $"A review note is at most {MaxReviewNote:N0} characters; this one has {note.Length:N0}.");
         }
 
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         await LockNamespaceAsync(ns, cancellationToken);
-        var package = await db.Packages
-            .Include(candidate => candidate.Versions)
-            .SingleOrDefaultAsync(candidate => candidate.Namespace == ns && candidate.PackageId == packageId, cancellationToken);
-        var version = package?.Versions.SingleOrDefault(candidate => candidate.Version == versionText);
-        if (package is null || version is null)
+        var (package, version) = await FindVersionAsync(ns, packageId, versionText, cancellationToken);
+        if (version.Yanked || version.ReviewState != ReviewState.Pending)
         {
-            return false;
-        }
-
-        if (version.ReviewState != ReviewState.Pending || version.Yanked)
-        {
-            throw new PublishRejectedException(409, $"{package.CanonicalId} {version.Version} is not waiting for review.");
+            var state = version.Yanked ? "yanked" : version.ReviewState == ReviewState.Approved ? "already approved" : "already rejected";
+            throw new ProblemException(409, $"{package.CanonicalId} {version.Version} is not waiting for review: it is {state}.");
         }
 
         var now = timeProvider.GetUtcNow().UtcDateTime;
@@ -353,35 +301,37 @@ public sealed partial class PublishService(
 
         await transaction.CommitAsync(cancellationToken);
         logger.LogInformation("{Account} {Decision} {Package} {Version}.", identity.Account, approve ? "approved" : "rejected", package.CanonicalId, version.Version);
-        return true;
     }
 
-    public async Task<bool> YankAsync(MarketplaceIdentity identity, string ns, string packageId, string versionText, CancellationToken cancellationToken)
+    /// <summary>
+    /// Yanks or restores a version. A yanked version leaves the namespace archive and index; existing
+    /// installations keep it. The listing follows whichever version is live afterwards.
+    /// </summary>
+    public async Task SetYankedAsync(MarketplaceIdentity identity, string ns, string packageId, string versionText, bool yanked, CancellationToken cancellationToken)
     {
         if (!identity.Owns(ns))
         {
-            throw new PublishRejectedException(403, $"{identity.Account} does not own the namespace {ns}.");
+            throw ProblemException.NotOwner(identity.Account, ns);
         }
 
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         await LockNamespaceAsync(ns, cancellationToken);
-        var version = await db.PackageVersions
-            .Include(candidate => candidate.Package)
-            .SingleOrDefaultAsync(candidate => candidate.Package.Namespace == ns && candidate.Package.PackageId == packageId && candidate.Version == versionText, cancellationToken);
-        if (version is null)
+        var (package, version) = await FindVersionAsync(ns, packageId, versionText, cancellationToken);
+        if (version.Yanked != yanked)
         {
-            return false;
-        }
+            var now = timeProvider.GetUtcNow().UtcDateTime;
+            version.Yanked = yanked;
+            if (LatestVersion(package) is { } live)
+            {
+                ApplyListing(package, live, now);
+            }
 
-        if (!version.Yanked)
-        {
-            version.Yanked = true;
             await db.SaveChangesAsync(cancellationToken);
             await RegenerateNamespaceAsync(ns, new Dictionary<string, ReadOnlyMemory<byte>>(), cancellationToken);
+            logger.LogInformation("{Account} {Action} {Package} {Version}.", identity.Account, yanked ? "yanked" : "restored", package.CanonicalId, version.Version);
         }
 
         await transaction.CommitAsync(cancellationToken);
-        return true;
     }
 
     /// <summary>Rebuilds the namespace archive from the latest non-yanked version of each package.</summary>
@@ -473,12 +423,22 @@ public sealed partial class PublishService(
         package.Tags,
         version.ReviewState);
 
-    public static string[] NormalizeTags(IEnumerable<string> tags) =>
-        tags.Select(tag => tag.Trim().ToLowerInvariant())
-            .Where(tag => tag.Length is > 0 and <= 32 && TagPattern().IsMatch(tag))
-            .Distinct(StringComparer.Ordinal)
-            .Take(MaxTags)
-            .ToArray();
+    /// <summary>Lowercases and deduplicates tags; an invalid tag or too many is a 422, never silently dropped.</summary>
+    public static string[] NormalizeTags(IEnumerable<string> tags)
+    {
+        var normalized = tags.Select(tag => tag.Trim().ToLowerInvariant()).Where(tag => tag.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
+        if (normalized.FirstOrDefault(tag => tag.Length > MaxTagLength || !TagPattern().IsMatch(tag)) is { } invalid)
+        {
+            throw new ProblemException(422, $"The tag \"{invalid}\" is not valid. A tag is up to {MaxTagLength} lowercase letters, digits, and single hyphens.");
+        }
+
+        if (normalized.Length > MaxTags)
+        {
+            throw new ProblemException(422, $"A version has at most {MaxTags} tags; this one has {normalized.Length}.");
+        }
+
+        return normalized;
+    }
 
     private async Task<ValidationOutcome> ValidateAsync(ReadOnlyMemory<byte> archive, string rootPrefix, CancellationToken cancellationToken)
     {
@@ -487,10 +447,6 @@ public sealed partial class PublishService(
         {
             ArchiveInspector.ExtractTo(archive, rootPrefix, directory);
             return await validator.ValidateAsync(directory, cancellationToken);
-        }
-        catch (ArchiveRejectedException error)
-        {
-            throw new PublishRejectedException(422, error.Message);
         }
         finally
         {
@@ -519,17 +475,89 @@ public sealed partial class PublishService(
     {
         if (!identity.Owns(ns))
         {
-            throw new PublishRejectedException(403, $"{identity.Account} does not own the namespace {ns}.");
+            throw ProblemException.NotOwner(identity.Account, ns);
         }
 
         if (!IdentityResolver.SourceIdPattern().IsMatch(ns))
         {
-            throw new PublishRejectedException(422, $"{ns} is not a valid namespace.");
+            throw new ProblemException(422, $"{ns} is not a valid namespace.");
         }
 
         if (!PackageIdPattern().IsMatch(packageId))
         {
-            throw new PublishRejectedException(422, $"{packageId} is not a valid package id.");
+            throw new ProblemException(422, $"{packageId} is not a valid package id.");
+        }
+    }
+
+    private async Task<(Package Package, PackageVersion Version)> FindVersionAsync(string ns, string packageId, string versionText, CancellationToken cancellationToken)
+    {
+        var package = await db.Packages
+            .Include(candidate => candidate.Versions)
+            .SingleOrDefaultAsync(candidate => candidate.Namespace == ns && candidate.PackageId == packageId, cancellationToken);
+        var version = package?.Versions.SingleOrDefault(candidate => candidate.Version == versionText);
+        return package is not null && version is not null ? (package, version) : throw ProblemException.NotFound($"{ns}/{packageId} {versionText}");
+    }
+
+    /// <summary>
+    /// The namespace's publisher row, created on its first publish. Official and team namespaces are
+    /// credited to the namespace itself. A personal namespace is claimed by the account that first
+    /// publishes to it, so only its owner may create it, not an admin publishing on their behalf.
+    /// </summary>
+    private async Task<Publisher> ClaimPublisherAsync(MarketplaceIdentity identity, string ns, DateTime now, CancellationToken cancellationToken)
+    {
+        var personal = IdentityResolver.Lane(auth.Value, ns) == "personal";
+        var publisher = await db.Publishers.FindAsync([ns], cancellationToken);
+        if (publisher is null)
+        {
+            if (personal && ns != identity.Namespace)
+            {
+                throw new ProblemException(403, $"{ns} is a personal namespace its owner has not published to yet; only they can create it.");
+            }
+
+            publisher = db.Publishers.Add(new Publisher
+            {
+                Namespace = ns,
+                Account = personal ? identity.Account : ns,
+                DisplayName = string.Empty,
+                FirstSeenAt = now,
+            }).Entity;
+        }
+        else if (personal && !identity.IsAdmin && !IdentityResolver.IsClaimant(publisher.Account, identity.Account))
+        {
+            // Two accounts that derive one name can both see it free before either publishes; the lock settles who got it.
+            throw new ProblemException(409, $"{ns} was just claimed by another account. Reload to get your own namespace, then publish there.");
+        }
+
+        // Keep the display name current, but an admin publishing into someone's namespace is not its owner.
+        if (!personal || ns == identity.Namespace)
+        {
+            var displayName = IdentityResolver.NamespaceDisplayName(auth.Value, identity, ns);
+            publisher.DisplayName = displayName.Length <= 120 ? displayName : displayName[..120];
+        }
+
+        return publisher;
+    }
+
+    /// <summary>
+    /// Stores a version's archive. The store is immutable and outside the database transaction, so a
+    /// publish that failed after its upload leaves the blob behind; a retry with the same bytes adopts it.
+    /// </summary>
+    private async Task<StoredArtifact> StoreAsync(string storagePath, ReadOnlyMemory<byte> archive, string label, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await store.PutAsync(storagePath, archive, cancellationToken);
+        }
+        catch (ArtifactConflictException)
+        {
+            var existing = await store.GetAsync(storagePath, cancellationToken);
+            if (!existing.AsSpan().SequenceEqual(archive.Span))
+            {
+                throw new ProblemException(409, $"{label} is already in the package store with different content, left by an earlier publish that did not finish. Publish a new version number.");
+            }
+
+            logger.LogWarning("Adopted the stored archive at {Path} left by an unfinished publish.", storagePath);
+            return new StoredArtifact(storagePath, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(archive.Span)), archive.Length);
         }
     }
 

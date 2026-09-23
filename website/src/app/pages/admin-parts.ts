@@ -2,6 +2,7 @@ import { Component, computed, input, output, signal } from "@angular/core";
 import { MatButtonModule } from "@angular/material/button";
 import { RouterLink } from "@angular/router";
 import type { PendingReview, Report, Summary } from "../api";
+import { archiveUrl } from "../api";
 import { formatAge } from "../format";
 import { FileViewer } from "../shared/file-viewer";
 import { Icon } from "../shared/icon";
@@ -24,7 +25,7 @@ import { describeKinds } from "../shared/package-card";
       @if (review().firstVersion) {
         <span class="badge pending">New</span>
       } @else {
-        <span class="badge">Update to {{ review().liveVersion ?? "a withdrawn package" }}</span>
+        <span class="badge">{{ review().liveVersion === null ? "Nothing live now" : "Replaces " + review().liveVersion }}</span>
       }
       @if (hasServer()) {
         <span class="badge rejected" title="Runs a program on people's PCs"><app-icon name="shield" />MCP server</span>
@@ -35,6 +36,7 @@ import { describeKinds } from "../shared/package-card";
     }
     <div class="row">
       <button mat-stroked-button type="button" [attr.aria-expanded]="open()" (click)="open.set(!open())"><app-icon name="description" />{{ open() ? "Hide files" : "Read the files" }}</button>
+      <a mat-button [href]="archive()" download><app-icon name="download" />Download zip</a>
       <span class="spacer"></span>
       <button mat-button type="button" [disabled]="busy()" (click)="reject.emit(review())"><app-icon name="close" />Ask for changes</button>
       <button mat-flat-button type="button" [disabled]="busy()" (click)="approve.emit(review())"><app-icon name="check" />Approve</button>
@@ -74,6 +76,7 @@ export class ReviewCard {
   protected readonly kinds = computed(() => describeKinds(this.review().componentKinds));
   protected readonly hasServer = computed(() => this.review().componentKinds.includes("mcpServer"));
   protected readonly age = computed(() => formatAge(this.review().publishedAt));
+  protected readonly archive = computed(() => archiveUrl(this.review().namespace, this.review().packageId, this.review().version));
 }
 
 interface ReportRow {

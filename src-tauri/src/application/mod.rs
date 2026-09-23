@@ -14,8 +14,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "app")]
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::sync::Mutex;
-#[cfg(feature = "app")]
-use tokio::time::{self, MissedTickBehavior};
 
 pub(crate) use items::{
     bulk_plan, bulk_run, install_item, plan_source_removal, remove_source, replace_item, reset_app,
@@ -26,8 +24,17 @@ pub(crate) use sync::{load_cached_app_state, run_preflight, sync_app_state};
 
 #[cfg(feature = "app")]
 const SCHEDULED_SYNC_EVENT: &str = "scheduled-sync";
+/// How often the scheduler looks at the clock.
 #[cfg(feature = "app")]
-const SCHEDULED_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const SCHEDULER_TICK: std::time::Duration = std::time::Duration::from_secs(30);
+/// A wall-clock step this much longer than a tick means the machine slept.
+#[cfg(feature = "app")]
+const RESUME_JUMP: std::time::Duration = std::time::Duration::from_secs(60);
+/// Focusing the window syncs when the last sync is older than this.
+const FOCUS_SYNC_AFTER_SECONDS: u64 = 60;
+/// Focus comes and goes with every Alt+Tab; act on it at most this often.
+#[cfg(feature = "app")]
+const FOCUS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(crate) struct RuntimeState {
     pub(super) operation_lock: Mutex<()>,
@@ -51,6 +58,7 @@ pub(super) struct LoadedSource {
     pub(super) status: SourceStatus,
     pub(super) refresh_failed: bool,
     pub(super) message: Option<String>,
+    pub(super) last_success_at: Option<u64>,
 }
 
 pub(super) struct LoadedRepository {
@@ -59,7 +67,11 @@ pub(super) struct LoadedRepository {
     pub(super) status: SourceStatus,
     pub(super) refresh_failed: bool,
     pub(super) message: Option<String>,
+    pub(super) last_success_at: Option<u64>,
 }
+
+/// How `run_blocking` reports a worker that died instead of returning.
+pub(crate) const WORKER_FAILED: &str = "worker failed";
 
 pub(super) async fn run_blocking<T, F>(context: &'static str, task: F) -> Result<T, String>
 where
@@ -68,7 +80,7 @@ where
 {
     tokio::task::spawn_blocking(task)
         .await
-        .map_err(|error| format!("{context} worker failed: {error}"))?
+        .map_err(|error| format!("{context} {WORKER_FAILED}: {error}"))?
 }
 
 pub(super) fn current_epoch_seconds() -> u64 {
@@ -78,27 +90,92 @@ pub(super) fn current_epoch_seconds() -> u64 {
         .as_secs()
 }
 
+/// Seconds to wait after a sync before the next scheduled one: 15 minutes
+/// after a good pass; 1, 2, then 5 minutes after failed passes in a row; then
+/// back to 15 minutes.
+fn scheduled_sync_delay(failed_passes: u32) -> u64 {
+    match failed_passes {
+        1 => 60,
+        2 => 2 * 60,
+        3 => 5 * 60,
+        _ => 15 * 60,
+    }
+}
+
+/// Syncs on the retry ladder above, and right away when the machine resumes
+/// from sleep. Every sync counts, whoever started it, so a failed manual check
+/// also brings the next scheduled one forward.
 #[cfg(feature = "app")]
 pub(crate) async fn run_scheduled_sync<R: Runtime>(app: AppHandle<R>) {
-    let mut interval = time::interval(SCHEDULED_SYNC_INTERVAL);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    interval.tick().await;
+    let started = current_epoch_seconds();
+    let mut last_tick = SystemTime::now();
     loop {
-        interval.tick().await;
+        tokio::time::sleep(SCHEDULER_TICK).await;
+        let now = SystemTime::now();
+        let resumed =
+            now.duration_since(last_tick).unwrap_or_default() > SCHEDULER_TICK + RESUME_JUMP;
+        last_tick = now;
+        let (finished, failed) = sync::pass_record();
+        let due = finished.max(started) + scheduled_sync_delay(failed) <= current_epoch_seconds();
+        if !resumed && !due {
+            continue;
+        }
         let Some(runtime) = app.try_state::<RuntimeState>() else {
             eprintln!("Scheduled source sync stopped because runtime state is unavailable.");
             return;
         };
-        let event = match sync_app_state(runtime.inner()).await {
-            Ok(state) => crate::app_state::ScheduledSync::Updated {
-                state: Box::new(state),
-            },
-            Err(message) => crate::app_state::ScheduledSync::Failed { message },
-        };
+        let event =
+            crate::app_state::ScheduledSync::from_result(sync_app_state(runtime.inner()).await);
         if let Err(error) = app.emit(SCHEDULED_SYNC_EVENT, &event) {
             eprintln!("Could not publish scheduled source sync: {error}");
         }
     }
+}
+
+/// When the window comes forward: looks again for installed agents, so an app
+/// installed or removed since the last look shows up without a restart, then
+/// syncs if the set changed or the last sync finished over a minute ago. A
+/// changed set also extends installed packages to a newly found agent. Runs
+/// at most once a minute, counting from launch, since loading syncs anyway.
+/// The result arrives as the scheduled-sync event.
+#[cfg(feature = "app")]
+pub(crate) fn sync_on_focus<R: Runtime>(app: &AppHandle<R>) {
+    use std::sync::{OnceLock, PoisonError};
+    use std::time::Instant;
+    static LAST: OnceLock<std::sync::Mutex<Instant>> = OnceLock::new();
+    {
+        let mut last = LAST
+            .get_or_init(|| std::sync::Mutex::new(Instant::now()))
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if last.elapsed() < FOCUS_INTERVAL {
+            return;
+        }
+        *last = Instant::now();
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let agents_changed =
+            tauri::async_runtime::spawn_blocking(crate::agent_profiles::refresh_detection)
+                .await
+                .unwrap_or(false);
+        let (finished, _) = sync::pass_record();
+        if focus_wants_sync(
+            agents_changed,
+            sync::sync_in_progress(),
+            finished,
+            current_epoch_seconds(),
+        ) {
+            spawn_app_sync(app);
+        }
+    });
+}
+
+/// A changed agent set always syncs: a sync already running may have read the
+/// old set, so this one queues behind it on the sync lock. Otherwise focus
+/// syncs only when none is running and the last one finished long enough ago.
+fn focus_wants_sync(agents_changed: bool, in_progress: bool, finished: u64, now: u64) -> bool {
+    agents_changed || (!in_progress && now >= finished + FOCUS_SYNC_AFTER_SECONDS)
 }
 
 #[cfg(feature = "app")]
@@ -109,14 +186,29 @@ pub(crate) fn spawn_app_sync<R: Runtime>(app: AppHandle<R>) {
         };
         // Report a failed manual check the same way the scheduler does, so
         // "Check for Updates Now" is never silent.
-        let event = match sync_app_state(runtime.inner()).await {
-            Ok(state) => crate::app_state::ScheduledSync::Updated {
-                state: Box::new(state),
-            },
-            Err(message) => crate::app_state::ScheduledSync::Failed { message },
-        };
+        let event =
+            crate::app_state::ScheduledSync::from_result(sync_app_state(runtime.inner()).await);
         let _ = app.emit(SCHEDULED_SYNC_EVENT, event);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn failed_passes_retry_sooner_then_fall_back_to_the_normal_interval() {
+        let delays = (0..6).map(super::scheduled_sync_delay).collect::<Vec<_>>();
+        assert_eq!(delays, [900, 60, 120, 300, 900, 900]);
+    }
+
+    #[test]
+    fn focus_syncs_on_changed_agents_or_an_old_sync_but_not_over_a_running_one() {
+        use super::focus_wants_sync;
+        assert!(focus_wants_sync(true, true, 1_000, 1_001));
+        assert!(!focus_wants_sync(false, false, 1_000, 1_059));
+        assert!(focus_wants_sync(false, false, 1_000, 1_060));
+        assert!(!focus_wants_sync(false, true, 1_000, 5_000));
+        assert!(focus_wants_sync(false, false, 0, 1_000));
+    }
 }
 
 #[cfg(test)]

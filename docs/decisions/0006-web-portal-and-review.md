@@ -22,11 +22,13 @@ Reviewers are admins; there is no separate role. Notifications are in the portal
 
 ### Browser uploads are wrapped by the same Rust code as the CLI
 
-The publish endpoint also accepts files with relative paths, or a zip without a manifest, and an optional `base` version whose files the upload is laid over (how the portal edits a skill). The server runs `validate-source stage`, which is the CLI's wrapping moved into `src-tauri/src/staging.rs`: a skill directory, a folder of skill directories (a skill pack: one package with one skill component each), an MCP document, or a source tree. Validation runs with `--secrets`, so every upload, CLI or browser, is refused if it looks like it carries credentials.
+The publish endpoint also accepts files with relative paths, or a zip without a manifest. The portal has no in-browser editor: skills are written locally and uploaded, and a change is a new upload. The server runs `validate-source stage`, which is the CLI's wrapping moved into `src-tauri/src/staging.rs`: a skill directory, a folder of skill directories (a skill pack: one package with one skill component each), an MCP document, or a source tree. Validation runs with `--secrets`, so every upload, CLI or browser, is refused if it looks like it carries credentials.
 
 ### Moderation
 
 Admins resolve reports (`ResolvedAt`, `ResolvedBy`) and can withdraw any version, since `Owns` already includes admins.
+
+**Amended 2026-09-22:** withdrawing is reversible. `PUT …/versions/{version}/yank` withdraws a version and `DELETE` restores it, for owners and admins alike; the package's listing follows whichever version is live afterwards. The version number stays used either way.
 
 ## Consequences
 

@@ -7,15 +7,52 @@ What the Agent Plugins window shows, where it writes, and what it does on its ow
 | Control                          | Effect                                                                                                                          |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | Status button                    | Opens **System status**. Shows a green dot and your namespace while no check failed; turns red and names the failure otherwise. |
-| **Manage Sources**               | Lists the catalog's sources with **Add** or **Remove**, plus any added source the catalog no longer lists.                      |
-| **Refresh**                      | Runs a sync now: preflight, catalog, sources, background updates.                                                               |
+| **Manage sources**               | Lists the catalog's sources with **Add** or **Remove**, plus any added source the catalog no longer lists.                      |
+| **Refresh**                      | Runs a sync now: catalog, sources, repairs, background updates, preflight.                                                      |
 | **Reset**                        | Confirms, then uninstalls every package and deletes Agent Plugins' config, cache, and data.                                     |
 | Search box                       | Filters on package name, description, publisher, and tags. The count beside it is the number of matching packages.              |
-| Package **Install/Uninstall**    | Applies the whole package.                                                                                                      |
-| Component row buttons            | Apply one skill or one MCP server. Multi-component packages expand to show them.                                                |
+| **Last checked**                 | The time of the last sync that reached at least one server, or `Not yet`. **Checking…** appears beside it while any sync runs.  |
+| Package button                   | Applies the whole package. The label follows the [package state](#package-states).                                              |
+| Component row buttons            | Apply one skill or one connector. Multi-part packages expand to show them.                                                      |
 | Source **Install/Uninstall all** | Applies every eligible package in that source as one batch.                                                                     |
 
 Warnings never colour the status button; only failures do. A failing check is also repeated as a line under the header.
+
+A source name is plain text, not a link: its URL is a package archive.
+
+## Notices
+
+Notices stack in one column above the catalog, in this order.
+
+| Notice            | Colour                                        | Shown when                                                                                                                                                                                                                                                            | Buttons                      |
+| ----------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| Offline           | amber                                         | The last sync reached no server, or an action just failed for lack of a connection: `Offline — showing packages as of <Last checked>. Agent Plugins will retry automatically.` When only some servers failed: `Couldn't reach <names>, so their saved copy is shown.` | **Try now**                  |
+| No AI app found   | blue                                          | No supported AI app was detected, and none is merely unconfirmed.                                                                                                                                                                                                     | **View AI apps**             |
+| Error             | red                                           | An action or a sync failed. The first line is a plain summary; the backend's text is under **Details**.                                                                                                                                                               | **Dismiss**                  |
+| Action result     | blue; amber when the action skipped an AI app | An action made backups, or skipped an AI app whose settings file could not be read or was in use. Names the backup folder and each skipped app.                                                                                                                       | **Open folder**, **Dismiss** |
+| Background report | green; amber when an update failed            | A sync updated packages (`Updated …`), put back missing files (`Restored: …`), added packages to a newly found AI app (`Added to newly found apps: …`), or could not update (`Couldn't update …. Agent Plugins will try again later.`). Reasons under **Details**.    | **Dismiss**                  |
+
+A sync clears its own earlier error and the offline notice when it succeeds. It never clears an error from an action you started. A dismissed background report stays hidden until its text changes.
+
+When there is nothing to list, the page body shows one of these instead of the catalog:
+
+| Body                                                                               | When                                                          |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `You're offline, and no packages are saved on this computer yet.` with **Try now** | Offline, and no source or package is saved.                   |
+| `No packages published yet.`                                                       | Online, no sync running, and nothing is listed.               |
+| The error with **Try again**                                                       | The first load failed before anything was shown.              |
+| `Something went wrong` with **Reload**                                             | The window itself crashed. Installed packages are unaffected. |
+
+## Automatic retries
+
+| Failure                                                                                 | What happens                                                                                                                                                                                          |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| An action fails on a locked file or a dropped connection (kind `locked` or `retryable`) | The window shows **Trying again…**, waits 3 seconds, and runs the action once more. If that fails too, the error adds `Close <app> and try again.` when it names an AI app, otherwise a generic hint. |
+| An action or sync fails because no server answered (kind `offline`)                     | No red error. The offline notice appears, and the next sync retries.                                                                                                                                  |
+| A marketplace or archive request fails to connect, times out, or answers 5xx or 429     | Retried twice, after 1 then 2 seconds, or after the server's `Retry-After` up to 10 seconds.                                                                                                          |
+| A file rename, delete, copy, or write hits a transient Windows sharing or access error  | Retried for up to 4 seconds before it counts as locked.                                                                                                                                               |
+
+The error kinds are listed in [the codebase map](codebase-map.md#ipc-errors).
 
 ## Tray
 
@@ -30,20 +67,32 @@ Warnings never colour the status button; only failures do. A failing check is al
 
 The badge on a card, and the button beside it.
 
-| State                | Badge               | Button            | Meaning                                                                                                                                     |
-| -------------------- | ------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `available`          | none                | Install           | Not installed.                                                                                                                              |
-| `installed`          | none                | Uninstall         | Installed, and every owned file still matches the ledger.                                                                                   |
-| `updateAvailable`    | Update Available    | Update            | The source publishes a different digest for this package.                                                                                   |
-| `partiallyInstalled` | Partially Installed | Install remaining | Some components are installed; others are not, or an owned resource no longer matches the plan.                                             |
-| `modified`           | Local Changes       | Protected         | An owned file was edited outside Agent Plugins. Disabled: it will not overwrite your edit.                                                  |
-| `removed`            | Removed Upstream    | Uninstall         | Installed, but the source no longer publishes it, or you may no longer see it.                                                              |
-| `sourceConflict`     | Owned Elsewhere     | Owned Elsewhere   | Another source already owns this package ID. Disabled.                                                                                      |
-| `conflict`           | Unmanaged Conflict  | Replace…          | Reserved for an unmanaged file at a destination. The current build reports that as an install error instead, so this state does not appear. |
+| State                | Badge                    | Button              | Meaning                                                                                                                                                                     |
+| -------------------- | ------------------------ | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `available`          | none                     | Install             | Not installed.                                                                                                                                                              |
+| `installed`          | none                     | Uninstall           | Installed, and every owned file still matches the ledger.                                                                                                                   |
+| `updateAvailable`    | Update available         | Update              | The source publishes a different digest for this package.                                                                                                                   |
+| `partiallyInstalled` | Partly installed         | Update              | Some components are installed; others are not, or an owned resource no longer matches the plan.                                                                             |
+| `missing`            | Restoring on next check  | Uninstall           | Files of the installed version are gone and none of the rest changed. The next sync re-creates them from the saved copy. Uninstalling succeeds with nothing left to remove. |
+| `modified`           | Changed on this computer | Restore original…   | An owned file was edited outside Agent Plugins. Updates skip it. **Restore original…** confirms, backs up the changed copy, and reinstalls the published content.           |
+| `removed`            | No longer offered        | Uninstall           | Installed, but the source no longer publishes it, or you may no longer see it.                                                                                              |
+| `sourceConflict`     | From another source      | From another source | Another source already owns this package ID. Disabled.                                                                                                                      |
+| `conflict`           | Files already there      | Replace…            | Reserved for an unmanaged file at a destination. The current build reports that as an install error instead, so this state does not appear.                                 |
 
-Component rows carry the same states. A package whose components are all skills marked `disable-model-invocation` also shows **Manual Invocation**; a package published to the official lane shows **Official**, one from a team namespace shows **Team**, and one whose namespace or package carries an access list shows **Restricted**.
+When an owned file cannot be read, the package keeps the state it last had instead of changing to one of these.
+
+Component rows carry the same states, and a kind badge: **Skill**, or **Connector** for an MCP server. A package whose components are all skills marked `disable-model-invocation` also shows **Only when you ask**; a package published to the official lane shows **Official**, one from a team namespace shows **Team**, and one whose namespace or package carries an access list shows **Restricted**.
 
 An update applies only the components already installed on that package. Installing a component you skipped the first time is a separate action.
+
+### Source badges
+
+| Badge                    | Meaning                                                                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `Saved copy from <time>` | The last sync could not reach this source or catalog; its packages are the copy saved at `<time>`. Grey, never red. |
+| **Refresh failed**       | The last refresh failed for another reason. The source's message is shown under it.                                 |
+
+A source with packages that could not be read shows `<n> packages in this source couldn't be read and are not shown.`, with each reason under **Details**. The rest of the source is listed.
 
 ## Destinations
 
@@ -61,40 +110,57 @@ An update applies only the components already installed on that package. Install
 
 A skill directory is named `<sourceId>-<skillName>`. Every target except Claude Code and Microsoft 365 Copilot shares one copy under `~/.agents/skills`; the ledger records each target as a consumer, and the directory is deleted only when the last one goes away. Shared configuration files are edited in place, preserving comments where the format allows, and untouched keys stay untouched.
 
-Replacing an unmanaged destination, or force-removing modified content, first copies the original to `~/.agents/.agent-plugins-backups`. The app reports the backup path when it makes one.
+A JSON or JSONC configuration file that starts with a UTF-8 byte order mark, or is empty, is read as settings. One that cannot be parsed, or that its app holds open on Windows, skips that app only: the rest of the package installs, and the action result names the app and the file. A sync retries the skipped app while Agent Plugins stays open.
+
+Replacing an unmanaged destination, restoring an original, or force-removing modified content first copies the existing content to `~/.agents/.agent-plugins-backups`. The action result names the backup path and offers **Open folder**.
 
 ## Approvals and confirmations
 
-| Operation                               | Prompt                                                                                    |
-| --------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Install a package with an MCP server    | Names the package and lists each server's command, arguments, and environment variables.  |
-| Install a package or component (no MCP) | None. Proceeds immediately.                                                               |
-| Uninstall all / Replace all in a source | Confirms the count.                                                                       |
-| Remove a source                         | Confirms the package count, and names any file with local changes that will be discarded. |
-| Reset                                   | Confirms.                                                                                 |
+| Operation                               | Prompt                                                                                                                                        |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Install a package with a connector      | **Allow connector**: names the package and lists each server's command, arguments, and environment variables. **Allow and install** proceeds. |
+| Install a package or component (no MCP) | None. Proceeds immediately.                                                                                                                   |
+| Restore original                        | **Restore original**: your changed copy is kept as a backup. **Back up and restore** proceeds.                                                |
+| Uninstall all / Replace all in a source | Confirms the count.                                                                                                                           |
+| Remove a source                         | Confirms the package count, and names each changed file that will be discarded. Missing and unchanged files are removed without being named.  |
+| Reset                                   | Confirms.                                                                                                                                     |
 
-MCP approval is per operation and is never inferred. A background update that would add or change an MCP server fails rather than approving itself, and reports the failure in the catalog notice.
+MCP approval is per operation and is never inferred. A background update that would add or change an MCP server fails rather than approving itself, and reports the failure in the background report.
+
+The button is disabled from the first click until the operation ends, so a double click cannot open a second confirmation.
 
 ## Background behavior
 
-- **Detection.** Every installed agent is configured. Detection results are cached for 60 seconds; a sync or an on-demand diagnostics run clears that cache.
-- **Sync.** Every 15 minutes, and on **Refresh** or **Check for Updates Now**. It runs preflight, refreshes the catalog, then the sources, subscribes to any catalog source not yet added, and posts a `heartbeat` event.
+- **Detection.** Every installed agent is configured. A version probe (`<command> --version`) that runs past 3 seconds or errors keeps the agent as it was, and **System status** says `couldn't check just now` instead of `not installed`. Results are cached for 60 seconds; a sync, an on-demand diagnostics run, or focusing the window clears that cache.
+- **Window focus.** Bringing the window forward looks for agents again, at most once a minute; the first focus only starts that clock. It then syncs when the set of agents changed, or when no sync is running and the last one finished over a minute ago.
+- **Sync schedule.** 15 minutes after a sync that reached every server. After a sync that failed or reached only some servers, the next one comes 1, 2, then 5 minutes later, then every 15 minutes again. Syncs you start count toward this. A sync also runs right after the computer wakes from sleep, and on **Refresh** or **Check for Updates Now**.
+- **Sync.** Fetches every catalog and source a few at a time, with a 10-second connect timeout and a 120-second download timeout; after one connection to a host fails, the rest of that pass skips the host. It then activates what arrived, subscribes to any catalog source not yet added, repairs and updates installed packages, runs preflight, and posts a `heartbeat` event. Installs and removals are not held up while it downloads.
+- **Repairs.** Missing files of installed packages are re-created from the saved copy of the installed version. A connector entry comes back only when the ledger still holds the exact entry you approved. Installed skills are added to agents detected since, and released from agents no longer detected. A connector is added to another agent again only for a package that skipped that agent.
 - **Updates.** Installed packages whose state is `updateAvailable` are updated during sync, without approval, so anything touching an MCP server is left pending and reported. Nothing is updated while no agent is detected.
-- **Offline.** A failed refresh keeps the last validated snapshot. A failed catalog fetch does not stop source refresh.
-- **Gone sources.** A source whose archive answers 404 (unpublished, or no longer visible to you) drops its cached snapshot. Its installed packages show **Removed Upstream**; the source retires itself once nothing from it is installed.
-- **Events.** `install`, `update`, `uninstall`, and `heartbeat` are posted to the marketplace from a background thread. Reporting never blocks or fails an operation.
+- **Offline.** A failed refresh keeps the last validated snapshot and marks the source **Saved copy**. A failed catalog fetch does not stop source refresh. **Last checked** does not move while every server is unreachable.
+- **Gone sources.** A source or catalog whose archive answers 404 or 410 (unpublished, or no longer visible to you) keeps its saved copy and shows `<name> was not found on the server (first noticed <date>).` After 3 such answers spanning at least 3 days, with no successful fetch in between, it is retired: its cache is deleted, and it is dropped from the configuration once nothing from it is installed. A retired source's installed packages show **No longer offered** until you uninstall them. The default catalog is never retired.
+- **Events.** `install`, `update`, `uninstall`, and `heartbeat` are posted to the marketplace from a background thread. Events that cannot be delivered wait in an outbox and go out, oldest first, with the next report. The outbox keeps the newest 1,000 events from the last 7 days and only the newest heartbeat. Reporting never blocks or fails an operation.
 
 ## State on disk
 
-| Path                                                | Contents                                                                               |
-| --------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `%APPDATA%\agent-plugins\sources.json`              | Configured catalogs and sources, version 6.                                            |
-| `%APPDATA%\agent-plugins\agent-profiles.json`       | Detected agent profiles.                                                               |
-| `%APPDATA%\agent-plugins\installations.json`        | The ownership ledger, version 4.                                                       |
-| `%APPDATA%\agent-plugins\resource-transaction.json` | The recovery journal. Present only while a transaction is in flight.                   |
-| `%LOCALAPPDATA%\agent-plugins\`                     | Source snapshots, the marketplace index, the preflight report, and the last sync time. |
+| Path                                                | Contents                                                                                                                                                                     |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `%APPDATA%\agent-plugins\sources.json`              | Configured catalogs and sources, version 6.                                                                                                                                  |
+| `%APPDATA%\agent-plugins\agent-profiles.json`       | Detected agent profiles.                                                                                                                                                     |
+| `%APPDATA%\agent-plugins\installations.json`        | The ownership ledger, version 4.                                                                                                                                             |
+| `%APPDATA%\agent-plugins\resource-transaction.json` | The recovery journal. Present only while a transaction is in flight or its rollback is pending.                                                                              |
+| `%LOCALAPPDATA%\agent-plugins\`                     | Source snapshots, the marketplace index, the preflight report, the last sync time, per-source sync health (`sync-health.json`), and the event outbox (`events-outbox.json`). |
 
-Each of `sources.json`, `agent-profiles.json`, and `installations.json` keeps a `.previous` copy. On launch, a journal whose transaction is absent from the ledger is rolled back; one already committed is cleaned up.
+Each of `sources.json`, `agent-profiles.json`, and `installations.json` keeps a `.previous` copy, the last good version. When a file cannot be parsed:
+
+| File                        | Recovery                                                                                                                                                                                                                                                                                                    |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `installations.json`        | Moved aside to `installations.json.corrupt-<timestamp>` and replaced by `.previous`, or started empty when that is damaged too. A single unreadable record is dropped and the rest kept. A ledger written by a newer version is shown but never changed; every change fails until Agent Plugins is updated. |
+| `sources.json`              | Replaced by `.previous`, or rebuilt from the saved default catalog and the sources of installed packages. The damaged file is kept as `sources.json.corrupt-<timestamp>`. A file from a newer version is left alone and reported as an error.                                                               |
+| `agent-profiles.json`       | Replaced by `.previous`, or started empty. Detection fills it again.                                                                                                                                                                                                                                        |
+| `resource-transaction.json` | Moved aside to `resource-transaction.json.corrupt-<timestamp>`.                                                                                                                                                                                                                                             |
+
+Recovery of an interrupted transaction runs before every ledger read and change, not only at launch: a journal whose transaction is absent from the ledger is rolled back, and one already committed is cleaned up. A rollback that cannot finish keeps the journal, refuses new changes with `An earlier change is still being undone`, and is retried on the next sync. Staging files older than 10 minutes that an interrupted run left behind are removed during sync.
 
 ## See also
 

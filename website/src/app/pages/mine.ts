@@ -12,7 +12,7 @@ import { editVisibility } from "../shared/dialogs";
 import type { IconName } from "../shared/icon";
 import { Icon } from "../shared/icon";
 import type { PackageStatus } from "../shared/status";
-import { newestVersion, packageStatus } from "../shared/status";
+import { packageStatus } from "../shared/status";
 import { runTask } from "../shared/tasks";
 
 interface Row {
@@ -56,7 +56,7 @@ function laneLabel(space: Space): string {
         <a mat-flat-button routerLink="/publish"><app-icon name="add" />Share a skill</a>
       </header>
 
-      @if (session.state().kind !== "loading" && session.me() === null) {
+      @if (session.state().kind === "signed-out") {
         <div class="card">
           <h2>Sign in to see your skills</h2>
           <p class="muted">Open this page on your work PC; Windows signs you in automatically.</p>
@@ -172,7 +172,12 @@ export class MinePage {
         .filter((item) => item.namespace === space.namespace)
         .map((item) => {
           const status = packageStatus(item);
-          return { item, status, icon: statusIcons[status.tone], updated: formatAge(newestVersion(item)?.publishedAt ?? new Date().toISOString()) };
+          return {
+            item,
+            status,
+            icon: statusIcons[status.tone],
+            updated: formatAge(item.versions.map((version) => version.publishedAt).reduce((newest, at) => (Date.parse(at) > Date.parse(newest) ? at : newest)))
+          };
         })
     }));
   });

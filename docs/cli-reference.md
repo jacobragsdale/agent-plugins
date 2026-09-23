@@ -14,7 +14,7 @@ The app puts itself on `PATH` on first run. Otherwise call it by path:
 agent-plugins whoami
 agent-plugins validate <path>
 agent-plugins search [query]
-agent-plugins publish <path> --version <semver> [--namespace <ns>] [--package-id <id>]
+agent-plugins publish <path> --version <major.minor.patch> [--namespace <ns>] [--package-id <id>]
                              [--tags a,b] [--changelog <text>] [--yes]
 agent-plugins install <namespace>/<package> [--approve-mcp]
 agent-plugins access <namespace>[/<package>] [--user <account>]... [--group <name>]... [--public]
@@ -37,15 +37,15 @@ groups: Data Engineering, AP-Admins
 admin: false
 ```
 
-| Line                  | Meaning                                                                                      |
-| --------------------- | -------------------------------------------------------------------------------------------- |
-| `host account`        | Who the process runs as, according to Windows.                                               |
-| `identity`            | The scheme used for marketplace requests: Kerberos, or the dev header.                       |
-| `marketplace account` | Who the server says you are.                                                                 |
-| `namespace`           | Your default publish namespace: your lowercase account name.                                 |
-| `publishes to`        | Every namespace you may publish to: allowlisted lanes and team namespaces your groups own.   |
-| `groups`              | The AD groups the server resolved for you. Empty means group-restricted packages are hidden. |
-| `admin`               | Whether the server grants administrative rights.                                             |
+| Line                  | Meaning                                                                                                                                               |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `host account`        | Who the process runs as, according to Windows.                                                                                                        |
+| `identity`            | The scheme used for marketplace requests: Kerberos, or the dev header.                                                                                |
+| `marketplace account` | Who the server says you are.                                                                                                                          |
+| `namespace`           | Your personal publish namespace: your lowercase account name, or a numbered variant such as `christopher-jo-2` when another account claimed it first. |
+| `publishes to`        | Every namespace you may publish to: allowlisted lanes and team namespaces your groups own.                                                            |
+| `groups`              | The AD groups the server resolved for you. Empty means group-restricted packages are hidden.                                                          |
+| `admin`               | Whether the server grants administrative rights.                                                                                                      |
 
 ## `validate <path>`
 
@@ -71,19 +71,19 @@ jacob/review                     1.2.0      Jacob Ragsdale           47     31  
 
 `installs` counts install events; `users` is the current installed base.
 
-## `publish <path> --version <semver>`
+## `publish <path> --version <major.minor.patch>`
 
 Stages `<path>` into a one-package source tree, refuses anything that looks like a credential, validates it, and uploads it to your namespace.
 
-| Argument             | Required | Meaning                                                                                                                                                                                                   |
-| -------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `<path>`             | yes      | A skill directory containing `SKILL.md`, a folder of skill directories (a skill pack), an MCP document in the `mcp.json` shape, or a source tree with `agent-plugins.json` declaring exactly one package. |
-| `--version <semver>` | yes      | `major.minor.patch`. Immutable once published.                                                                                                                                                            |
-| `--namespace <ns>`   | no       | Publish somewhere other than your own namespace. You must be allowlisted for it, or an admin.                                                                                                             |
-| `--package-id <id>`  | no       | Override the derived package ID.                                                                                                                                                                          |
-| `--tags a,b`         | no       | Comma-separated. Blank entries are dropped.                                                                                                                                                               |
-| `--changelog <text>` | no       | One line recorded against this version.                                                                                                                                                                   |
-| `--yes`, `-y`        | no       | Skip the confirmation prompt.                                                                                                                                                                             |
+| Argument                        | Required | Meaning                                                                                                                                                                                                   |
+| ------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<path>`                        | yes      | A skill directory containing `SKILL.md`, a folder of skill directories (a skill pack), an MCP document in the `mcp.json` shape, or a source tree with `agent-plugins.json` declaring exactly one package. |
+| `--version <major.minor.patch>` | yes      | A release version; the server refuses a pre-release such as `1.0.0-beta.1`. Immutable once published.                                                                                                     |
+| `--namespace <ns>`              | no       | Publish somewhere other than your own namespace. You must be allowlisted for it, or an admin.                                                                                                             |
+| `--package-id <id>`             | no       | Override the derived package ID.                                                                                                                                                                          |
+| `--tags a,b`                    | no       | Comma-separated. Blank entries are dropped. At most 10, each up to 32 lowercase letters, digits, and single hyphens.                                                                                      |
+| `--changelog <text>`            | no       | One line recorded against this version. At most 4,096 characters.                                                                                                                                         |
+| `--yes`, `-y`                   | no       | Skip the confirmation prompt.                                                                                                                                                                             |
 
 The package ID comes from the input: a skill directory uses the `SKILL.md` frontmatter `name` with a `<yourname>-` prefix stripped; a skill pack uses the folder name, and each subfolder becomes one skill component named by its `SKILL.md`; an MCP document uses the file name; a source tree uses the declared package ID, and its `source.id` must equal the namespace.
 
@@ -124,7 +124,7 @@ Refusals, before anything is uploaded:
 | The zipped archive exceeds 50 MB           | `The package archive is larger than the 50 MB limit.`       |
 | No marketplace is configured in this build | `No marketplace is configured.`                             |
 
-A server rejection prints `HTTP <status>: <title>` plus one indented line per field error. See [Publish to the marketplace](publish-to-marketplace.md) for the walkthrough and [the API reference](marketplace-api.md) for the request itself.
+A server rejection prints `HTTP <status>: <title>`, then the problem's `detail` and one line per field error, each indented. See [Publish to the marketplace](publish-to-marketplace.md) for the walkthrough and [the API reference](marketplace-api.md) for the request itself.
 
 ## `install <namespace>/<package>`
 
@@ -163,7 +163,7 @@ access jacob/review
   groups: Data Engineering
 ```
 
-A public target prints `public`. A namespace or package with a list is hidden from everyone not on it: it leaves their catalog, `search`, and the app, and anything they installed from it shows **Removed Upstream** until they uninstall it. Owners and admins always see their own.
+A public target prints `public`. A namespace or package with a list is hidden from everyone not on it: it leaves their catalog, `search`, and the app, and anything they installed from it shows **No longer offered** until they uninstall it. Owners and admins always see their own.
 
 ## Environment
 

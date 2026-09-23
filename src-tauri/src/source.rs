@@ -1,12 +1,13 @@
 //! Manifest-aware source and source-repository configuration and snapshots.
 
 use crate::artifact::{
-    download_artifact, extract_source_archive, head_artifact, require_repository_json,
-    validators_match, ArtifactValidators, DownloadedBytes,
+    download_artifact, extract_source_archive, head_artifact, is_unreachable,
+    require_repository_json, validators_match, ArtifactValidators, DownloadedBytes,
 };
 use crate::catalog::{read_manifest_catalog, ManifestCatalog};
 use crate::fs_retry;
 use crate::locator::Locator;
+use crate::manifest::{SourceManifest, SOURCE_MANIFEST_FILE};
 use crate::repository::{
     report_manifest, RepositoryManifest, RepositoryValidationReport, REPOSITORY_MANIFEST_FILE,
 };
@@ -146,7 +147,18 @@ pub(crate) fn sources_path(config_base: &Path) -> PathBuf {
     config_base.join(SOURCES_FILE)
 }
 
+/// Reads `sources.json`. An unreadable file falls back to its last good copy
+/// (`sources.json.previous`), then to a configuration rebuilt from the cached
+/// default catalog and the installed packages' sources, so one damaged file
+/// never leaves the app unable to start. The damaged file is kept beside it.
 pub(crate) fn read_sources_config(config_base: &Path) -> Result<SourcesConfig, String> {
+    read_sources_config_or_rebuild(config_base, rebuild_sources_config)
+}
+
+fn read_sources_config_or_rebuild(
+    config_base: &Path,
+    rebuild: impl FnOnce() -> SourcesConfig,
+) -> Result<SourcesConfig, String> {
     recover_sources_file(config_base)?;
     let path = sources_path(config_base);
     let contents = match fs::read(&path) {
@@ -161,9 +173,158 @@ pub(crate) fn read_sources_config(config_base: &Path) -> Result<SourcesConfig, S
         }
         Err(error) => return Err(format!("Could not read {}: {error}", path.display())),
     };
-    let config = parse_sources_file(&path, &contents)?;
+    let error = match parse_valid_sources_file(&path, &contents) {
+        Ok(config) => return Ok(config),
+        Err(error) => error,
+    };
+    // A version this build does not read is not damage; replacing it would
+    // throw away a newer build's configuration.
+    let version = serde_json::from_slice::<serde_json::Value>(&contents)
+        .ok()
+        .and_then(|value| value.get("version").and_then(serde_json::Value::as_u64));
+    if version.is_some_and(|version| version != u64::from(SOURCES_VERSION)) {
+        return Err(error);
+    }
+    let backup = config_base.join(SOURCES_BACKUP_FILE);
+    let config = match fs::read(&backup)
+        .map_err(|error| error.to_string())
+        .and_then(|contents| parse_valid_sources_file(&backup, &contents))
+    {
+        Ok(config) => {
+            eprintln!("{error} Restored the previous copy of the source list.");
+            config
+        }
+        Err(_) => {
+            eprintln!(
+                "{error} Rebuilt the source list from the saved catalog and installed packages."
+            );
+            // The damaged copy must not become the next backup.
+            let _ = fs_retry::remove_file(&backup);
+            rebuild()
+        }
+    };
+    let quarantine =
+        crate::ledger::quarantine_path(config_base, &format!("{SOURCES_FILE}.corrupt-"));
+    fs_retry::rename(&path, &quarantine)
+        .map_err(|error| format!("Could not set aside {}: {error}", path.display()))?;
+    write_sources_config(config_base, &config)?;
+    Ok(config)
+}
+
+fn parse_valid_sources_file(path: &Path, contents: &[u8]) -> Result<SourcesConfig, String> {
+    let config = parse_sources_file(path, contents)?;
     validate_sources_config(&config)?;
     Ok(config)
+}
+
+/// The configuration the saved caches can vouch for: the default catalog with
+/// the sources it lists, and every source something is installed from. A
+/// source without a saved copy keeps its installation-record name until the
+/// next sync fetches it.
+fn rebuild_sources_config() -> SourcesConfig {
+    let installed = crate::paths::SystemPaths::from_system()
+        .and_then(|paths| crate::executor::read_ledger(&paths))
+        .map(|ledger| {
+            ledger
+                .items
+                .values()
+                .map(|record| (record.source_id.clone(), record.source_url.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    match crate::sources::cache_base_dir() {
+        Ok(cache) => rebuild_sources(
+            &cache,
+            crate::locator::default_catalog_locator().ok().flatten(),
+            &installed,
+        ),
+        Err(_) => SourcesConfig::default(),
+    }
+}
+
+fn rebuild_sources(
+    cache_base: &Path,
+    default_catalog: Option<Locator>,
+    installed: &[(String, String)],
+) -> SourcesConfig {
+    let mut config = SourcesConfig::default();
+    let mut wanted = Vec::new();
+    if let Some(locator) = default_catalog {
+        let key = locator.repository_key();
+        let manifest = read_current_pointer(&repository_cache_root(cache_base, &key))
+            .ok()
+            .flatten()
+            .and_then(|pointer| {
+                RepositoryManifest::from_path_tolerant(&repository_revision_path(
+                    cache_base,
+                    &key,
+                    &pointer.revision,
+                ))
+                .ok()
+            });
+        if let Some(manifest) = manifest {
+            for listed in &manifest.sources {
+                if let Ok(listed) = listed.locator() {
+                    wanted.push((listed, Some(key.clone()), None));
+                }
+            }
+            config
+                .repositories
+                .push(configured_from_repository_manifest(key, locator, &manifest));
+        }
+    }
+    for (source_id, url) in installed {
+        if let Ok(locator) = Locator::parse(url) {
+            wanted.push((locator, None, Some(source_id.as_str())));
+        }
+    }
+    for (locator, repository_key, recorded_id) in wanted {
+        if config
+            .sources
+            .iter()
+            .any(|source| source.locator.same_identity(&locator))
+        {
+            continue;
+        }
+        let key = locator.source_key();
+        let cached = read_current_pointer(&source_cache_root(cache_base, &key))
+            .ok()
+            .flatten()
+            .and_then(|pointer| {
+                read_manifest_catalog(&revision_path(cache_base, &key, &pointer.revision), &key)
+                    .ok()
+            });
+        let definition = match (cached, recorded_id) {
+            (Some(catalog), _) => configured_from_catalog(key, locator, repository_key, &catalog),
+            (None, Some(source_id)) => ConfiguredSource {
+                source_key: key,
+                source_id: source_id.to_string(),
+                name: source_id.to_string(),
+                description: "Restored from the installed packages.".to_string(),
+                locator,
+                repository_key,
+            },
+            (None, None) => continue,
+        };
+        if !config
+            .sources
+            .iter()
+            .any(|source| source.source_id == definition.source_id)
+        {
+            config.sources.push(definition);
+        }
+    }
+    config.sources.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.source_id.cmp(&right.source_id))
+    });
+    if validate_sources_config(&config).is_err() {
+        config.sources.retain(|source| {
+            validate_sources(std::slice::from_ref(source), &config.repositories).is_ok()
+        });
+    }
+    config
 }
 
 pub(crate) fn read_sources(config_base: &Path) -> Result<Vec<ConfiguredSource>, String> {
@@ -280,7 +441,7 @@ pub(crate) fn load_current_repository(
         return Ok(None);
     };
     let path = repository_revision_path(cache_base, &definition.repository_key, &pointer.revision);
-    let manifest = RepositoryManifest::from_path(&path)?;
+    let manifest = RepositoryManifest::from_path_tolerant(&path)?;
     if manifest.repository.id != definition.repository_id {
         return Err(format!(
             "Source repository {} changed its id from {} to {}. The last validated revision remains active.",
@@ -363,21 +524,44 @@ fn prepare_artifact_source(
 ) -> Result<SourceCandidate, String> {
     let stored = read_current_pointer(source_root)?;
     if let Some(pointer) = &stored {
-        if let Ok(remote) = head_artifact(url) {
-            if validators_match(&pointer.validators(), &remote) {
-                if let Some(current) = reuse_source_revision(
+        match head_artifact(url) {
+            Ok(remote) if validators_match(&pointer.validators(), &remote) => {
+                if let Some(mut current) = reuse_source_revision(
                     cache_base,
                     source_key,
                     locator,
                     source_root,
                     &pointer.revision,
                 )? {
+                    current.validators = remote;
                     return Ok(current);
                 }
             }
+            // The download would fail the same way.
+            Err(error) if is_unreachable(&error) => return Err(error),
+            _ => {}
         }
     }
-    let downloaded = download_artifact(url)?;
+    let downloaded = match (
+        download_artifact(url, conditional_validators(stored.as_ref()).as_ref())?,
+        &stored,
+    ) {
+        (Some(downloaded), _) => downloaded,
+        (None, Some(pointer)) => {
+            if let Some(mut current) = reuse_source_revision(
+                cache_base,
+                source_key,
+                locator,
+                source_root,
+                &pointer.revision,
+            )? {
+                current.validators = pointer.validators();
+                return Ok(current);
+            }
+            download_unconditionally(url)?
+        }
+        (None, None) => download_unconditionally(url)?,
+    };
     if stored
         .as_ref()
         .is_some_and(|pointer| pointer.revision == downloaded.digest)
@@ -394,6 +578,21 @@ fn prepare_artifact_source(
         }
     }
     stage_artifact_source(source_key, locator, downloaded, source_root)
+}
+
+/// The validators for a conditional download, when the cache has any.
+fn conditional_validators(stored: Option<&CurrentPointer>) -> Option<ArtifactValidators> {
+    stored
+        .map(CurrentPointer::validators)
+        .filter(|validators| validators.etag.is_some() || validators.last_modified.is_some())
+}
+
+/// A full download, for when the server answered 304 but the saved copy it
+/// vouched for is unreadable.
+fn download_unconditionally(url: &str) -> Result<DownloadedBytes, String> {
+    download_artifact(url, None)?.ok_or_else(|| {
+        "The server answered 304 Not Modified to a request that was not conditional.".to_string()
+    })
 }
 
 fn reuse_source_revision(
@@ -474,21 +673,44 @@ fn prepare_artifact_repository(
 ) -> Result<RepositoryCandidate, String> {
     let stored = read_current_pointer(root)?;
     if let Some(pointer) = &stored {
-        if let Ok(remote) = head_artifact(url) {
-            if validators_match(&pointer.validators(), &remote) {
-                if let Some(current) = load_repository_candidate(
+        match head_artifact(url) {
+            Ok(remote) if validators_match(&pointer.validators(), &remote) => {
+                if let Some(mut current) = load_repository_candidate(
                     cache_base,
                     locator,
                     repository_key,
                     &pointer.revision,
                     false,
                 )? {
+                    current.validators = remote;
                     return Ok(current);
                 }
             }
+            // The download would fail the same way.
+            Err(error) if is_unreachable(&error) => return Err(error),
+            _ => {}
         }
     }
-    let downloaded = download_artifact(url)?;
+    let downloaded = match (
+        download_artifact(url, conditional_validators(stored.as_ref()).as_ref())?,
+        &stored,
+    ) {
+        (Some(downloaded), _) => downloaded,
+        (None, Some(pointer)) => {
+            if let Some(mut current) = load_repository_candidate(
+                cache_base,
+                locator,
+                repository_key,
+                &pointer.revision,
+                false,
+            )? {
+                current.validators = pointer.validators();
+                return Ok(current);
+            }
+            download_unconditionally(url)?
+        }
+        (None, None) => download_unconditionally(url)?,
+    };
     require_repository_json(&downloaded.bytes)?;
     if stored
         .as_ref()
@@ -516,7 +738,7 @@ fn load_repository_candidate(
     staged: bool,
 ) -> Result<Option<RepositoryCandidate>, String> {
     let path = repository_revision_path(cache_base, repository_key, revision);
-    let Ok(manifest) = RepositoryManifest::from_path(&path) else {
+    let Ok(manifest) = RepositoryManifest::from_path_tolerant(&path) else {
         return Ok(None);
     };
     Ok(Some(RepositoryCandidate {
@@ -548,7 +770,7 @@ fn stage_artifact_repository(
                 staging.join(REPOSITORY_MANIFEST_FILE).display()
             )
         })?;
-        let manifest = RepositoryManifest::from_path(&staging)?;
+        let manifest = RepositoryManifest::from_path_tolerant(&staging)?;
         Ok(RepositoryCandidate {
             definition: configured_from_repository_manifest(
                 locator.repository_key(),
@@ -993,7 +1215,8 @@ fn atomic_write_with_backup(
                 )),
             };
         }
-        let _ = fs_retry::remove_file(backup);
+        // The backup stays as the last good copy for a read that finds the
+        // new file damaged.
     } else {
         fs_retry::rename(&staging, path)
             .map_err(|error| format!("Could not activate {}: {error}", path.display()))?;
@@ -1029,11 +1252,21 @@ pub fn validate_source(input: &str) -> Result<SourceValidationReport, String> {
     if input.starts_with("https://") {
         validate_remote_source(&Locator::parse(input)?)
     } else {
+        require_strict_manifest(Path::new(input))?;
         Ok(report_catalog(&read_manifest_catalog(
             Path::new(input),
             "validation",
         )?))
     }
+}
+
+/// Publishing is strict even though the app reads fetched manifests
+/// tolerantly: the manifest must parse with no unknown field or bad package.
+fn require_strict_manifest(root: &Path) -> Result<(), String> {
+    let path = root.join(SOURCE_MANIFEST_FILE);
+    let bytes =
+        fs::read(&path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    SourceManifest::from_slice(&bytes).map(|_| ())
 }
 
 pub fn validate_source_locator(url: &str) -> Result<SourceValidationReport, String> {
@@ -1053,7 +1286,8 @@ pub(crate) fn validate_remote_repository(
     let result = prepare_new_repository(locator, &cache);
     let report = match result {
         Ok(candidate) => {
-            let report = report_manifest(&candidate.manifest);
+            let report = RepositoryManifest::from_path(&candidate.path)
+                .and_then(|manifest| report_manifest(&manifest));
             discard_repository(&candidate);
             report
         }
@@ -1073,7 +1307,8 @@ fn validate_remote_source(locator: &Locator) -> Result<SourceValidationReport, S
     let result = prepare_new_source(locator, &cache, None, None);
     let report = match result {
         Ok(candidate) => {
-            let report = report_catalog(&candidate.catalog);
+            let report = require_strict_manifest(&candidate.path)
+                .map(|()| report_catalog(&candidate.catalog));
             discard_candidate(&candidate);
             report
         }
@@ -1083,7 +1318,7 @@ fn validate_remote_source(locator: &Locator) -> Result<SourceValidationReport, S
         }
     };
     let _ = fs_retry::remove_dir_all(&cache);
-    Ok(report)
+    report
 }
 
 fn report_catalog(catalog: &ManifestCatalog) -> SourceValidationReport {
@@ -1238,6 +1473,50 @@ mod tests {
             Some(commit)
         );
         assert!(source_root.join(CURRENT_POINTER_FILE).is_file());
+    }
+
+    #[test]
+    fn a_damaged_sources_file_falls_back_to_the_previous_copy_then_a_rebuild() {
+        let config = tempfile::tempdir().expect("config");
+        let cache = tempfile::tempdir().expect("cache");
+        let first = ConfiguredSource::test_fixture(
+            "acme",
+            "https://nexus.example.com/repository/raw/sources/acme-latest.zip",
+        );
+        let second = ConfiguredSource::test_fixture(
+            "beta",
+            "https://nexus.example.com/repository/raw/sources/beta-latest.zip",
+        );
+        for sources in [vec![first.clone()], vec![first.clone(), second]] {
+            write_sources_config(
+                config.path(),
+                &SourcesConfig {
+                    repositories: Vec::new(),
+                    sources,
+                },
+            )
+            .expect("write");
+        }
+        fs::write(sources_path(config.path()), b"{ damaged").expect("damage");
+        let restored = read_sources_config_or_rebuild(config.path(), || unreachable!())
+            .expect("previous copy");
+        assert_eq!(restored.sources, vec![first.clone()]);
+
+        fs::write(sources_path(config.path()), b"{ damaged").expect("damage");
+        fs::write(config.path().join(SOURCES_BACKUP_FILE), b"also damaged").expect("damage");
+        let installed = [("acme".to_string(), first.url().to_string())];
+        let rebuilt = read_sources_config_or_rebuild(config.path(), || {
+            rebuild_sources(cache.path(), None, &installed)
+        })
+        .expect("rebuilt");
+        assert_eq!(rebuilt.sources.len(), 1);
+        assert_eq!(rebuilt.sources[0].source_id, "acme");
+        assert_eq!(rebuilt.sources[0].source_key, first.source_key);
+        assert_eq!(read_sources_config(config.path()).expect("saved"), rebuilt);
+        assert!(fs::read_dir(config.path())
+            .expect("list")
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")));
     }
 
     #[test]

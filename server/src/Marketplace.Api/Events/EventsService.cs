@@ -31,15 +31,17 @@ public sealed record PackageStats(
     IReadOnlyList<DailyCount> InstallsByDay,
     IReadOnlyDictionary<string, int> AgentMix);
 
+public sealed record ActiveUsers(int Day, int Week, int Month);
+
+public sealed record TopPackage(string Id, int InstalledBase);
+
 public sealed record AdminSummary(
-    int ActiveUsers1d,
-    int ActiveUsers7d,
-    int ActiveUsers30d,
+    ActiveUsers ActiveUsers,
     int Publishers,
     int Packages,
     IReadOnlyDictionary<string, int> ClientVersions,
     IReadOnlyDictionary<string, int> AgentMix,
-    IReadOnlyList<(string Id, int InstalledBase)> TopPackages,
+    IReadOnlyList<TopPackage> TopPackages,
     IReadOnlyDictionary<string, int> PreflightFailures,
     int OpenReports);
 
@@ -54,7 +56,7 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
     {
         if (batch.Events.Length > MaxBatch)
         {
-            throw new ArgumentException($"A batch may hold at most {MaxBatch} events.");
+            throw new ProblemException(422, $"A batch holds at most {MaxBatch} events; this one has {batch.Events.Length}.");
         }
 
         var now = timeProvider.GetUtcNow();
@@ -68,9 +70,15 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
 
         foreach (var dto in batch.Events)
         {
-            if (!Kinds.Contains(dto.Kind))
+            if (dto is null)
             {
-                problems.Add($"Unknown event kind {dto.Kind}.");
+                problems.Add("An event is null.");
+                continue;
+            }
+
+            if (dto.Kind is null || !Kinds.Contains(dto.Kind))
+            {
+                problems.Add($"Unknown event kind {dto.Kind ?? "(none)"}.");
                 continue;
             }
 
@@ -248,15 +256,13 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
         var installedBase = recent
             .SelectMany(heartbeat => heartbeat.Installed.Distinct(StringComparer.Ordinal))
             .GroupBy(id => id, StringComparer.Ordinal)
-            .Select(group => (group.Key, group.Count()))
-            .OrderByDescending(pair => pair.Item2)
-            .ThenBy(pair => pair.Key, StringComparer.Ordinal)
+            .Select(group => new TopPackage(group.Key, group.Count()))
+            .OrderByDescending(top => top.InstalledBase)
+            .ThenBy(top => top.Id, StringComparer.Ordinal)
             .Take(20)
             .ToArray();
         return new AdminSummary(
-            Active(1),
-            Active(7),
-            Active(30),
+            new ActiveUsers(Active(1), Active(7), Active(30)),
             await db.Publishers.CountAsync(cancellationToken),
             await db.Packages.CountAsync(package => package.Versions.Any(version => !version.Yanked && version.ReviewState == ReviewState.Approved), cancellationToken),
             recent.GroupBy(heartbeat => heartbeat.ClientVersion, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal),
@@ -268,7 +274,7 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
 
     private static string[] Clean(string[]? values, int maxCount, int maxLength) =>
         (values ?? [])
-            .Select(value => value.Trim())
+            .Select(value => value?.Trim() ?? string.Empty)
             .Where(value => value.Length is > 0 and var length && length <= maxLength)
             .Distinct(StringComparer.Ordinal)
             .Take(maxCount)

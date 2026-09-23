@@ -3,24 +3,51 @@
   "info": { "title": "Marketplace.Api | v1", "version": "1.0.0" },
   "servers": [{ "url": "http://127.0.0.1:5088/" }],
   "paths": {
-    "/api/health": { "get": { "tags": ["Marketplace.Api"], "operationId": "Health", "responses": { "200": { "description": "OK" } } } },
-    "/api/me": { "get": { "tags": ["Marketplace.Api"], "operationId": "Me", "responses": { "200": { "description": "OK" } } } },
+    "/api/health": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Health",
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthView" } } } },
+          "503": { "description": "Service Unavailable", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
+      }
+    },
+    "/api/me": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Me",
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MeView" } } } } }
+      }
+    },
     "/api/catalog": { "get": { "tags": ["Marketplace.Api"], "operationId": "Catalog", "responses": { "200": { "description": "OK" } } } },
     "/api/sources/{ns}/archive": {
       "get": {
         "tags": ["Marketplace.Api"],
         "operationId": "SourceArchive",
         "parameters": [{ "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "200": { "description": "OK" },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       },
       "head": {
         "tags": ["Marketplace.Api"],
         "operationId": "SourceArchive",
         "parameters": [{ "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "200": { "description": "OK" },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       }
     },
-    "/api/index": { "get": { "tags": ["Marketplace.Api"], "operationId": "Index", "responses": { "200": { "description": "OK" } } } },
+    "/api/index": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Index",
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IndexDocument" } } } } }
+      }
+    },
     "/api/packages/{ns}/{packageId}": {
       "get": {
         "tags": ["Marketplace.Api"],
@@ -29,7 +56,38 @@
           { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PackageView" } } } },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
+      }
+    },
+    "/api/packages/{ns}/{packageId}/versions/{version}/archive": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "VersionArchive",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "OK" },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
+      },
+      "head": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "VersionArchive",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "OK" },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       }
     },
     "/api/packages/{ns}/{packageId}/versions/{version}/files": {
@@ -41,7 +99,10 @@
           { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/PackageFile" } } } } },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       }
     },
     "/api/packages/{ns}/{packageId}/versions/{version}/files/{path}": {
@@ -54,7 +115,10 @@
           { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "path", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "200": { "description": "OK" },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       }
     },
     "/api/packages/{ns}/{packageId}/versions": {
@@ -65,11 +129,19 @@
           { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublishedVersion" } } } },
+          "403": { "description": "Forbidden", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "409": { "description": "Conflict", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "413": { "description": "Payload Too Large", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "415": { "description": "Unsupported Media Type", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "422": { "description": "Unprocessable Entity", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "503": { "description": "Service Unavailable", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       }
     },
     "/api/packages/{ns}/{packageId}/versions/{version}/yank": {
-      "post": {
+      "put": {
         "tags": ["Marketplace.Api"],
         "operationId": "Yank",
         "parameters": [
@@ -77,16 +149,60 @@
           { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "204": { "description": "No Content" },
+          "403": { "description": "Forbidden", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
+      },
+      "delete": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Unyank",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "description": "No Content" },
+          "403": { "description": "Forbidden", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       }
     },
-    "/api/mine": { "get": { "tags": ["Marketplace.Api"], "operationId": "Mine", "responses": { "200": { "description": "OK" } } } },
+    "/api/packages/{ns}/{packageId}/reports": {
+      "post": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Report",
+        "parameters": [
+          { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReportRequest" } } }, "required": true },
+        "responses": {
+          "202": { "description": "Accepted" },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "422": { "description": "Unprocessable Entity", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
+      }
+    },
+    "/api/mine": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Mine",
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MineView" } } } } }
+      }
+    },
     "/api/events": {
       "post": {
         "tags": ["Marketplace.Api"],
         "operationId": "Events",
         "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EventsBatch" } } }, "required": true },
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "202": { "description": "Accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EventsAccepted" } } } },
+          "400": { "description": "Bad Request", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "422": { "description": "Unprocessable Entity", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       }
     },
     "/api/stats/packages/{ns}/{packageId}": {
@@ -97,15 +213,10 @@
           { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
-        "responses": { "200": { "description": "OK" } }
-      }
-    },
-    "/api/reports": {
-      "post": {
-        "tags": ["Marketplace.Api"],
-        "operationId": "Report",
-        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReportRequest" } } }, "required": true },
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PackageStats" } } } },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       }
     },
     "/api/access/{ns}/{packageId}": {
@@ -116,7 +227,11 @@
           { "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AccessDocument" } } } },
+          "403": { "description": "Forbidden", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "422": { "description": "Unprocessable Entity", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       },
       "put": {
         "tags": ["Marketplace.Api"],
@@ -126,20 +241,46 @@
           { "name": "packageId", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AccessRequest" } } }, "required": true },
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AccessDocument" } } } },
+          "403": { "description": "Forbidden", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "422": { "description": "Unprocessable Entity", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       }
     },
-    "/api/admin/summary": { "get": { "tags": ["Marketplace.Api"], "operationId": "AdminSummary", "responses": { "200": { "description": "OK" } } } },
-    "/api/admin/reports": { "get": { "tags": ["Marketplace.Api"], "operationId": "AdminReports", "responses": { "200": { "description": "OK" } } } },
+    "/api/admin/summary": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "AdminSummary",
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AdminSummary" } } } } }
+      }
+    },
+    "/api/admin/reports": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "AdminReports",
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ReportView" } } } } } }
+      }
+    },
     "/api/admin/reports/{id}/resolve": {
       "post": {
         "tags": ["Marketplace.Api"],
         "operationId": "ResolveReport",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": "integer", "format": "int64" } }],
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "204": { "description": "No Content" },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       }
     },
-    "/api/admin/reviews": { "get": { "tags": ["Marketplace.Api"], "operationId": "Reviews", "responses": { "200": { "description": "OK" } } } },
+    "/api/admin/reviews": {
+      "get": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "Reviews",
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/PendingReview" } } } } } }
+      }
+    },
     "/api/admin/reviews/{ns}/{packageId}/{version}": {
       "post": {
         "tags": ["Marketplace.Api"],
@@ -150,16 +291,49 @@
           { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReviewRequest" } } }, "required": true },
-        "responses": { "200": { "description": "OK" } }
+        "responses": {
+          "204": { "description": "No Content" },
+          "404": { "description": "Not Found", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "409": { "description": "Conflict", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "422": { "description": "Unprocessable Entity", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
       }
     }
   },
   "components": {
     "schemas": {
+      "AccessDocument": {
+        "required": ["target", "users", "groups"],
+        "type": "object",
+        "properties": { "target": { "type": "string" }, "users": { "type": "array", "items": { "type": "string" } }, "groups": { "type": "array", "items": { "type": "string" } } }
+      },
       "AccessRequest": {
         "required": ["users", "groups"],
         "type": "object",
         "properties": { "users": { "type": ["null", "array"], "items": { "type": "string" } }, "groups": { "type": ["null", "array"], "items": { "type": "string" } } }
+      },
+      "ActiveUsers": {
+        "required": ["day", "week", "month"],
+        "type": "object",
+        "properties": {
+          "day": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" },
+          "week": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" },
+          "month": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" }
+        }
+      },
+      "AdminSummary": {
+        "required": ["activeUsers", "publishers", "packages", "clientVersions", "agentMix", "topPackages", "preflightFailures", "openReports"],
+        "type": "object",
+        "properties": {
+          "activeUsers": { "$ref": "#/components/schemas/ActiveUsers" },
+          "publishers": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" },
+          "packages": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" },
+          "clientVersions": { "type": "object", "additionalProperties": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" } },
+          "agentMix": { "type": "object", "additionalProperties": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" } },
+          "topPackages": { "type": "array", "items": { "$ref": "#/components/schemas/TopPackage" } },
+          "preflightFailures": { "type": "object", "additionalProperties": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" } },
+          "openReports": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" }
+        }
       },
       "ClientEventDto": {
         "required": ["kind", "occurredAt", "clientVersion", "osBuild", "agents", "installed", "checks", "packageId", "version", "fromVersion", "toVersion"],
@@ -178,9 +352,192 @@
           "toVersion": { "type": ["null", "string"] }
         }
       },
+      "DailyCount": {
+        "required": ["day", "count"],
+        "type": "object",
+        "properties": { "day": { "type": "string", "format": "date" }, "count": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" } }
+      },
+      "EventsAccepted": {
+        "required": ["accepted", "duplicates", "rejected", "problems"],
+        "type": "object",
+        "properties": {
+          "accepted": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" },
+          "duplicates": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" },
+          "rejected": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" },
+          "problems": { "type": "array", "items": { "type": "string" } }
+        }
+      },
       "EventsBatch": { "required": ["events"], "type": "object", "properties": { "events": { "type": "array", "items": { "$ref": "#/components/schemas/ClientEventDto" } } } },
-      "ReportRequest": { "required": ["packageId", "reason"], "type": "object", "properties": { "packageId": { "type": "string" }, "reason": { "type": "string" } } },
-      "ReviewRequest": { "required": ["decision", "note"], "type": "object", "properties": { "decision": { "type": "string" }, "note": { "type": ["null", "string"] } } }
+      "HealthView": {
+        "required": ["serverVersion", "minimumClientVersion", "latestClientVersion", "environment", "authSchemes"],
+        "type": "object",
+        "properties": {
+          "serverVersion": { "type": "string" },
+          "minimumClientVersion": { "type": "string" },
+          "latestClientVersion": { "type": "string" },
+          "environment": { "type": "string" },
+          "authSchemes": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "IndexDocument": {
+        "required": ["generatedAt", "packages"],
+        "type": "object",
+        "properties": { "generatedAt": { "type": "string", "format": "date-time" }, "packages": { "type": "array", "items": { "$ref": "#/components/schemas/IndexPackage" } } }
+      },
+      "IndexPackage": {
+        "required": ["id", "namespace", "packageId", "name", "description", "version", "publisher", "lane", "tags", "componentKinds", "publishedAt", "installs", "installedBase", "restricted"],
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "packageId": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "version": { "type": "string" },
+          "publisher": { "$ref": "#/components/schemas/IndexPublisher" },
+          "lane": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "componentKinds": { "type": "array", "items": { "type": "string" } },
+          "publishedAt": { "type": "string", "format": "date-time" },
+          "installs": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" },
+          "installedBase": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" },
+          "restricted": { "type": "boolean" }
+        }
+      },
+      "IndexPublisher": { "required": ["account", "displayName"], "type": "object", "properties": { "account": { "type": "string" }, "displayName": { "type": "string" } } },
+      "MeView": {
+        "required": ["account", "namespace", "displayName", "namespaces", "admin", "groups"],
+        "type": "object",
+        "properties": {
+          "account": { "type": "string" },
+          "namespace": { "type": "string" },
+          "displayName": { "type": "string" },
+          "namespaces": { "type": "array", "items": { "type": "string" } },
+          "admin": { "type": "boolean" },
+          "groups": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "MineView": {
+        "required": ["spaces", "packages"],
+        "type": "object",
+        "properties": { "spaces": { "type": "array", "items": { "$ref": "#/components/schemas/SpaceView" } }, "packages": { "type": "array", "items": { "$ref": "#/components/schemas/PackageView" } } }
+      },
+      "PackageFile": {
+        "required": ["path", "size"],
+        "type": "object",
+        "properties": { "path": { "type": "string" }, "size": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int64" } }
+      },
+      "PackageStats": {
+        "required": ["id", "installs", "installedBase", "installsByDay", "agentMix"],
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "installs": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" },
+          "installedBase": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" },
+          "installsByDay": { "type": "array", "items": { "$ref": "#/components/schemas/DailyCount" } },
+          "agentMix": { "type": "object", "additionalProperties": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" } }
+        }
+      },
+      "PackageView": {
+        "required": ["id", "namespace", "packageId", "name", "description", "tags", "liveVersion", "versions"],
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "packageId": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "liveVersion": { "type": ["null", "string"] },
+          "versions": { "type": "array", "items": { "$ref": "#/components/schemas/VersionView" } }
+        }
+      },
+      "PendingReview": {
+        "required": ["id", "namespace", "packageId", "name", "version", "publishedBy", "publishedAt", "changelog", "componentKinds", "firstVersion", "liveVersion"],
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "packageId": { "type": "string" },
+          "name": { "type": "string" },
+          "version": { "type": "string" },
+          "publishedBy": { "type": "string" },
+          "publishedAt": { "type": "string", "format": "date-time" },
+          "changelog": { "type": ["null", "string"] },
+          "componentKinds": { "type": "array", "items": { "type": "string" } },
+          "firstVersion": { "type": "boolean" },
+          "liveVersion": { "type": ["null", "string"] }
+        }
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "properties": {
+          "type": { "type": ["null", "string"] },
+          "title": { "type": ["null", "string"] },
+          "status": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["null", "integer", "string"], "format": "int32" },
+          "detail": { "type": ["null", "string"] },
+          "instance": { "type": ["null", "string"] }
+        }
+      },
+      "PublishedVersion": {
+        "required": ["id", "namespace", "packageId", "version", "archiveDigest", "sizeBytes", "publishedBy", "publishedAt", "componentKinds", "tags", "reviewState"],
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "packageId": { "type": "string" },
+          "version": { "type": "string" },
+          "archiveDigest": { "type": "string" },
+          "sizeBytes": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int64" },
+          "publishedBy": { "type": "string" },
+          "publishedAt": { "type": "string", "format": "date-time" },
+          "componentKinds": { "type": "array", "items": { "type": "string" } },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "reviewState": { "$ref": "#/components/schemas/ReviewState" }
+        }
+      },
+      "ReportRequest": { "required": ["reason"], "type": "object", "properties": { "reason": { "type": ["null", "string"] } } },
+      "ReportView": {
+        "required": ["id", "account", "packageId", "reason", "createdAt", "resolvedAt", "resolvedBy"],
+        "type": "object",
+        "properties": {
+          "id": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int64" },
+          "account": { "type": "string" },
+          "packageId": { "type": "string" },
+          "reason": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "resolvedAt": { "type": ["null", "string"], "format": "date-time" },
+          "resolvedBy": { "type": ["null", "string"] }
+        }
+      },
+      "ReviewRequest": { "required": ["decision", "note"], "type": "object", "properties": { "decision": { "type": "string" }, "note": { "type": ["null", "string"] } } },
+      "ReviewState": { "enum": ["pending", "approved", "rejected"] },
+      "SpaceView": {
+        "required": ["namespace", "displayName", "lane"],
+        "type": "object",
+        "properties": { "namespace": { "type": "string" }, "displayName": { "type": "string" }, "lane": { "type": "string" } }
+      },
+      "TopPackage": {
+        "required": ["id", "installedBase"],
+        "type": "object",
+        "properties": { "id": { "type": "string" }, "installedBase": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" } }
+      },
+      "VersionView": {
+        "required": ["version", "archiveDigest", "sizeBytes", "publishedBy", "publishedAt", "changelog", "yanked", "componentKinds", "reviewState", "reviewNote"],
+        "type": "object",
+        "properties": {
+          "version": { "type": "string" },
+          "archiveDigest": { "type": "string" },
+          "sizeBytes": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int64" },
+          "publishedBy": { "type": "string" },
+          "publishedAt": { "type": "string", "format": "date-time" },
+          "changelog": { "type": ["null", "string"] },
+          "yanked": { "type": "boolean" },
+          "componentKinds": { "type": "array", "items": { "type": "string" } },
+          "reviewState": { "$ref": "#/components/schemas/ReviewState" },
+          "reviewNote": { "type": ["null", "string"] }
+        }
+      }
     }
   },
   "tags": [{ "name": "Marketplace.Api" }]

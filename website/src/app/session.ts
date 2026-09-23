@@ -7,6 +7,9 @@ import { Api, ApiError } from "./api";
 
 const devUserKey = "agent-plugins.dev-user";
 
+/** What the server's X-Dev-User header accepts; anything else would break every request. */
+export const devAccountPattern = /^[\x20-\x7E]{1,256}$/u;
+
 /**
  * The account typed into the development sign-in. At work the browser signs in with Windows
  * automatically; only a server running with the development header offers this.
@@ -31,7 +34,8 @@ export class DevUser {
 
   private static read(): string | null {
     try {
-      return localStorage.getItem(devUserKey);
+      const account = localStorage.getItem(devUserKey);
+      return account !== null && devAccountPattern.test(account) ? account : null;
     } catch {
       return null;
     }
@@ -72,14 +76,18 @@ export class Session {
     return this.loading;
   }
 
-  public signInAs(account: string): Promise<SessionState> {
-    this.devUser.set(account.trim());
-    this.loading = this.load();
-    return this.loading;
+  /** A new account reloads the page, so no page keeps the previous account's data. */
+  public signInAs(account: string): void {
+    this.devUser.set(account);
+    location.reload();
   }
 
-  public signOut(): Promise<SessionState> {
+  public signOut(): void {
     this.devUser.set(null);
+    location.reload();
+  }
+
+  public retry(): Promise<SessionState> {
     this.loading = this.load();
     return this.loading;
   }
@@ -101,6 +109,11 @@ export class Session {
     this.state.set({ kind: "loading" });
     const state = await this.resolve();
     this.state.set(state);
+    if (state.kind === "unavailable") {
+      // The next guard or page that waits on the session tries again.
+      this.loading = null;
+    }
+
     await this.refreshReviews();
     return state;
   }

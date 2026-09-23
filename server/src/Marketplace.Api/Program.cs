@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Marketplace.Api;
 using Marketplace.Api.Access;
 using Marketplace.Api.Auth;
 using Marketplace.Api.Catalog;
@@ -25,7 +26,8 @@ builder.Services.Configure<ValidatorOptions>(builder.Configuration.GetSection(Va
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection(DatabaseOptions.Section));
 builder.Services.Configure<FormOptions>(options =>
 {
-    options.MultipartBodyLengthLimit = ArchiveInspector.MaxArchiveBytes + 64 * 1024;
+    // At least the publish endpoint's request limit, so an oversized upload gets its 413 rather than a form-reading 400.
+    options.MultipartBodyLengthLimit = MarketplaceEndpoints.MaxUploadRequestBytes;
     // A browser upload sends a file and a path value per file, plus a few fields.
     options.ValueCountLimit = 2 * PublishService.MaxUploadFiles + 16;
 });
@@ -111,6 +113,10 @@ builder.Services.AddHttpClient<ArtifactKeeperStore>((services, client) =>
     var options = builder.Configuration.GetSection(ArtifactKeeperOptions.Section).Get<ArtifactKeeperOptions>() ?? new ArtifactKeeperOptions();
     client.BaseAddress = new Uri(options.BaseUrl.TrimEnd('/') + "/");
     client.Timeout = TimeSpan.FromSeconds(120);
+}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+{
+    // The store is a singleton holding one client, so connections must re-resolve DNS when Artifact Keeper moves.
+    PooledConnectionLifetime = TimeSpan.FromMinutes(2),
 });
 builder.Services.AddSingleton<IArtifactStore>(services => services.GetRequiredService<ArtifactKeeperStore>());
 builder.Services.AddSingleton<IPackageValidator, ProcessPackageValidator>();
@@ -119,10 +125,18 @@ builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<AccessService>();
 builder.Services.AddScoped<EventsService>();
 builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<ProblemExceptionHandler>();
+// Malformed bodies and route values throw so ProblemExceptionHandler can say what was wrong, in every environment.
+builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = true);
 builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase)));
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
+
+if (devHeader && authOptions.EnableNegotiate && !app.Environment.IsDevelopment())
+{
+    app.Logger.LogWarning("Auth:AllowDevHeader is on beside Negotiate outside Development: anyone who can reach this server can claim any account with X-Dev-User. Use this only on a network without a domain.");
+}
 
 app.UseForwardedHeaders();
 app.UseExceptionHandler();

@@ -155,14 +155,11 @@ export const summarySchema = z
   .readonly();
 export type Summary = z.infer<typeof summarySchema>;
 
+/** RFC 9457 lets a problem carry extension members, so only the fields the portal reads are checked. */
 const problemSchema = z
-  .strictObject({
-    type: z.string().optional(),
+  .object({
     title: z.string(),
-    status: z.number().int().optional(),
     detail: z.string().optional(),
-    instance: z.string().optional(),
-    traceId: z.string().optional(),
     errors: z
       .array(z.strictObject({ path: z.string(), message: z.string() }).readonly())
       .readonly()
@@ -189,7 +186,9 @@ export class ApiError extends Error {
     if (error instanceof HttpErrorResponse) {
       const problem = problemSchema.safeParse(error.error);
       if (problem.success) {
-        return new ApiError(error.status, problem.data.title, problem.data.errors ?? []);
+        const { title, detail } = problem.data;
+        const message = detail === undefined || title.includes(detail) ? title : `${title} ${detail}`;
+        return new ApiError(error.status, message, problem.data.errors ?? []);
       }
 
       return new ApiError(error.status, error.status === 0 ? "The marketplace could not be reached." : `The marketplace answered ${String(error.status)}.`);
@@ -212,6 +211,11 @@ export function packageUrl(ns: string, packageId: string): string {
   return `/api/packages/${segment(ns)}/${segment(packageId)}`;
 }
 
+/** The version's zip; the server names the download. */
+export function archiveUrl(ns: string, packageId: string, version: string): string {
+  return `${packageUrl(ns, packageId)}/versions/${segment(version)}/archive`;
+}
+
 export function fileUrl(ns: string, packageId: string, version: string, path: string): string {
   return `${packageUrl(ns, packageId)}/versions/${segment(version)}/files/${filePath(path)}`;
 }
@@ -223,7 +227,6 @@ export interface PublishForm {
   readonly tags: readonly string[];
   readonly files: readonly { readonly path: string; readonly file: Blob }[];
   readonly archive?: Blob;
-  readonly base?: string;
   readonly name?: string;
   readonly description?: string;
 }
@@ -256,9 +259,14 @@ export class Api {
     return this.get(`${packageUrl(ns, packageId)}/versions/${segment(version)}/files`, fileListSchema);
   }
 
-  /** A text file from a version; binary files are downloads, not previews. */
+  /** A text file from a version; binary files and files over 1 MB come back as downloads, not previews. */
   public async fileText(ns: string, packageId: string, version: string, path: string): Promise<string> {
-    return this.request(() => firstValueFrom(this.http.get(fileUrl(ns, packageId, version, path), { responseType: "text" })));
+    const response = await this.request(() => firstValueFrom(this.http.get(fileUrl(ns, packageId, version, path), { responseType: "text", observe: "response" })));
+    if (response.headers.get("Content-Type")?.startsWith("text/") !== true || response.body === null) {
+      throw new ApiError(415, `${path} is not a text file.`);
+    }
+
+    return response.body;
   }
 
   public stats(ns: string, packageId: string): Promise<PackageStats> {
@@ -279,7 +287,6 @@ export class Api {
     body.set("changelog", form.changelog);
     body.set("tags", form.tags.join(","));
     for (const [key, value] of [
-      ["base", form.base],
       ["name", form.name],
       ["description", form.description]
     ] as const) {
@@ -302,13 +309,20 @@ export class Api {
 
   public withdraw(ns: string, packageId: string, version: string): Promise<void> {
     return this.request(async () => {
-      await firstValueFrom(this.http.post(`${packageUrl(ns, packageId)}/versions/${segment(version)}/yank`, null));
+      await firstValueFrom(this.http.put(this.yankUrl(ns, packageId, version), null));
     });
   }
 
-  public report(packageId: string, reason: string): Promise<void> {
+  /** Undoes a withdrawal. */
+  public restore(ns: string, packageId: string, version: string): Promise<void> {
     return this.request(async () => {
-      await firstValueFrom(this.http.post("/api/reports", { packageId, reason }));
+      await firstValueFrom(this.http.delete(this.yankUrl(ns, packageId, version)));
+    });
+  }
+
+  public report(ns: string, packageId: string, reason: string): Promise<void> {
+    return this.request(async () => {
+      await firstValueFrom(this.http.post(`${packageUrl(ns, packageId)}/reports`, { reason }));
     });
   }
 
@@ -334,6 +348,10 @@ export class Api {
 
   public summary(): Promise<Summary> {
     return this.get("/api/admin/summary", summarySchema);
+  }
+
+  private yankUrl(ns: string, packageId: string, version: string): string {
+    return `${packageUrl(ns, packageId)}/versions/${segment(version)}/yank`;
   }
 
   private accessUrl(ns: string, packageId: string | undefined): string {

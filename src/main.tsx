@@ -4,8 +4,9 @@ import { Theme } from "@radix-ui/themes";
 
 /*
   `@radix-ui/themes/styles.css` carries all thirty-one Radix colour scales.
-  Agent Plugins renders five of them — the blue accent, the slate gray, and
-  amber, green, and red for status — so the rest is a hundred kilobytes of
+  Agent Plugins renders eight of them — the blue accent, the slate gray,
+  amber, green, and red for status, and violet, teal, and orange for the
+  Official, Team, and Restricted badges — so the rest is a hundred kilobytes of
   custom properties the webview parses on every launch and never reads. The
   token files are imported individually instead. `tokens/base.css` maps
   `--accent-*` and `--gray-*` onto whichever scale a `color` prop names, so a
@@ -20,10 +21,14 @@ import "@radix-ui/themes/tokens/colors/gray.css";
 import "@radix-ui/themes/tokens/colors/amber.css";
 import "@radix-ui/themes/tokens/colors/green.css";
 import "@radix-ui/themes/tokens/colors/red.css";
+import "@radix-ui/themes/tokens/colors/violet.css";
+import "@radix-ui/themes/tokens/colors/teal.css";
+import "@radix-ui/themes/tokens/colors/orange.css";
 import "@radix-ui/themes/components.css";
 import "@radix-ui/themes/utilities.css";
 
 import App from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 const root = document.getElementById("root");
 if (root === null) {
@@ -41,7 +46,9 @@ ReactDOM.createRoot(root).render(
       costs nothing.
     */}
     <Theme appearance="dark" accentColor="blue" grayColor="slate" panelBackground="solid" radius="medium" scaling="100%">
-      <App />
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
     </Theme>
   </React.StrictMode>
 );

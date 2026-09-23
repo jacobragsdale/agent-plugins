@@ -43,6 +43,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm lint
+      - run: pnpm test
       - run: pnpm format:check
       - run: pnpm build
       # The web portal (website/) ships inside the marketplace server image, so
@@ -98,11 +99,32 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      # Prettier formats the checked-in OpenAPI document.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
       - name: Build the validator the server image ships
         run: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin validate-source
 
       - run: dotnet restore server/Marketplace.slnx
       - run: dotnet build server/Marketplace.slnx --no-restore -warnaserror
+
+      - name: Check server/openapi.json is current
+        run: |
+          ASPNETCORE_ENVIRONMENT=Development Database__MigrateOnStartup=false Kestrel__Endpoints__Http__Url=http://127.0.0.1:5088 \
+            dotnet run --project server/src/Marketplace.Api --no-build --no-launch-profile > /dev/null &
+          curl -sf --retry 30 --retry-connrefused --retry-delay 1 -o server/openapi.json http://127.0.0.1:5088/openapi/v1.json
+          kill $!
+          pnpm exec prettier --write server/openapi.json
+          git diff --exit-code server/openapi.json
 
       - name: Integration tests (PostgreSQL via Testcontainers, real validator)
         env:

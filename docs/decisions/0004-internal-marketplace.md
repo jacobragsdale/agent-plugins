@@ -24,6 +24,8 @@ The client keeps fetching HTTPS artifacts exactly as ADR 0003 describes; the URL
 
 Requests carry `Authorization: Negotiate` produced by SSPI for the SPN `HTTP/<server FQDN>`; the server validates Kerberos with a keytab. A user's publishing namespace is the lowercase sAMAccountName. Authorization is server policy: a user always owns `{username}`; `official` is an allowlist; team namespaces keyed to AD groups are a follow-up.
 
+**Amended 2026-09-22:** the lowercase sAMAccountName is only the derived name. Two accounts can derive the same one, so the first account to publish claims it and the other gets a numbered variant (`christopher-jo-2`); a derived name equal to `official` or a team namespace becomes `u-<name>`. The server settles the namespace and returns it from `/api/me`; clients never derive it. [The API reference](../marketplace-api.md#personal-namespaces) has the rules.
+
 Negotiate on a Linux container validates Kerberos only. A client that reaches the server by IP address or short hostname falls back to NTLM and is rejected, so the preflight requires the configured base URL to be the FQDN named in the SPN, and clock skew above five minutes is a preflight failure.
 
 A `DevHeader` scheme that trusts `X-Dev-User` exists for the home lab, whose test VM is not domain-joined. The server registers it only when `ASPNETCORE_ENVIRONMENT=Development` or `Auth:AllowDevHeader` is set; the corporate server does neither and ignores the header, so a client that sends it is harmless. On a workgroup machine the client sends the header with its local account name; on a domain-joined machine it sends a Kerberos token.

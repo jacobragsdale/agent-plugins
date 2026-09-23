@@ -2,7 +2,8 @@
   <app-icon name="folder" />
   <p>
     <strong>Drag a skill folder, a SKILL.md, or a zip here.</strong><br />
-    <span class="muted">A folder of skill folders becomes a skill pack. An MCP server is a single .json file.</span>
+    <span class="muted">A folder of skill folders becomes a skill pack. An MCP server is a single .json file.</span><br />
+    <span class="muted">Claude Code keeps your skills in <code>%USERPROFILE%\.claude\skills</code>.</span>
   </p>
   <div class="row">
     <button mat-stroked-button type="button" (click)="filesInput.click()"><app-icon name="description" />Choose files</button>
@@ -15,17 +16,48 @@
 @if (kind(); as description) {
   <div class="row">
     <p class="notice kind">{{ description }}</p>
-    <button mat-button type="button" (click)="picked.set([])">Clear</button>
+    <button mat-button type="button" (click)="clear()">Clear</button>
   </div>
   <ul class="picked">
-    @for (item of picked(); track item.path) {
+    @for (group of groups(); track group.root) {
       <li>
-        <span>{{ item.path }}</span>
-        <button mat-icon-button type="button" [attr.aria-label]="'Remove ' + item.path" (click)="removeFile(item.path)"><app-icon name="close" /></button>
+        <details [open]="groups().length === 1">
+          <summary>
+            <app-icon [name]="group.root === null ? 'description' : 'folder'" />
+            <span class="name">{{ group.name }}</span>
+            <span class="muted">{{ fileCount(group) }}</span>
+            <button mat-icon-button type="button" [attr.aria-label]="'Remove ' + group.name" (click)="removeGroup($event, group)"><app-icon name="close" /></button>
+          </summary>
+          <ng-container *ngTemplateOutlet="branch; context: { $implicit: group.tree }" />
+        </details>
       </li>
     }
   </ul>
 }
+
+<!-- One folder level: its files, then each subfolder, which renders this template again. -->
+<ng-template #branch let-node>
+  <ul class="files">
+    @for (file of node.files; track file.item.path) {
+      <li class="file">
+        <span>{{ file.name }}</span>
+        <button mat-icon-button type="button" [attr.aria-label]="'Remove ' + file.item.path" (click)="removeFile(file.item.path)"><app-icon name="close" /></button>
+      </li>
+    }
+    @for (folder of node.folders; track folder.path) {
+      <li>
+        <details>
+          <summary>
+            <app-icon name="folder" />
+            <span class="name">{{ folder.name }}</span>
+            <button mat-icon-button type="button" [attr.aria-label]="'Remove ' + folder.path" (click)="removeFolder($event, folder.path)"><app-icon name="close" /></button>
+          </summary>
+          <ng-container *ngTemplateOutlet="branch; context: { $implicit: folder }" />
+        </details>
+      </li>
+    }
+  </ul>
+</ng-template>
 
 @if (showName()) {
   <mat-form-field appearance="outline">

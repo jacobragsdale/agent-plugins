@@ -17,7 +17,7 @@ Look at the top right. There are four controls:
 | Control            | What it does                                                             |
 | ------------------ | ------------------------------------------------------------------------ |
 | Your namespace     | Opens **System status**. A green dot means every check passed.           |
-| **Manage Sources** | Lists the sources the catalog offers, and which of them you have added.  |
+| **Manage sources** | Lists the sources the catalog offers, and which of them you have added.  |
 | **Refresh**        | Re-reads the catalog and the sources now, instead of waiting 15 minutes. |
 | **Reset**          | Uninstalls everything and deletes Agent Plugins' own data.               |
 
@@ -42,7 +42,7 @@ Close the panel.
 
 In the search box, type part of a package name. The count beside the box tells you how many packages matched.
 
-Pick a package whose badges say **Skill** and not **MCP** — a plain skill needs no approval, so this first install shows you the shortest path. Select **Install**.
+Pick a package whose badges say **Skill** and not **Connector** — a plain skill needs no approval, so this first install shows you the shortest path. Select **Install**.
 
 The button spins briefly and the card changes to **Installed**. Nothing else happens: no dialog, no restart. Agent Plugins wrote the skill, recorded that it owns those files, and committed the change in one transaction. If any part had failed, all of it would have rolled back and the card would still read **Available**.
 
@@ -80,19 +80,19 @@ Your skill should appear under its prefixed name. That round trip — install, r
 
 ## Install a package that runs an MCP server
 
-Now search for a package whose badges include **MCP**, and select **Install**.
+Now search for a package whose badges include **Connector**, and select **Install**. A connector is how the window names an MCP server.
 
 This time a dialog appears before anything is written:
 
 ```text
-Approve MCP server
-<Package> installs an MCP server. Every detected agent will run it.
+Allow connector
+<Package> includes a connector that runs a program on this computer. Every AI app found here will run it.
 database: node server.js
 ```
 
-The difference matters. A skill is text your agent reads. An MCP server is a program your agent starts on this machine, so Agent Plugins shows you the command, its arguments, and the environment variables it wants, and writes nothing until you select **Approve and Install**.
+The difference matters. A skill is text your agent reads. An MCP server is a program your agent starts on this machine, so Agent Plugins shows you the command, its arguments, and the environment variables it wants, and writes nothing until you select **Allow and install**.
 
-Select **Approve and Install**. The card becomes **Installed**, and the server is registered in each agent's own MCP configuration file — `~/.cursor/mcp.json`, `~/.claude.json`, `~/.codex/config.toml`, and so on. Agent Plugins edits those files in place and leaves your own entries and comments alone.
+Select **Allow and install**. The card becomes **Installed**, and the server is registered in each agent's own MCP configuration file — `~/.cursor/mcp.json`, `~/.claude.json`, `~/.codex/config.toml`, and so on. Agent Plugins edits those files in place and leaves your own entries and comments alone.
 
 Select **Cancel** instead, and nothing at all is written. Approval is never remembered and never inferred: a background update that would add or change an MCP server waits for you rather than approving itself.
 

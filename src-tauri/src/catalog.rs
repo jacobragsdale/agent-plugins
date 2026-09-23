@@ -83,11 +83,17 @@ pub(crate) fn read_manifest_catalog(
             format!("Could not read {SOURCE_MANIFEST_FILE}: {error}")
         }
     })?;
-    let manifest = SourceManifest::from_slice(&bytes)?;
+    let (manifest, manifest_errors) = SourceManifest::from_slice_tolerant(&bytes)?;
     validate_repository_tree(root)?;
 
     let mut items = BTreeMap::new();
-    let mut errors = Vec::new();
+    let mut errors = manifest_errors
+        .into_iter()
+        .map(|message| CatalogError {
+            path: SOURCE_MANIFEST_FILE.to_string(),
+            message,
+        })
+        .collect::<Vec<_>>();
     for package in manifest.packages() {
         match normalize_package(root, source_key, &manifest.source().id, package) {
             Ok(item) if items.contains_key(&item.local_id) => errors.push(CatalogError {

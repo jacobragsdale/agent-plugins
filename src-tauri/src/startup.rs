@@ -10,15 +10,25 @@
 //! user's login PATH, so discovery also walks the user and machine Path and
 //! Windows App Paths. `uv` is installed only when it is still missing.
 //!
-//! Add new startup host checks in [`prepare_with`]. Do not scatter PATH or
-//! proxy mutations through the rest of the crate.
+//! The app splits the work in two. [`prepare_process`] fixes this process's
+//! environment during setup, before any command runs. [`finish_in_background`]
+//! then publishes to the user session and downloads `uv` when it is missing,
+//! so a slow or blocked download never holds up the window.
+//!
+//! Proxy values read from the system settings apply to this process only. The
+//! user session gets only values the user supplied, because a value written
+//! there comes back as "explicit" on the next launch and would pin a proxy the
+//! user later changes.
+//!
+//! Add new startup host checks in [`prepare_process`] or [`finish_session`]. Do
+//! not scatter PATH or proxy mutations through the rest of the crate.
 
-#[cfg(any(test, target_os = "macos"))]
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 const TOOLS: [&str; 2] = ["uv", "uvx"];
@@ -33,13 +43,15 @@ const PROXY_PAIRS: [[&str; 2]; 4] = [
     ["NO_PROXY", "no_proxy"],
 ];
 const UV_NATIVE_TLS: &str = "UV_NATIVE_TLS";
-const SESSION_KEYS: [&str; 5] = [
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-    "NO_PROXY",
-    UV_NATIVE_TLS,
+const SESSION_RECORD_FILE: &str = "session-environment.json";
+/// Waits before each background `uv` install attempt at launch.
+const TOOL_INSTALL_DELAYS: [Duration; 3] = [
+    Duration::ZERO,
+    Duration::from_secs(30),
+    Duration::from_secs(120),
 ];
+/// Download attempts per session, counting the retries a preflight asks for.
+const MAX_TOOL_INSTALL_ATTEMPTS: u32 = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToolPack {
@@ -87,16 +99,21 @@ impl ProxyStatus {
     pub(crate) fn describe(&self) -> String {
         match self {
             ProxyStatus::Unset => "No proxy is configured.".to_string(),
-            ProxyStatus::FromEnvironment { http, https } => {
-                format!("Proxy from the environment: HTTP {http}, HTTPS {https}.")
-            }
-            ProxyStatus::FromSystem { http, https } => {
-                format!("Proxy from the system settings: HTTP {http}, HTTPS {https}.")
-            }
-            ProxyStatus::Socks { url } => format!("SOCKS proxy {url}."),
-            ProxyStatus::PacOnly { url } => {
-                format!("Only a PAC script ({url}) is configured; direct connections are used.")
-            }
+            ProxyStatus::FromEnvironment { http, https } => format!(
+                "Proxy from the environment: HTTP {}, HTTPS {}.",
+                display_proxy(http),
+                display_proxy(https)
+            ),
+            ProxyStatus::FromSystem { http, https } => format!(
+                "Proxy from the system settings: HTTP {}, HTTPS {}.",
+                display_proxy(http),
+                display_proxy(https)
+            ),
+            ProxyStatus::Socks { url } => format!("SOCKS proxy {}.", display_proxy(url)),
+            ProxyStatus::PacOnly { url } => format!(
+                "Only a PAC script ({}) is configured; direct connections are used.",
+                display_proxy(url)
+            ),
         }
     }
 }
@@ -106,7 +123,12 @@ pub(crate) struct StartupReport {
     pub(crate) tools: Vec<ToolStatus>,
     pub(crate) proxy: ProxyStatus,
     pub(crate) notes: Vec<String>,
-    pub(crate) prepended_path_dirs: Vec<PathBuf>,
+    /// Directories this run added to the user's PATH, not ones already there.
+    pub(crate) published_path_dirs: Vec<PathBuf>,
+    /// The app's own directory, once it is on the user's PATH.
+    pub(crate) cli_dir_on_path: Option<PathBuf>,
+    /// Proxy variables the user set before launch; only these are published.
+    user_proxy_values: Vec<(String, OsString)>,
 }
 
 impl StartupReport {
@@ -124,10 +146,10 @@ impl StartupReport {
                 ),
             }
         }
-        if !self.prepended_path_dirs.is_empty() {
+        if !self.published_path_dirs.is_empty() {
             eprintln!(
-                "Agent Plugins startup: put {} on PATH.",
-                self.prepended_path_dirs
+                "Agent Plugins startup: added {} to the user PATH.",
+                self.published_path_dirs
                     .iter()
                     .map(|dir| dir.display().to_string())
                     .collect::<Vec<_>>()
@@ -167,15 +189,24 @@ pub(crate) trait Host {
     fn additional_search_dirs(&self) -> Vec<PathBuf>;
     fn env(&self, key: &str) -> Option<OsString>;
     fn set_env(&mut self, key: &str, value: &OsStr);
+    fn remove_env(&mut self, key: &str);
     fn is_executable(&self, path: &Path) -> bool;
     fn executable_extensions(&self) -> Vec<String>;
     fn path_separator(&self) -> char;
     fn env_keys_are_case_insensitive(&self) -> bool;
     fn system_proxy(&self) -> Option<SystemProxy>;
-    fn session_path(&self) -> Option<OsString>;
+    /// What new processes in the user session see for `key`. `Ok(None)` means
+    /// it is not set; `Err` means it could not be read. For PATH it is the
+    /// user's own part only.
+    fn session_env(&self, key: &str) -> Result<Option<OsString>, String>;
     fn session_path_defaults_to_gui(&self) -> bool;
     fn persist_enabled(&self) -> bool;
     fn persist_session(&mut self, key: &str, value: &OsStr) -> Result<(), String>;
+    fn remove_session_env(&mut self, key: &str) -> Result<(), String>;
+    /// Where the app records what it wrote to the user session.
+    fn session_record_path(&self) -> Option<PathBuf>;
+    /// The app's own directory, published so agents can run `agent-plugins`.
+    fn cli_dir(&self) -> Option<PathBuf>;
     fn managed_tools_root(&self) -> Option<PathBuf>;
     fn install_tool_pack(&mut self, pack: ToolPack) -> Result<PathBuf, String>;
 }
@@ -211,10 +242,19 @@ impl Host for LiveHost {
     }
 
     fn set_env(&mut self, key: &str, value: &OsStr) {
-        // SAFETY: `prepare` runs on the main thread in `run` before Tauri
-        // starts the async runtime or any worker that reads the environment.
+        // SAFETY: the app calls `prepare_process` on the main thread during
+        // setup, before the event loop dispatches any command or the scheduler
+        // starts; the command line calls it before its runtime exists. The
+        // background half never changes this process's environment.
         unsafe {
             std::env::set_var(key, value);
+        }
+    }
+
+    fn remove_env(&mut self, key: &str) {
+        // SAFETY: as for `set_env`.
+        unsafe {
+            std::env::remove_var(key);
         }
     }
 
@@ -242,8 +282,8 @@ impl Host for LiveHost {
         live_system_proxy()
     }
 
-    fn session_path(&self) -> Option<OsString> {
-        live_session_path()
+    fn session_env(&self, key: &str) -> Result<Option<OsString>, String> {
+        live_session_env(key)
     }
 
     fn session_path_defaults_to_gui(&self) -> bool {
@@ -258,6 +298,27 @@ impl Host for LiveHost {
         persist_session_env(key, value)
     }
 
+    fn remove_session_env(&mut self, key: &str) -> Result<(), String> {
+        remove_live_session_env(key)
+    }
+
+    fn session_record_path(&self) -> Option<PathBuf> {
+        crate::paths::SystemPaths::from_system()
+            .ok()
+            .map(|paths| paths.app_data().join(SESSION_RECORD_FILE))
+    }
+
+    fn cli_dir(&self) -> Option<PathBuf> {
+        // A development build lives in `target/`, which does not belong on
+        // anyone's PATH.
+        if cfg!(debug_assertions) {
+            return None;
+        }
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    }
+
     fn managed_tools_root(&self) -> Option<PathBuf> {
         live_managed_tools_root()
     }
@@ -267,55 +328,213 @@ impl Host for LiveHost {
     }
 }
 
-/// Repair PATH, proxy variables, and `uv` TLS settings for this process and
-/// the user session. Safe to call once at startup; missing tools are reported
-/// and do not stop the application.
+/// Repairs PATH, proxy variables, and `uv` for the command line, installing
+/// `uv` in the foreground when it is missing. Missing tools are reported and do
+/// not stop it.
 pub(crate) fn prepare() -> StartupReport {
     prepare_with(&mut LiveHost)
 }
 
+/// The launch half for the app: fixes this process's environment without
+/// touching the network. [`finish_in_background`] does the rest.
+pub(crate) fn prepare_process() -> StartupReport {
+    prepare_process_with(&mut LiveHost)
+}
+
+/// Finds a command the way a freshly opened terminal would: this process's
+/// PATH plus the user and machine Path as they are now, trying each PATHEXT
+/// extension so `.cmd` shims such as npm's resolve.
+pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
+    find_tool(&LiveHost, name)
+}
+
 pub(crate) fn prepare_with(host: &mut impl Host) -> StartupReport {
-    let mut report = StartupReport::default();
-    ensure_proxy(host, &mut report);
-    ensure_uv_trust(host, &mut report);
-    let tool_dirs = ensure_toolchain(host, &mut report);
-    persist_session(host, &tool_dirs, &mut report);
+    let mut report = prepare_process_with(host);
+    match install_missing_tools(host, &mut report) {
+        Ok(()) => prepend_dirs(
+            host,
+            &tool_dirs(host, &report.tools),
+            &current_path_dirs(host),
+        ),
+        Err(error) => report.notes.push(error),
+    }
+    finish_session(host, &mut report);
     report
 }
 
-fn ensure_toolchain(host: &mut impl Host, report: &mut StartupReport) -> Vec<PathBuf> {
-    scan_tools(host, report);
-    for pack in missing_packs(&report.tools) {
+fn prepare_process_with(host: &mut impl Host) -> StartupReport {
+    let mut report = StartupReport::default();
+    forget_legacy_system_proxy(host);
+    report.user_proxy_values = user_proxy_values(host);
+    ensure_proxy(host, &mut report);
+    ensure_uv_trust(host, &mut report);
+    scan_tools(host, &mut report);
+    prepend_dirs(
+        host,
+        &tool_dirs(host, &report.tools),
+        &current_path_dirs(host),
+    );
+    report
+}
+
+fn install_missing_tools(host: &mut impl Host, report: &mut StartupReport) -> Result<(), String> {
+    let packs = missing_packs(&report.tools);
+    if packs.is_empty() {
+        return Ok(());
+    }
+    for pack in packs {
         if host.managed_tools_root().is_none() {
-            report.notes.push(format!(
+            return Err(format!(
                 "Could not find a user-writable directory to install {}.",
                 pack.id()
             ));
-            continue;
         }
-        match host.install_tool_pack(pack) {
-            Ok(dir) => {
-                report
-                    .notes
-                    .push(format!("Installed {} into {}.", pack.id(), dir.display()))
-            }
-            Err(error) => report.notes.push(format!(
-                "Could not install {} without administrator rights: {error}",
-                pack.id()
-            )),
-        }
+        let dir = host
+            .install_tool_pack(pack)
+            .map_err(|error| format!("Could not install {}: {error}", pack.id()))?;
+        report
+            .notes
+            .push(format!("Installed {} into {}.", pack.id(), dir.display()));
     }
     report.tools.clear();
     scan_tools(host, report);
+    Ok(())
+}
+
+fn tool_dirs(host: &impl Host, tools: &[ToolStatus]) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    for tool in &report.tools {
+    for tool in tools {
         if let Some(parent) = tool.path.as_ref().and_then(|path| path.parent()) {
             push_unique_dir(host, &mut dirs, parent);
         }
     }
-    prepend_dirs(host, &dirs, &current_path_dirs(host));
-    report.prepended_path_dirs.clone_from(&dirs);
     dirs
+}
+
+/// The host preparation report. The background half updates it once `uv` is
+/// installed.
+pub(crate) struct SharedReport(Mutex<Option<StartupReport>>);
+
+impl SharedReport {
+    pub(crate) const fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    pub(crate) fn get(&self) -> Option<StartupReport> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn set(&self, report: StartupReport) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
+    }
+}
+
+/// Where the background `uv` install stands, for the preflight.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ToolInstallStatus {
+    Idle,
+    Running,
+    /// Every attempt this session failed; carries the last error.
+    GaveUp(Option<String>),
+}
+
+struct ToolInstall {
+    running: bool,
+    attempts: u32,
+    last_error: Option<String>,
+}
+
+static TOOL_INSTALL: Mutex<ToolInstall> = Mutex::new(ToolInstall {
+    running: false,
+    attempts: 0,
+    last_error: None,
+});
+
+fn tool_install() -> std::sync::MutexGuard<'static, ToolInstall> {
+    TOOL_INSTALL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Publishes to the user session and installs a missing `uv` on a background
+/// thread, retrying the download a few times this session.
+pub(crate) fn finish_in_background() {
+    start_background(&TOOL_INSTALL_DELAYS);
+}
+
+/// Tries the download once more when `uv` is still missing and the session
+/// has attempts left, then reports where the install stands.
+pub(crate) fn retry_tool_install() -> ToolInstallStatus {
+    start_background(&TOOL_INSTALL_DELAYS[..1]);
+    let state = tool_install();
+    if state.running {
+        ToolInstallStatus::Running
+    } else if state.attempts >= MAX_TOOL_INSTALL_ATTEMPTS {
+        ToolInstallStatus::GaveUp(state.last_error.clone())
+    } else {
+        ToolInstallStatus::Idle
+    }
+}
+
+fn start_background(delays: &'static [Duration]) {
+    if crate::STARTUP_REPORT.get().is_none() {
+        return;
+    }
+    {
+        let mut state = tool_install();
+        if state.running {
+            return;
+        }
+        state.running = true;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("agent-plugins-host".to_string())
+        .spawn(move || {
+            for (index, delay) in delays.iter().enumerate() {
+                std::thread::sleep(*delay);
+                let Some(mut report) = crate::STARTUP_REPORT.get() else {
+                    break;
+                };
+                let missing = !missing_packs(&report.tools).is_empty();
+                if index > 0 && !missing {
+                    break;
+                }
+                if missing && take_install_attempt() {
+                    if let Err(error) = install_missing_tools(&mut LiveHost, &mut report) {
+                        eprintln!("Agent Plugins startup: {error}");
+                        tool_install().last_error = Some(error);
+                    }
+                }
+                // This process's PATH stays as it was: nothing here runs `uv`,
+                // and changing the environment of a running app is unsafe.
+                finish_session(&mut LiveHost, &mut report);
+                let done = missing_packs(&report.tools).is_empty();
+                crate::STARTUP_REPORT.set(report);
+                if done {
+                    break;
+                }
+            }
+            tool_install().running = false;
+        });
+    if let Err(error) = spawned {
+        eprintln!("Agent Plugins startup: could not start host preparation: {error}");
+        tool_install().running = false;
+    }
+}
+
+fn take_install_attempt() -> bool {
+    let mut state = tool_install();
+    if state.attempts >= MAX_TOOL_INSTALL_ATTEMPTS {
+        return false;
+    }
+    state.attempts += 1;
+    true
 }
 
 fn scan_tools(host: &impl Host, report: &mut StartupReport) {
@@ -374,7 +593,9 @@ fn find_tool(host: &impl Host, name: &str) -> Option<PathBuf> {
 fn candidate_search_dirs(host: &impl Host) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let login_dirs = host
-        .session_path()
+        .session_env("PATH")
+        .ok()
+        .flatten()
         .map(|path| split_and_expand_paths(host, &path))
         .unwrap_or_default();
     for dir in current_path_dirs(host)
@@ -456,32 +677,35 @@ fn ensure_uv_trust(host: &mut impl Host, report: &mut StartupReport) {
     );
 }
 
-fn persist_session(host: &mut impl Host, tool_dirs: &[PathBuf], report: &mut StartupReport) {
+/// Publishes the tool directories, the app's own directory, `UV_NATIVE_TLS`,
+/// and the proxy values the user supplied. Only values that change are
+/// written, and an unreadable user Path is left alone.
+fn finish_session(host: &mut impl Host, report: &mut StartupReport) {
     if !host.persist_enabled() {
         return;
     }
-    if let Err(error) = persist_session_path(host, tool_dirs) {
-        report.notes.push(format!(
-            "Could not publish PATH to the user session: {error}"
-        ));
+    let mut dirs = tool_dirs(host, &report.tools);
+    let cli_dir = host.cli_dir();
+    if let Some(dir) = &cli_dir {
+        push_unique_dir(host, &mut dirs, dir);
     }
-    let extra_keys = if host.env_keys_are_case_insensitive() {
-        Vec::new()
-    } else {
-        SESSION_KEYS
-            .iter()
-            .map(|key| key.to_ascii_lowercase())
-            .collect::<Vec<_>>()
-    };
-    for key in SESSION_KEYS
-        .iter()
-        .copied()
-        .chain(extra_keys.iter().map(String::as_str))
-    {
-        let Some(value) = host.env(key) else {
-            continue;
-        };
-        if let Err(error) = host.persist_session(key, &value) {
+    match persist_session_path(host, &dirs) {
+        Ok(added) => {
+            for dir in added {
+                push_unique_dir(host, &mut report.published_path_dirs, &dir);
+            }
+            report.cli_dir_on_path = cli_dir;
+        }
+        Err(error) => report.notes.push(format!(
+            "Could not publish PATH to the user session: {error}"
+        )),
+    }
+    let mut values = report.user_proxy_values.clone();
+    if let Some(value) = host.env(UV_NATIVE_TLS) {
+        values.push((UV_NATIVE_TLS.to_string(), value));
+    }
+    for (key, value) in values {
+        if let Err(error) = persist_if_changed(host, &key, &value) {
             report.notes.push(format!(
                 "Could not publish {key} to the user session: {error}"
             ));
@@ -489,18 +713,164 @@ fn persist_session(host: &mut impl Host, tool_dirs: &[PathBuf], report: &mut Sta
     }
 }
 
-fn persist_session_path(host: &mut impl Host, tool_dirs: &[PathBuf]) -> Result<(), String> {
-    if tool_dirs.is_empty() {
+fn persist_if_changed(host: &mut impl Host, key: &str, value: &OsStr) -> Result<(), String> {
+    let text = value.to_string_lossy();
+    let current = host.session_env(key)?;
+    if current.is_some_and(|current| current.to_string_lossy() == text.trim()) {
         return Ok(());
     }
+    host.persist_session(key, value)?;
+    if let Some(path) = host.session_record_path() {
+        let mut record = read_session_record(&path);
+        record.written.insert(key.to_string(), text.into_owned());
+        write_session_record(&path, &record);
+    }
+    Ok(())
+}
+
+/// Returns the directories it added. A user Path that could not be read is
+/// an error, so a registry hiccup never replaces the user's Path with the
+/// tool directories alone.
+fn persist_session_path(host: &mut impl Host, dirs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    if dirs.is_empty() {
+        return Ok(Vec::new());
+    }
     let sep = host.path_separator();
-    let base = match host.session_path() {
+    let base = match host.session_env("PATH")? {
         Some(path) => path,
         None if host.session_path_defaults_to_gui() => OsString::from(default_gui_path(sep)),
         None => OsString::new(),
     };
-    let published = prepended_path(host, &split_paths(&base, sep), tool_dirs);
-    host.persist_session("PATH", &join_paths(&published, sep))
+    let existing = split_and_expand_paths(host, &base);
+    let added = dirs
+        .iter()
+        .filter(|dir| !existing.iter().any(|entry| paths_match(host, entry, dir)))
+        .cloned()
+        .collect::<Vec<_>>();
+    if added.is_empty() {
+        return Ok(added);
+    }
+    let mut published = added.clone();
+    published.extend(split_paths(&base, sep));
+    host.persist_session("PATH", &join_paths(&published, sep))?;
+    Ok(added)
+}
+
+fn user_proxy_values(host: &impl Host) -> Vec<(String, OsString)> {
+    proxy_keys(host)
+        .into_iter()
+        .filter_map(|key| {
+            let value = host.env(&key)?;
+            (!value.to_string_lossy().trim().is_empty()).then_some((key, value))
+        })
+        .collect()
+}
+
+fn proxy_keys(host: &impl Host) -> Vec<String> {
+    let mut keys = PROXY_PAIRS
+        .iter()
+        .map(|pair| pair[0].to_string())
+        .collect::<Vec<_>>();
+    if !host.env_keys_are_case_insensitive() {
+        keys.extend(PROXY_PAIRS.iter().map(|pair| pair[1].to_string()));
+    }
+    keys
+}
+
+/// What the app keeps about its writes to the user session.
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, rename_all = "camelCase")]
+struct SessionRecord {
+    legacy_proxy_cleanup_done: bool,
+    /// Every value the app wrote, so a later version can tell its own writes
+    /// from the user's.
+    written: BTreeMap<String, String>,
+}
+
+fn read_session_record(path: &Path) -> SessionRecord {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn write_session_record(path: &Path, record: &SessionRecord) {
+    let written = path
+        .parent()
+        .map_or(Ok(()), fs::create_dir_all)
+        .and_then(|()| fs::write(path, serde_json::to_vec_pretty(record).unwrap_or_default()));
+    if let Err(error) = written {
+        eprintln!(
+            "Agent Plugins startup: could not record the user session changes in {}: {error}",
+            path.display()
+        );
+    }
+}
+
+/// Builds before this one copied the system proxy into the user session. The
+/// next launch read the copy back as the user's own setting and kept using it
+/// after the system proxy changed. Once per machine, remove every session
+/// value that still matches what those builds wrote from the current system
+/// proxy. A copy of an older system proxy cannot be told from the user's own
+/// setting and stays.
+fn forget_legacy_system_proxy(host: &mut impl Host) {
+    if !host.persist_enabled() {
+        return;
+    }
+    let Some(record_path) = host.session_record_path() else {
+        return;
+    };
+    let mut record = read_session_record(&record_path);
+    if record.legacy_proxy_cleanup_done {
+        return;
+    }
+    let system = host.system_proxy().unwrap_or_default();
+    for (key, value) in legacy_session_proxy_values(host, &system) {
+        let Ok(Some(current)) = host.session_env(&key) else {
+            continue;
+        };
+        if current.to_string_lossy() != value.as_str() {
+            continue;
+        }
+        if let Err(error) = host.remove_session_env(&key) {
+            // Try again on the next launch.
+            eprintln!("Agent Plugins startup: could not remove the copied {key}: {error}");
+            return;
+        }
+        eprintln!(
+            "Agent Plugins startup: removed {key} from the user session; an earlier version copied it from the system proxy."
+        );
+        if env_utf8(host, &key).as_deref() == Some(value.as_str()) {
+            host.remove_env(&key);
+        }
+    }
+    record.legacy_proxy_cleanup_done = true;
+    write_session_record(&record_path, &record);
+}
+
+/// The proxy values earlier builds wrote to the user session from `system`.
+fn legacy_session_proxy_values(host: &impl Host, system: &SystemProxy) -> Vec<(String, String)> {
+    let mut values = Vec::new();
+    let http = system.http.clone().or_else(|| system.https.clone());
+    let https = system.https.clone().or_else(|| system.http.clone());
+    match (http, https, &system.socks) {
+        (Some(http), Some(https), _) => {
+            values.push(("HTTP_PROXY".to_string(), http));
+            values.push(("HTTPS_PROXY".to_string(), https));
+        }
+        (_, _, Some(socks)) => values.push(("ALL_PROXY".to_string(), socks.clone())),
+        _ => {}
+    }
+    let (no_proxy, _) = with_loopback_hosts(system.no_proxy.as_deref().unwrap_or_default());
+    values.push(("NO_PROXY".to_string(), no_proxy));
+    if !host.env_keys_are_case_insensitive() {
+        let lower = values
+            .iter()
+            .map(|(key, value)| (key.to_ascii_lowercase(), value.clone()))
+            .collect::<Vec<_>>();
+        values.extend(lower);
+    }
+    values
 }
 
 fn prepend_dirs(host: &mut impl Host, dirs: &[PathBuf], existing: &[PathBuf]) {
@@ -551,8 +921,14 @@ fn apply_proxy_var(host: &mut impl Host, canonical: &str, value: &str) {
 }
 
 fn ensure_loopback_no_proxy(host: &mut impl Host) {
-    let existing = env_utf8(host, "NO_PROXY").unwrap_or_default();
-    let mut entries = split_no_proxy(&existing);
+    let (value, changed) = with_loopback_hosts(&env_utf8(host, "NO_PROXY").unwrap_or_default());
+    if changed {
+        apply_proxy_var(host, "NO_PROXY", &value);
+    }
+}
+
+fn with_loopback_hosts(existing: &str) -> (String, bool) {
+    let mut entries = split_no_proxy(existing);
     let mut changed = existing.is_empty();
     for host_name in LOOPBACK_NO_PROXY {
         if !entries
@@ -563,9 +939,7 @@ fn ensure_loopback_no_proxy(host: &mut impl Host) {
             changed = true;
         }
     }
-    if changed {
-        apply_proxy_var(host, "NO_PROXY", &entries.join(","));
-    }
+    (entries.join(","), changed)
 }
 
 fn split_no_proxy(value: &str) -> Vec<String> {
@@ -660,8 +1034,14 @@ fn paths_match(host: &impl Host, left: &Path, right: &Path) -> bool {
     }
 }
 
+/// Windows runs a bare name only through one of its PATHEXT extensions, and npm
+/// puts an extensionless shell script beside each `.cmd` shim, so the bare
+/// name is a candidate only where there are no extensions.
 fn tool_file_names(name: &str, extensions: &[String]) -> Vec<String> {
-    let mut names = vec![name.to_string()];
+    if extensions.is_empty() {
+        return vec![name.to_string()];
+    }
+    let mut names = Vec::new();
     for extension in extensions {
         let extension = extension.trim().trim_start_matches('.');
         if extension.is_empty() {
@@ -738,7 +1118,14 @@ fn live_additional_search_dirs() -> Vec<PathBuf> {
     #[cfg(windows)]
     {
         let mut dirs = Vec::new();
-        if let Some(path) = windows_machine_path() {
+        if let Some(path) = windows_env_value(
+            winreg::enums::HKEY_LOCAL_MACHINE,
+            MACHINE_ENVIRONMENT,
+            "Path",
+        )
+        .ok()
+        .flatten()
+        {
             dirs.extend(
                 split_paths(&path, ';')
                     .into_iter()
@@ -769,17 +1156,28 @@ fn expand_live_percent_vars(path: &str) -> PathBuf {
 }
 
 #[cfg(windows)]
-fn windows_machine_path() -> Option<OsString> {
-    let hklm = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
-    let environment = hklm
-        .open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
-        .ok()?;
-    environment
-        .get_value::<String, _>("Path")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(OsString::from)
+const MACHINE_ENVIRONMENT: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+
+/// A registry environment value: `Ok(None)` when the key or value is absent,
+/// `Err` when it exists but could not be read.
+#[cfg(windows)]
+fn windows_env_value(
+    hive: winreg::HKEY,
+    subkey: &str,
+    name: &str,
+) -> Result<Option<OsString>, String> {
+    let key = match winreg::RegKey::predef(hive).open_subkey(subkey) {
+        Ok(key) => key,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Could not open {subkey} in the registry: {error}")),
+    };
+    match key.get_value::<String, _>(name) {
+        Ok(value) => Ok(Some(value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(OsString::from)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Could not read {name} from {subkey}: {error}")),
+    }
 }
 
 #[cfg(windows)]
@@ -828,10 +1226,12 @@ fn live_executable_extensions() -> Vec<String> {
     {
         let pathext =
             std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        // Only what `std::process::Command` can start; a `.js` or `.vbs`
+        // needs a script host.
         pathext
             .split(';')
             .map(|part| part.trim().trim_start_matches('.').to_ascii_lowercase())
-            .filter(|part| !part.is_empty())
+            .filter(|part| matches!(part.as_str(), "com" | "exe" | "bat" | "cmd"))
             .collect()
     }
     #[cfg(not(windows))]
@@ -928,43 +1328,73 @@ fn windows_system_proxy() -> Option<SystemProxy> {
 }
 
 #[cfg(target_os = "macos")]
-fn live_session_path() -> Option<OsString> {
+fn live_session_env(key: &str) -> Result<Option<OsString>, String> {
     let mut command = crate::process::command(Path::new("/bin/launchctl"));
-    command.args(["getenv", "PATH"]);
-    let output = crate::process::run(command, "session PATH", Duration::from_secs(2)).ok()?;
+    command.args(["getenv", key]);
+    let output = crate::process::run(command, "session environment", Duration::from_secs(2))?;
     if !output.status.success() {
-        return None;
+        return Ok(None);
     }
     let value = String::from_utf8_lossy(&output.stdout);
     let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
+    Ok((!trimmed.is_empty()).then(|| OsString::from(trimmed)))
+}
+
+/// New processes see the user's value, or the machine's when the user has
+/// none. Path is the exception: Windows joins the two, and only the user's
+/// part is ours to rewrite.
+#[cfg(windows)]
+fn live_session_env(key: &str) -> Result<Option<OsString>, String> {
+    let user = windows_env_value(winreg::enums::HKEY_CURRENT_USER, "Environment", key)?;
+    if user.is_some() || key.eq_ignore_ascii_case("PATH") {
+        return Ok(user);
+    }
+    windows_env_value(winreg::enums::HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT, key)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn live_session_env(_key: &str) -> Result<Option<OsString>, String> {
+    Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+fn remove_live_session_env(key: &str) -> Result<(), String> {
+    let mut command = crate::process::command(Path::new("/bin/launchctl"));
+    command.args(["unsetenv", key]);
+    let output = crate::process::run(command, "session environment", Duration::from_secs(2))?;
+    if output.status.success() {
+        Ok(())
     } else {
-        Some(OsString::from(trimmed))
+        Err(format!(
+            "launchctl unsetenv {key} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 
 #[cfg(windows)]
-fn live_session_path() -> Option<OsString> {
-    windows_user_path()
+fn remove_live_session_env(key: &str) -> Result<(), String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+    let environment = match winreg::RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags("Environment", KEY_SET_VALUE)
+    {
+        Ok(key) => key,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("Could not open the user environment: {error}")),
+    };
+    match environment.delete_value(key) {
+        Ok(()) => {
+            broadcast_environment_change();
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not remove user environment {key}: {error}")),
+    }
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-fn live_session_path() -> Option<OsString> {
-    None
-}
-
-#[cfg(windows)]
-fn windows_user_path() -> Option<OsString> {
-    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-    let environment = hkcu.open_subkey("Environment").ok()?;
-    environment
-        .get_value::<String, _>("Path")
-        .or_else(|_| environment.get_value::<String, _>("PATH"))
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(OsString::from)
+fn remove_live_session_env(_key: &str) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1286,6 +1716,7 @@ fn install_official_tool_pack(host: &impl Host, pack: ToolPack) -> Result<PathBu
         download.url
     );
     let bytes = download_https(&download.url)?;
+    verify_published_checksum(&download.url, &bytes)?;
     fs::create_dir_all(&root)
         .map_err(|error| format!("Could not create {}: {error}", root.display()))?;
     let staging = crate::sources::temporary_path(&root, pack.id());
@@ -1322,6 +1753,30 @@ fn install_official_tool_pack(host: &impl Host, pack: ToolPack) -> Result<PathBu
         let _ = crate::fs_retry::remove_dir_all(&staging);
     }
     Ok(dest)
+}
+
+/// uv publishes `<archive>.sha256` beside every release archive. Both come
+/// from GitHub, so this catches a truncated, corrupted, or swapped download on
+/// the way, not a compromised release.
+fn verify_published_checksum(url: &str, bytes: &[u8]) -> Result<(), String> {
+    let checksum_url = format!("{url}.sha256");
+    let expected = parse_sha256_file(&download_https(&checksum_url)?)
+        .ok_or_else(|| format!("{checksum_url} is not a SHA-256 checksum file."))?;
+    if crate::locator::sha256_hex(bytes) == expected {
+        Ok(())
+    } else {
+        Err("The downloaded archive does not match its published SHA-256 checksum, so it was discarded.".to_string())
+    }
+}
+
+/// Reads `<hex digest>  <file name>`, the format `sha256sum` writes.
+fn parse_sha256_file(bytes: &[u8]) -> Option<String> {
+    let digest = std::str::from_utf8(bytes)
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .to_ascii_lowercase();
+    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(digest)
 }
 
 fn pack_is_present(host: &impl Host, dir: &Path, pack: ToolPack) -> bool {
@@ -1562,10 +2017,13 @@ mod tests {
         path_separator: char,
         case_insensitive: bool,
         system_proxy: Option<SystemProxy>,
-        session_path: Option<OsString>,
+        session_unreadable: bool,
         session_path_defaults_to_gui: bool,
         persist_enabled: bool,
         persisted: BTreeMap<String, OsString>,
+        persist_calls: Vec<String>,
+        record_path: Option<PathBuf>,
+        cli_dir: Option<PathBuf>,
         managed_root: Option<PathBuf>,
         install_error: Option<String>,
         installed: Vec<ToolPack>,
@@ -1583,10 +2041,13 @@ mod tests {
                 path_separator: ':',
                 case_insensitive: false,
                 system_proxy: None,
-                session_path: None,
+                session_unreadable: false,
                 session_path_defaults_to_gui: false,
                 persist_enabled: true,
                 persisted: BTreeMap::new(),
+                persist_calls: Vec::new(),
+                record_path: None,
+                cli_dir: None,
                 managed_root: None,
                 install_error: None,
                 installed: Vec::new(),
@@ -1622,6 +2083,18 @@ mod tests {
         fn with_system_proxy(mut self, proxy: SystemProxy) -> Self {
             self.system_proxy = Some(proxy);
             self
+        }
+
+        fn with_session(mut self, key: &str, value: &str) -> Self {
+            self.persisted
+                .insert(key.to_string(), OsString::from(value));
+            self
+        }
+
+        fn persisted_str(&self, key: &str) -> Option<String> {
+            self.persisted
+                .get(key)
+                .map(|value| value.to_string_lossy().into_owned())
         }
 
         fn env_str(&self, key: &str) -> Option<String> {
@@ -1693,6 +2166,12 @@ mod tests {
             self.vars.insert(key.to_string(), value.to_os_string());
         }
 
+        fn remove_env(&mut self, key: &str) {
+            self.vars.retain(|existing, _| {
+                !(existing == key || (self.case_insensitive && existing.eq_ignore_ascii_case(key)))
+            });
+        }
+
         fn is_executable(&self, path: &Path) -> bool {
             self.executables.contains(path)
         }
@@ -1713,8 +2192,11 @@ mod tests {
             self.system_proxy.clone()
         }
 
-        fn session_path(&self) -> Option<OsString> {
-            self.session_path.clone()
+        fn session_env(&self, key: &str) -> Result<Option<OsString>, String> {
+            if self.session_unreadable {
+                return Err("access denied".to_string());
+            }
+            Ok(self.persisted.get(key).cloned())
         }
 
         fn session_path_defaults_to_gui(&self) -> bool {
@@ -1726,8 +2208,22 @@ mod tests {
         }
 
         fn persist_session(&mut self, key: &str, value: &OsStr) -> Result<(), String> {
+            self.persist_calls.push(key.to_string());
             self.persisted.insert(key.to_string(), value.to_os_string());
             Ok(())
+        }
+
+        fn remove_session_env(&mut self, key: &str) -> Result<(), String> {
+            self.persisted.remove(key);
+            Ok(())
+        }
+
+        fn session_record_path(&self) -> Option<PathBuf> {
+            self.record_path.clone()
+        }
+
+        fn cli_dir(&self) -> Option<PathBuf> {
+            self.cli_dir.clone()
         }
 
         fn managed_tools_root(&self) -> Option<PathBuf> {
@@ -1801,7 +2297,7 @@ mod tests {
         let report = prepare_with(&mut host);
         assert!(report.tools.iter().all(|tool| tool.path.is_none()));
         assert_eq!(host.env_str("PATH").as_deref(), Some("/usr/bin"));
-        assert!(report.prepended_path_dirs.is_empty());
+        assert!(report.published_path_dirs.is_empty());
     }
 
     #[test]
@@ -1929,7 +2425,8 @@ mod tests {
             .with_path("/opt/conda/bin:/usr/bin")
             .with_root("/home/user/.local/bin")
             .with_executable(uv_path().to_str().expect("utf8"));
-        host.session_path = Some(OsString::from("/usr/bin:/bin"));
+        host.persisted
+            .insert("PATH".to_string(), OsString::from("/usr/bin:/bin"));
         prepare_with(&mut host);
         assert_eq!(
             host.persisted
@@ -2062,7 +2559,7 @@ mod tests {
         assert!(host.env_str("PATH").is_some_and(|path| {
             split_paths(OsStr::new(&path), host.path_separator).contains(&uv_dir)
         }));
-        assert_eq!(report.prepended_path_dirs, [uv_dir]);
+        assert_eq!(report.published_path_dirs, [uv_dir]);
     }
 
     #[test]
@@ -2112,7 +2609,7 @@ mod tests {
 
     #[test]
     fn windows_session_path_persist_keeps_the_user_path_only() {
-        let uv = PathBuf::from(r"C:\Users\me\.local\bin").join(tool_file_name("uv"));
+        let uv = PathBuf::from(r"C:\Users\me\.local\bin").join("uv.exe");
         let mut host = FakeHost::new()
             .with_extensions(&["exe"])
             .with_path(r"C:\Windows\system32;C:\Windows;C:\Users\me\.local\bin")
@@ -2120,7 +2617,8 @@ mod tests {
             .with_executable(uv.to_str().expect("utf8"));
         host.path_separator = ';';
         host.case_insensitive = true;
-        host.session_path = Some(OsString::from(r"%USERPROFILE%\bin"));
+        host.persisted
+            .insert("PATH".to_string(), OsString::from(r"%USERPROFILE%\bin"));
         prepare_with(&mut host);
         assert_eq!(
             host.persisted
@@ -2133,7 +2631,7 @@ mod tests {
 
     #[test]
     fn empty_windows_user_path_persists_only_tool_directories() {
-        let uv = PathBuf::from(r"C:\Users\me\.local\bin").join(tool_file_name("uv"));
+        let uv = PathBuf::from(r"C:\Users\me\.local\bin").join("uv.exe");
         let mut host = FakeHost::new()
             .with_extensions(&["exe"])
             .with_path(r"C:\Windows\system32;C:\Users\me\.local\bin")
@@ -2164,7 +2662,8 @@ mod tests {
         let mut host = FakeHost::new()
             .with_path("/windows/system32")
             .with_executable(uv.to_str().expect("utf8"));
-        host.session_path = Some(OsString::from("/users/me/.local/bin"));
+        host.persisted
+            .insert("PATH".to_string(), OsString::from("/users/me/.local/bin"));
         let report = prepare_with(&mut host);
         assert_eq!(
             report
@@ -2184,7 +2683,8 @@ mod tests {
             .with_path("/windows/system32")
             .with_env("USERPROFILE", "/users/me")
             .with_executable(uv.to_str().expect("utf8"));
-        host.session_path = Some(OsString::from("%USERPROFILE%/bin"));
+        host.persisted
+            .insert("PATH".to_string(), OsString::from("%USERPROFILE%/bin"));
         let report = prepare_with(&mut host);
         assert_eq!(
             report
@@ -2256,5 +2756,157 @@ mod tests {
             find_pack_bin_dir(&host, root.path(), ToolPack::Uv).as_deref(),
             Some(nested.as_path())
         );
+    }
+
+    fn corp_system_proxy() -> SystemProxy {
+        SystemProxy {
+            http: Some("http://proxy.corp:8080".to_string()),
+            https: Some("http://proxy.corp:8080".to_string()),
+            ..SystemProxy::default()
+        }
+    }
+
+    #[test]
+    fn system_proxy_applies_to_the_process_only() {
+        let mut host = FakeHost::new().with_system_proxy(corp_system_proxy());
+        prepare_with(&mut host);
+        assert_eq!(
+            host.env_str("HTTPS_PROXY").as_deref(),
+            Some("http://proxy.corp:8080")
+        );
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "no_proxy",
+        ] {
+            assert!(host.persisted_str(key).is_none(), "{key} was published");
+        }
+    }
+
+    #[test]
+    fn publishes_proxy_values_exactly_as_the_user_supplied_them() {
+        let mut host = FakeHost::new()
+            .with_env("http_proxy", "http://proxy.corp:8080")
+            .with_env("NO_PROXY", "*.corp");
+        prepare_with(&mut host);
+        assert_eq!(
+            host.persisted_str("http_proxy").as_deref(),
+            Some("http://proxy.corp:8080")
+        );
+        assert_eq!(host.persisted_str("NO_PROXY").as_deref(), Some("*.corp"));
+        assert!(host.persisted_str("HTTPS_PROXY").is_none());
+    }
+
+    #[test]
+    fn removes_a_system_proxy_copy_left_by_an_earlier_version_once() {
+        let temp = tempfile::tempdir().expect("temp");
+        let record = temp.path().join(SESSION_RECORD_FILE);
+        let loopback = "localhost,127.0.0.1,::1";
+        let legacy = |host: FakeHost| {
+            let mut host = host
+                .with_system_proxy(corp_system_proxy())
+                .with_session("HTTP_PROXY", "http://proxy.corp:8080")
+                .with_session("HTTPS_PROXY", "http://proxy.corp:8080")
+                .with_session("NO_PROXY", loopback)
+                .with_env("HTTP_PROXY", "http://proxy.corp:8080")
+                .with_env("HTTPS_PROXY", "http://proxy.corp:8080")
+                .with_env("NO_PROXY", loopback);
+            host.case_insensitive = true;
+            host.record_path = Some(record.clone());
+            host
+        };
+        let mut host = legacy(FakeHost::new().with_session("ALL_PROXY", "socks5://mine:1080"));
+        let report = prepare_with(&mut host);
+        assert_eq!(
+            report.proxy,
+            ProxyStatus::FromSystem {
+                http: "http://proxy.corp:8080".to_string(),
+                https: "http://proxy.corp:8080".to_string(),
+            }
+        );
+        assert!(host.persisted_str("HTTP_PROXY").is_none());
+        assert!(host.persisted_str("HTTPS_PROXY").is_none());
+        assert!(host.persisted_str("NO_PROXY").is_none());
+        assert_eq!(
+            host.persisted_str("ALL_PROXY").as_deref(),
+            Some("socks5://mine:1080")
+        );
+        assert!(read_session_record(&record).legacy_proxy_cleanup_done);
+
+        // The same value set again later is the user's and stays.
+        let mut host = legacy(FakeHost::new());
+        prepare_with(&mut host);
+        assert_eq!(
+            host.persisted_str("HTTP_PROXY").as_deref(),
+            Some("http://proxy.corp:8080")
+        );
+    }
+
+    #[test]
+    fn an_unreadable_user_path_is_not_overwritten() {
+        let mut host = FakeHost::new()
+            .with_path("/usr/bin")
+            .with_root("/home/user/.local/bin")
+            .with_executable(uv_path().to_str().expect("utf8"));
+        host.session_unreadable = true;
+        let report = prepare_with(&mut host);
+        assert!(host.persist_calls.is_empty());
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("Could not publish PATH")));
+    }
+
+    #[test]
+    fn writes_only_values_that_change_and_counts_only_added_dirs() {
+        let cli = PathBuf::from("/opt/agent-plugins");
+        let mut host = FakeHost::new()
+            .with_path("/usr/bin")
+            .with_root("/home/user/.local/bin")
+            .with_executable(uv_path().to_str().expect("utf8"))
+            .with_session("PATH", "/home/user/.local/bin:/usr/bin")
+            .with_session(UV_NATIVE_TLS, "1");
+        host.cli_dir = Some(cli.clone());
+        let report = prepare_with(&mut host);
+        assert_eq!(host.persist_calls, ["PATH"]);
+        assert_eq!(report.published_path_dirs, std::slice::from_ref(&cli));
+        assert_eq!(report.cli_dir_on_path, Some(cli));
+
+        // A relaunch starts from the session, not from this run's process.
+        host.vars.retain(|key, _| key == "PATH");
+        let report = prepare_with(&mut host);
+        assert_eq!(host.persist_calls, ["PATH"]);
+        assert!(report.published_path_dirs.is_empty());
+    }
+
+    #[test]
+    fn describe_redacts_proxy_credentials() {
+        let status = ProxyStatus::FromSystem {
+            http: "http://user:secret@proxy.corp:8080".to_string(),
+            https: "http://user:secret@proxy.corp:8443".to_string(),
+        };
+        assert!(!status.describe().contains("secret"));
+    }
+
+    #[test]
+    fn windows_names_need_an_extension() {
+        assert_eq!(
+            tool_file_names("claude", &["cmd".to_string(), "exe".to_string()]),
+            ["claude.cmd", "claude.exe"]
+        );
+        assert_eq!(tool_file_names("claude", &[]), ["claude"]);
+    }
+
+    #[test]
+    fn parses_the_published_uv_checksum_file() {
+        let digest = "a252121d5b59398fcb137c6ea448176459a44010f33f67e0072305a637119ca7";
+        assert_eq!(
+            parse_sha256_file(format!("{digest}  uv-x86_64-pc-windows-msvc.zip\n").as_bytes())
+                .as_deref(),
+            Some(digest)
+        );
+        assert_eq!(parse_sha256_file(b"<html>Not Found</html>"), None);
     }
 }

@@ -16,9 +16,16 @@ using Microsoft.Net.Http.Headers;
 
 namespace Marketplace.Api.Endpoints;
 
+/// <summary>
+/// The HTTP surface. Handlers return only their success result; every failure is a thrown
+/// <see cref="ProblemException"/> that <see cref="ProblemExceptionHandler"/> writes as a problem document.
+/// </summary>
 public static class MarketplaceEndpoints
 {
     public const string AdminPolicy = "Admin";
+    public const int MaxFileView = 1024 * 1024;
+    public const int MaxReportReason = 2048;
+    public const long MaxUploadRequestBytes = ArchiveInspector.MaxArchiveBytes + 1024 * 1024;
 
     public static IEndpointRouteBuilder MapMarketplace(this IEndpointRouteBuilder app, IReadOnlyList<string> authSchemes)
     {
@@ -27,43 +34,41 @@ public static class MarketplaceEndpoints
             ?? typeof(MarketplaceEndpoints).Assembly.GetName().Version?.ToString(3)
             ?? "0.0.0";
 
-        api.MapGet("/health", (IOptions<ClientOptions> client, IHostEnvironment environment) => Results.Ok(new
+        api.MapGet("/health", async Task<Ok<HealthView>> (IOptions<ClientOptions> client, IHostEnvironment environment, MarketplaceDbContext db, CancellationToken cancellationToken) =>
         {
-            serverVersion,
-            minimumClientVersion = client.Value.MinimumVersion,
-            latestClientVersion = client.Value.LatestVersion,
-            environment = environment.EnvironmentName,
-            authSchemes,
-        })).AllowAnonymous().WithName("Health");
+            if (!await db.Database.CanConnectAsync(cancellationToken))
+            {
+                throw ProblemException.DatabaseUnavailable();
+            }
 
-        var authenticated = api.MapGroup("").RequireAuthorization();
+            return TypedResults.Ok(new HealthView(serverVersion, client.Value.MinimumVersion, client.Value.LatestVersion, environment.EnvironmentName, authSchemes));
+        }).AllowAnonymous().WithName("Health").ProducesProblem(503);
+
+        // Every authenticated route settles the caller's identity, personal namespace included, before it runs.
+        var authenticated = api.MapGroup("").RequireAuthorization().AddEndpointFilter(async (invocation, next) =>
+        {
+            await invocation.HttpContext.ResolveMarketplaceIdentityAsync();
+            return await next(invocation);
+        });
 
         authenticated.MapGet("/me", (HttpContext context) =>
         {
             var identity = context.MarketplaceIdentity();
-            return Results.Ok(new
-            {
-                account = identity.Account,
-                @namespace = identity.Namespace,
-                displayName = identity.DisplayName,
-                namespaces = identity.Namespaces,
-                admin = identity.IsAdmin,
-                groups = identity.Groups,
-            });
+            return TypedResults.Ok(new MeView(identity.Account, identity.Namespace, identity.DisplayName, identity.Namespaces, identity.IsAdmin, identity.Groups));
         }).WithName("Me");
 
         authenticated.MapGet("/catalog", async (HttpContext context, CatalogService catalog, CancellationToken cancellationToken) =>
         {
             var document = await catalog.CatalogAsync(context.MarketplaceIdentity(), cancellationToken);
             return Conditional(context, document.Bytes, document.Digest, "application/json");
-        }).WithName("Catalog");
+        }).WithName("Catalog").Produces(200, contentType: "application/json");
 
         authenticated.MapMethods("/sources/{ns}/archive", ["GET", "HEAD"], async (string ns, HttpContext context, MarketplaceDbContext db, AccessService access, CancellationToken cancellationToken) =>
         {
             var archive = await db.NamespaceArchives.AsNoTracking().SingleOrDefaultAsync(candidate => candidate.Namespace == ns, cancellationToken);
             if (archive is null || archive.PackageCount == 0)
             {
-                return Results.NotFound();
+                throw ProblemException.NotFound($"The source {ns}");
             }
 
             // The stored archive holds exactly the live packages; a caller who may see them all gets it unchanged.
@@ -76,7 +81,7 @@ public static class MarketplaceEndpoints
                 .ToHashSet(StringComparer.Ordinal);
             if (keep.Count == 0)
             {
-                return Results.NotFound();
+                throw ProblemException.NotFound($"The source {ns}");
             }
 
             context.Response.Headers[HeaderNames.LastModified] = archive.GeneratedAt.ToString("R");
@@ -88,25 +93,27 @@ public static class MarketplaceEndpoints
 
             var variant = NamespaceArchiveBuilder.Filter(archive.Bytes, keep);
             return Conditional(context, variant.Bytes, variant.Digest, "application/zip");
-        }).WithName("SourceArchive");
+        }).WithName("SourceArchive").Produces(200, contentType: "application/zip").ProducesProblem(404);
 
         authenticated.MapGet("/index", async (HttpContext context, CatalogService catalog, CancellationToken cancellationToken) =>
-            Results.Ok(await catalog.IndexAsync(context.MarketplaceIdentity(), cancellationToken))).WithName("Index");
+            TypedResults.Ok(await catalog.IndexAsync(context.MarketplaceIdentity(), cancellationToken))).WithName("Index");
 
         authenticated.MapGet("/packages/{ns}/{packageId}", async (string ns, string packageId, HttpContext context, MarketplaceDbContext db, AccessService access, CancellationToken cancellationToken) =>
         {
             var package = await VisiblePackageAsync(context, db, access, ns, packageId, cancellationToken);
-            return package is null ? Results.NotFound() : Results.Ok(PackageView.From(package, context.MarketplaceIdentity().Owns(ns)));
-        }).WithName("Package");
+            return TypedResults.Ok(PackageView.From(package, context.MarketplaceIdentity().Owns(ns)));
+        }).WithName("Package").ProducesProblem(404);
+
+        authenticated.MapMethods("/packages/{ns}/{packageId}/versions/{version}/archive", ["GET", "HEAD"], async (string ns, string packageId, string version, HttpContext context, MarketplaceDbContext db, AccessService access, IArtifactStore store, CancellationToken cancellationToken) =>
+        {
+            var (stored, bytes) = await ReadableArchiveAsync(context, db, access, store, ns, packageId, version, cancellationToken);
+            context.Response.Headers[HeaderNames.ContentDisposition] = $"attachment; filename=\"{ns}-{packageId}-{stored.Version}.zip\"";
+            return Conditional(context, bytes, stored.ArchiveDigest, "application/zip");
+        }).WithName("VersionArchive").Produces(200, contentType: "application/zip").ProducesProblem(404);
 
         authenticated.MapGet("/packages/{ns}/{packageId}/versions/{version}/files", async (string ns, string packageId, string version, HttpContext context, MarketplaceDbContext db, AccessService access, IArtifactStore store, CancellationToken cancellationToken) =>
         {
-            var archive = await ReadableArchiveAsync(context, db, access, store, ns, packageId, version, cancellationToken);
-            if (archive is null)
-            {
-                return Results.NotFound();
-            }
-
+            var (_, archive) = await ReadableArchiveAsync(context, db, access, store, ns, packageId, version, cancellationToken);
             using var zip = ArchiveInspector.OpenZip(new MemoryStream(archive, writable: false));
             var prefix = ArchiveInspector.RootPrefix(zip.Entries.Select(entry => entry.FullName).ToArray());
             var files = zip.Entries
@@ -114,28 +121,25 @@ public static class MarketplaceEndpoints
                 .Select(entry => new PackageFile(entry.FullName[prefix.Length..], entry.Length))
                 .OrderBy(file => file.Path, StringComparer.Ordinal)
                 .ToArray();
-            return Results.Ok(files);
-        }).WithName("PackageFiles");
+            return TypedResults.Ok(files);
+        }).WithName("PackageFiles").ProducesProblem(404);
 
         authenticated.MapGet("/packages/{ns}/{packageId}/versions/{version}/files/{**path}", async (string ns, string packageId, string version, string path, HttpContext context, MarketplaceDbContext db, AccessService access, IArtifactStore store, CancellationToken cancellationToken) =>
         {
-            var archive = await ReadableArchiveAsync(context, db, access, store, ns, packageId, version, cancellationToken);
-            if (archive is null)
-            {
-                return Results.NotFound();
-            }
+            var (_, archive) = await ReadableArchiveAsync(context, db, access, store, ns, packageId, version, cancellationToken);
 
-            using var zip = ArchiveInspector.OpenZip(new MemoryStream(archive, writable: false));
+            // Not disposed: the archive only wraps a MemoryStream, and a large entry streams from it after this returns.
+            var zip = ArchiveInspector.OpenZip(new MemoryStream(archive, writable: false));
             var prefix = ArchiveInspector.RootPrefix(zip.Entries.Select(entry => entry.FullName).ToArray());
             var entry = zip.GetEntry(prefix + path);
             if (entry is null || entry.FullName.EndsWith('/'))
             {
-                return Results.NotFound();
+                throw ProblemException.NotFound($"{path} in {ns}/{packageId} {version}");
             }
 
             if (entry.Length > MaxFileView)
             {
-                return Results.Problem(statusCode: 413, title: $"{path} is larger than {MaxFileView / 1024 / 1024} MB; download the version to read it.");
+                return Results.Stream(entry.Open(), "application/octet-stream", Path.GetFileName(path));
             }
 
             var bytes = new byte[entry.Length];
@@ -147,32 +151,41 @@ public static class MarketplaceEndpoints
             return IsText(bytes)
                 ? Results.Bytes(bytes, "text/plain; charset=utf-8")
                 : Results.File(bytes, "application/octet-stream", Path.GetFileName(path));
-        }).WithName("PackageFile");
+        }).WithName("PackageFile").Produces(200, contentType: "text/plain").Produces(200, contentType: "application/octet-stream").ProducesProblem(404);
 
-        authenticated.MapPost("/packages/{ns}/{packageId}/versions", async (string ns, string packageId, HttpContext context, PublishService publish, CancellationToken cancellationToken) =>
+        authenticated.MapPost("/packages/{ns}/{packageId}/versions", async Task<Created<PublishedVersion>> (string ns, string packageId, HttpContext context, PublishService publish, CancellationToken cancellationToken) =>
         {
             if (!context.Request.HasFormContentType)
             {
-                return Results.Problem(statusCode: 415, title: "Publish with multipart/form-data: archive or files with paths, version, tags, changelog.");
+                throw new ProblemException(415, "Publish with multipart/form-data: an archive, or files with one paths value each, plus version, tags, and changelog.");
             }
 
-            var form = await context.Request.ReadFormAsync(cancellationToken);
+            IFormCollection form;
+            try
+            {
+                form = await context.Request.ReadFormAsync(cancellationToken);
+            }
+            catch (InvalidDataException error)
+            {
+                throw new ProblemException(400, $"The upload form could not be read: {error.Message}");
+            }
+
             var file = form.Files.GetFile("archive");
             var files = form.Files.GetFiles("files");
             var paths = form["paths"];
             if ((file is null || file.Length == 0) && files.Count == 0)
             {
-                return Results.Problem(statusCode: 422, title: "The form has no archive and no files.");
+                throw new ProblemException(422, "The form has no archive and no files.");
             }
 
             if (files.Count != paths.Count)
             {
-                return Results.Problem(statusCode: 422, title: "Send one paths value for each file.");
+                throw new ProblemException(422, $"Send one paths value for each file: the form has {files.Count} files and {paths.Count} paths.");
             }
 
             if ((file?.Length ?? 0) + files.Sum(upload => upload.Length) > ArchiveInspector.MaxArchiveBytes)
             {
-                return Results.Problem(statusCode: 413, title: "The upload is larger than the 50 MB limit.");
+                throw new ProblemException(413, $"The upload is larger than the {ArchiveInspector.MaxArchiveBytes / 1024 / 1024} MB limit.");
             }
 
             byte[]? bytes = null;
@@ -185,41 +198,55 @@ public static class MarketplaceEndpoints
             }
 
             var identity = context.MarketplaceIdentity();
-            var tags = (form["tags"].ToString() ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            try
-            {
-                var upload = new UploadRequest(
-                    ns,
-                    packageId,
-                    files.Select((upload, index) => (paths[index] ?? string.Empty, upload)).ToArray(),
-                    bytes,
-                    Optional(form["base"]),
-                    Optional(form["name"]),
-                    Optional(form["description"]));
-                var archive = await publish.PrepareUploadAsync(identity, upload, cancellationToken);
-                var request = new PublishRequest(ns, packageId, form["version"].ToString(), tags, form["changelog"].ToString(), archive);
-                var published = await publish.PublishAsync(identity, request, cancellationToken);
-                return Results.Created($"/api/packages/{ns}/{packageId}", published);
-            }
-            catch (PublishRejectedException rejected)
-            {
-                return Rejected(rejected);
-            }
-        }).WithName("Publish").DisableAntiforgery();
+            var tags = form["tags"].ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var upload = new UploadRequest(
+                ns,
+                packageId,
+                files.Select((upload, index) => (paths[index] ?? string.Empty, upload)).ToArray(),
+                bytes,
+                Optional(form["name"]),
+                Optional(form["description"]));
+            var archive = await publish.PrepareUploadAsync(identity, upload, cancellationToken);
+            var request = new PublishRequest(ns, packageId, form["version"].ToString(), tags, Optional(form["changelog"]), archive);
+            var published = await publish.PublishAsync(identity, request, cancellationToken);
+            return TypedResults.Created($"/api/packages/{ns}/{packageId}", published);
+        })
+            .WithName("Publish")
+            .DisableAntiforgery()
+            .WithMetadata(new RequestSizeLimitAttribute(MaxUploadRequestBytes))
+            .ProducesProblem(403).ProducesProblem(409).ProducesProblem(413).ProducesProblem(415).ProducesProblem(422).ProducesProblem(503);
 
-        authenticated.MapPost("/packages/{ns}/{packageId}/versions/{version}/yank", async (string ns, string packageId, string version, HttpContext context, PublishService publish, CancellationToken cancellationToken) =>
+        authenticated.MapPut("/packages/{ns}/{packageId}/versions/{version}/yank", async Task<NoContent> (string ns, string packageId, string version, HttpContext context, PublishService publish, CancellationToken cancellationToken) =>
         {
-            try
+            await publish.SetYankedAsync(context.MarketplaceIdentity(), ns, packageId, version, yanked: true, cancellationToken);
+            return TypedResults.NoContent();
+        }).WithName("Yank").ProducesProblem(403).ProducesProblem(404);
+
+        authenticated.MapDelete("/packages/{ns}/{packageId}/versions/{version}/yank", async Task<NoContent> (string ns, string packageId, string version, HttpContext context, PublishService publish, CancellationToken cancellationToken) =>
+        {
+            await publish.SetYankedAsync(context.MarketplaceIdentity(), ns, packageId, version, yanked: false, cancellationToken);
+            return TypedResults.NoContent();
+        }).WithName("Unyank").ProducesProblem(403).ProducesProblem(404);
+
+        authenticated.MapPost("/packages/{ns}/{packageId}/reports", async Task<Accepted> (string ns, string packageId, ReportRequest report, HttpContext context, MarketplaceDbContext db, AccessService access, TimeProvider time, CancellationToken cancellationToken) =>
+        {
+            var reason = report.Reason?.Trim() ?? string.Empty;
+            if (reason.Length is 0 or > MaxReportReason)
             {
-                return await publish.YankAsync(context.MarketplaceIdentity(), ns, packageId, version, cancellationToken)
-                    ? Results.NoContent()
-                    : Results.NotFound();
+                throw new ProblemException(422, $"A report needs a reason of up to {MaxReportReason:N0} characters.");
             }
-            catch (PublishRejectedException rejected)
+
+            var package = await VisiblePackageAsync(context, db, access, ns, packageId, cancellationToken);
+            db.Reports.Add(new PackageReport
             {
-                return Rejected(rejected);
-            }
-        }).WithName("Yank");
+                Account = context.MarketplaceIdentity().Account,
+                PackageId = package.CanonicalId,
+                Reason = reason,
+                CreatedAt = time.GetUtcNow().UtcDateTime,
+            });
+            await db.SaveChangesAsync(cancellationToken);
+            return TypedResults.Accepted((string?)null);
+        }).WithName("Report").ProducesProblem(404).ProducesProblem(422);
 
         authenticated.MapGet("/mine", async (HttpContext context, MarketplaceDbContext db, IOptions<AuthOptions> auth, CancellationToken cancellationToken) =>
         {
@@ -229,110 +256,52 @@ public static class MarketplaceEndpoints
                 .Where(package => namespaces.Contains(package.Namespace))
                 .OrderBy(package => package.Namespace).ThenBy(package => package.PackageId)
                 .ToListAsync(cancellationToken);
-            return Results.Ok(new MineView(
+            return TypedResults.Ok(new MineView(
                 namespaces.Select(ns => new SpaceView(ns, IdentityResolver.NamespaceDisplayName(auth.Value, identity, ns), IdentityResolver.Lane(auth.Value, ns))).ToArray(),
                 packages.Select(package => PackageView.From(package, owner: true)).ToArray()));
         }).WithName("Mine");
 
-        authenticated.MapPost("/events", async (EventsBatch batch, HttpContext context, EventsService events, CancellationToken cancellationToken) =>
+        authenticated.MapPost("/events", async Task<Accepted<EventsAccepted>> (EventsBatch batch, HttpContext context, EventsService events, CancellationToken cancellationToken) =>
         {
             if (batch.Events is null)
             {
-                return Results.Problem(statusCode: 400, title: "The body has no events array.");
+                throw new ProblemException(422, "The body has no events array.");
             }
 
-            try
-            {
-                var accepted = await events.RecordAsync(context.MarketplaceIdentity().Account, batch, cancellationToken);
-                return Results.Accepted(value: accepted);
-            }
-            catch (ArgumentException error)
-            {
-                return Results.Problem(statusCode: 400, title: error.Message);
-            }
-        }).WithName("Events");
+            var accepted = await events.RecordAsync(context.MarketplaceIdentity().Account, batch, cancellationToken);
+            return TypedResults.Accepted((string?)null, accepted);
+        }).WithName("Events").ProducesProblem(400).ProducesProblem(422);
 
         authenticated.MapGet("/stats/packages/{ns}/{packageId}", async (string ns, string packageId, HttpContext context, MarketplaceDbContext db, AccessService access, EventsService events, CancellationToken cancellationToken) =>
         {
             var package = await VisiblePackageAsync(context, db, access, ns, packageId, cancellationToken);
-            return package is null ? Results.NotFound() : Results.Ok(await events.PackageStatsAsync(package.CanonicalId, cancellationToken));
-        }).WithName("PackageStats");
-
-        authenticated.MapPost("/reports", async (ReportRequest report, HttpContext context, MarketplaceDbContext db, TimeProvider time, CancellationToken cancellationToken) =>
-        {
-            if (string.IsNullOrWhiteSpace(report.PackageId) || string.IsNullOrWhiteSpace(report.Reason) || report.Reason.Length > 2048)
-            {
-                return Results.Problem(statusCode: 422, title: "A report needs a package id and a reason up to 2048 characters.");
-            }
-
-            db.Reports.Add(new PackageReport
-            {
-                Account = context.MarketplaceIdentity().Account,
-                PackageId = report.PackageId.Trim(),
-                Reason = report.Reason.Trim(),
-                CreatedAt = time.GetUtcNow().UtcDateTime,
-            });
-            await db.SaveChangesAsync(cancellationToken);
-            return Results.Accepted();
-        }).WithName("Report");
+            return TypedResults.Ok(await events.PackageStatsAsync(package.CanonicalId, cancellationToken));
+        }).WithName("PackageStats").ProducesProblem(404);
 
         authenticated.MapGet("/access/{ns}/{packageId?}", async (string ns, string? packageId, HttpContext context, AccessService access, CancellationToken cancellationToken) =>
-        {
-            try
-            {
-                return Results.Ok(await access.GetAsync(context.MarketplaceIdentity(), ns, packageId, cancellationToken));
-            }
-            catch (PublishRejectedException rejected)
-            {
-                return Rejected(rejected);
-            }
-        }).WithName("Access");
+            TypedResults.Ok(await access.GetAsync(context.MarketplaceIdentity(), ns, packageId, cancellationToken)))
+            .WithName("Access").ProducesProblem(403).ProducesProblem(422);
 
         authenticated.MapPut("/access/{ns}/{packageId?}", async (string ns, string? packageId, AccessRequest request, HttpContext context, AccessService access, CancellationToken cancellationToken) =>
-        {
-            try
-            {
-                return Results.Ok(await access.SetAsync(context.MarketplaceIdentity(), ns, packageId, request.Users, request.Groups, cancellationToken));
-            }
-            catch (PublishRejectedException rejected)
-            {
-                return Rejected(rejected);
-            }
-        }).WithName("SetAccess");
+            TypedResults.Ok(await access.SetAsync(context.MarketplaceIdentity(), ns, packageId, request.Users, request.Groups, cancellationToken)))
+            .WithName("SetAccess").ProducesProblem(403).ProducesProblem(404).ProducesProblem(422);
 
-        var admin = api.MapGroup("/admin").RequireAuthorization(AdminPolicy);
+        var admin = authenticated.MapGroup("/admin").RequireAuthorization(AdminPolicy);
         admin.MapGet("/summary", async (EventsService events, CancellationToken cancellationToken) =>
-        {
-            var summary = await events.AdminSummaryAsync(cancellationToken);
-            return Results.Ok(new
-            {
-                activeUsers = new { day = summary.ActiveUsers1d, week = summary.ActiveUsers7d, month = summary.ActiveUsers30d },
-                publishers = summary.Publishers,
-                packages = summary.Packages,
-                clientVersions = summary.ClientVersions,
-                agentMix = summary.AgentMix,
-                topPackages = summary.TopPackages.Select(pair => new { id = pair.Id, installedBase = pair.InstalledBase }),
-                preflightFailures = summary.PreflightFailures,
-                openReports = summary.OpenReports,
-            });
-        }).WithName("AdminSummary");
+            TypedResults.Ok(await events.AdminSummaryAsync(cancellationToken))).WithName("AdminSummary");
 
         admin.MapGet("/reports", async (MarketplaceDbContext db, CancellationToken cancellationToken) =>
-            Results.Ok(await db.Reports.AsNoTracking()
+            TypedResults.Ok(await db.Reports.AsNoTracking()
                 .OrderBy(report => report.ResolvedAt != null)
                 .ThenByDescending(report => report.CreatedAt)
                 .Take(200)
+                .Select(report => new ReportView(report.Id, report.Account, report.PackageId, report.Reason, report.CreatedAt, report.ResolvedAt, report.ResolvedBy))
                 .ToListAsync(cancellationToken)))
             .WithName("AdminReports");
 
-        admin.MapPost("/reports/{id:long}/resolve", async (long id, HttpContext context, MarketplaceDbContext db, TimeProvider time, CancellationToken cancellationToken) =>
+        admin.MapPost("/reports/{id:long}/resolve", async Task<NoContent> (long id, HttpContext context, MarketplaceDbContext db, TimeProvider time, CancellationToken cancellationToken) =>
         {
-            var report = await db.Reports.FindAsync([id], cancellationToken);
-            if (report is null)
-            {
-                return Results.NotFound();
-            }
-
+            var report = await db.Reports.FindAsync([id], cancellationToken) ?? throw ProblemException.NotFound($"Report {id}");
             if (report.ResolvedAt is null)
             {
                 report.ResolvedAt = time.GetUtcNow().UtcDateTime;
@@ -340,37 +309,33 @@ public static class MarketplaceEndpoints
                 await db.SaveChangesAsync(cancellationToken);
             }
 
-            return Results.NoContent();
-        }).WithName("ResolveReport");
+            return TypedResults.NoContent();
+        }).WithName("ResolveReport").ProducesProblem(404);
 
         admin.MapGet("/reviews", async (PublishService publish, CancellationToken cancellationToken) =>
-            Results.Ok(await publish.PendingAsync(cancellationToken))).WithName("Reviews");
+            TypedResults.Ok(await publish.PendingAsync(cancellationToken))).WithName("Reviews");
 
-        admin.MapPost("/reviews/{ns}/{packageId}/{version}", async (string ns, string packageId, string version, ReviewRequest review, HttpContext context, PublishService publish, CancellationToken cancellationToken) =>
+        admin.MapPost("/reviews/{ns}/{packageId}/{version}", async Task<NoContent> (string ns, string packageId, string version, ReviewRequest review, HttpContext context, PublishService publish, CancellationToken cancellationToken) =>
         {
             if (review.Decision is not ("approve" or "reject"))
             {
-                return Results.Problem(statusCode: 422, title: "The decision is approve or reject.");
+                throw new ProblemException(422, "The decision is approve or reject.");
             }
 
-            try
-            {
-                return await publish.ReviewAsync(context.MarketplaceIdentity(), ns, packageId, version, review.Decision == "approve", review.Note, cancellationToken)
-                    ? Results.NoContent()
-                    : Results.NotFound();
-            }
-            catch (PublishRejectedException rejected)
-            {
-                return Rejected(rejected);
-            }
-        }).WithName("Review");
+            await publish.ReviewAsync(context.MarketplaceIdentity(), ns, packageId, version, review.Decision == "approve", review.Note, cancellationToken);
+            return TypedResults.NoContent();
+        }).WithName("Review").ProducesProblem(404).ProducesProblem(409).ProducesProblem(422);
 
         return app;
     }
 
-    public const int MaxFileView = 1024 * 1024;
+    public sealed record HealthView(string ServerVersion, string MinimumClientVersion, string LatestClientVersion, string Environment, IReadOnlyList<string> AuthSchemes);
 
-    public sealed record ReportRequest(string PackageId, string Reason);
+    public sealed record MeView(string Account, string Namespace, string DisplayName, IReadOnlyList<string> Namespaces, bool Admin, IReadOnlyList<string> Groups);
+
+    public sealed record ReportRequest(string? Reason);
+
+    public sealed record ReportView(long Id, string Account, string PackageId, string Reason, DateTime CreatedAt, DateTime? ResolvedAt, string? ResolvedBy);
 
     /// <summary>An admin's verdict on a pending version: <c>approve</c> or <c>reject</c> (with a note).</summary>
     public sealed record ReviewRequest(string Decision, string? Note);
@@ -421,31 +386,33 @@ public static class MarketplaceEndpoints
                 .ToArray());
     }
 
+    /// <summary>The allowlist for a namespace or package. Both lists empty makes it public.</summary>
+    public sealed record AccessRequest(string[]? Users, string[]? Groups);
+
     /// <summary>The package if the caller may see it: allowed by its access rule, and live unless the caller owns it.</summary>
-    private static async Task<Package?> VisiblePackageAsync(HttpContext context, MarketplaceDbContext db, AccessService access, string ns, string packageId, CancellationToken cancellationToken)
+    private static async Task<Package> VisiblePackageAsync(HttpContext context, MarketplaceDbContext db, AccessService access, string ns, string packageId, CancellationToken cancellationToken)
     {
         var identity = context.MarketplaceIdentity();
-        if (!AccessService.IsVisible(await access.RulesAsync(cancellationToken), identity, ns, packageId))
-        {
-            return null;
-        }
-
-        var package = await db.Packages.AsNoTracking().Include(candidate => candidate.Versions)
-            .SingleOrDefaultAsync(candidate => candidate.Namespace == ns && candidate.PackageId == packageId, cancellationToken);
-        return package is not null && (identity.Owns(ns) || PublishService.LatestVersion(package) is not null) ? package : null;
+        var package = AccessService.IsVisible(await access.RulesAsync(cancellationToken), identity, ns, packageId)
+            ? await db.Packages.AsNoTracking().Include(candidate => candidate.Versions)
+                .SingleOrDefaultAsync(candidate => candidate.Namespace == ns && candidate.PackageId == packageId, cancellationToken)
+            : null;
+        return package is not null && (identity.Owns(ns) || PublishService.LatestVersion(package) is not null)
+            ? package
+            : throw ProblemException.NotFound($"The package {ns}/{packageId}");
     }
 
-    /// <summary>A version's stored zip, if the caller may read it: owners always, others only when it is live.</summary>
-    private static async Task<byte[]?> ReadableArchiveAsync(HttpContext context, MarketplaceDbContext db, AccessService access, IArtifactStore store, string ns, string packageId, string versionText, CancellationToken cancellationToken)
+    /// <summary>A version and its stored zip, if the caller may read it: owners always, others only when it is live.</summary>
+    private static async Task<(PackageVersion Version, byte[] Bytes)> ReadableArchiveAsync(HttpContext context, MarketplaceDbContext db, AccessService access, IArtifactStore store, string ns, string packageId, string versionText, CancellationToken cancellationToken)
     {
         var package = await VisiblePackageAsync(context, db, access, ns, packageId, cancellationToken);
-        var version = package?.Versions.SingleOrDefault(candidate => candidate.Version == versionText);
+        var version = package.Versions.SingleOrDefault(candidate => candidate.Version == versionText);
         if (version is null || !(context.MarketplaceIdentity().Owns(ns) || version is { ReviewState: ReviewState.Approved, Yanked: false }))
         {
-            return null;
+            throw ProblemException.NotFound($"{ns}/{packageId} {versionText}");
         }
 
-        return await store.GetAsync(version.StoragePath, cancellationToken);
+        return (version, await store.GetAsync(version.StoragePath, cancellationToken));
     }
 
     private static string? Optional(Microsoft.Extensions.Primitives.StringValues value) =>
@@ -471,20 +438,6 @@ public static class MarketplaceEndpoints
     }
 
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
-
-    /// <summary>The allowlist for a namespace or package. Both lists empty makes it public.</summary>
-    public sealed record AccessRequest(string[]? Users, string[]? Groups);
-
-    private static IResult Rejected(PublishRejectedException rejected)
-    {
-        var extensions = new Dictionary<string, object?>();
-        if (rejected.Errors.Count > 0)
-        {
-            extensions["errors"] = rejected.Errors.Select(error => new { path = error.Path, message = error.Message }).ToArray();
-        }
-
-        return Results.Problem(statusCode: rejected.Status, title: rejected.Title, extensions: extensions);
-    }
 
     /// <summary>Serves bytes with a strong ETag and honors If-None-Match.</summary>
     private static IResult Conditional(HttpContext context, byte[] bytes, string digest, string contentType)
@@ -512,16 +465,16 @@ public static class HttpContextIdentityExtensions
 {
     private const string Key = "marketplace.identity";
 
-    public static MarketplaceIdentity MarketplaceIdentity(this HttpContext context)
+    /// <summary>Resolves the caller once per request, including the database lookup that settles their personal namespace.</summary>
+    public static async Task ResolveMarketplaceIdentityAsync(this HttpContext context)
     {
-        if (context.Items.TryGetValue(Key, out var cached) && cached is MarketplaceIdentity identity)
-        {
-            return identity;
-        }
-
         var options = context.RequestServices.GetRequiredService<IOptions<AuthOptions>>().Value;
-        identity = IdentityResolver.Resolve(context.User, options);
-        context.Items[Key] = identity;
-        return identity;
+        var db = context.RequestServices.GetRequiredService<MarketplaceDbContext>();
+        context.Items[Key] = await IdentityResolver.ClaimPersonalNamespaceAsync(IdentityResolver.Resolve(context.User, options), db, options, context.RequestAborted);
     }
+
+    public static MarketplaceIdentity MarketplaceIdentity(this HttpContext context) =>
+        context.Items.TryGetValue(Key, out var cached) && cached is MarketplaceIdentity identity
+            ? identity
+            : throw new InvalidOperationException("The caller's identity is resolved by the authenticated route group's filter, which did not run.");
 }

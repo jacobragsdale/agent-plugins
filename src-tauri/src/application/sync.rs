@@ -1,13 +1,24 @@
+use super::items::{extend_installs_to_new_agents, repair_missing_installs};
 use super::{current_epoch_seconds, run_blocking, LoadedRepository, LoadedSource, RuntimeState};
 use crate::agent_profiles;
-use crate::app_state::{AppState, AutoUpdateReport, ItemFailure, ItemReference, SourceStatus};
+use crate::app_state::{
+    AppState, AutoUpdateReport, Connectivity, ItemFailure, ItemReference, SourceStatus,
+};
+use crate::artifact;
 use crate::install::{self, ItemStatus};
 use crate::ledger::InstallationRecord;
 use crate::locator::{default_catalog_locator, Locator};
 use crate::paths::SystemPaths;
-use crate::source::{self, ConfiguredRepository, ConfiguredSource, SourcesConfig};
+use crate::repository::ListedSource;
+use crate::source::{
+    self, ConfiguredRepository, ConfiguredSource, RepositoryCandidate, SourceCandidate,
+    SourcesConfig,
+};
 use crate::sources::{cache_base_dir, config_base_dir};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 pub(crate) async fn load_cached_app_state(
     runtime: &RuntimeState,
@@ -23,135 +34,433 @@ pub(crate) async fn load_cached_app_state(
 }
 
 /// The state the window reloads after every operation. It carries what the
-/// last sync learned - the identity, the preflight, and the marketplace
-/// index - because dropping those would blank the header and the badges.
-fn cached_app_state(
-    paths: &SystemPaths,
-    cache: &std::path::Path,
-    config: &std::path::Path,
-) -> Result<AppState, String> {
-    retire_unsupported_legacy_installs(paths)?;
+/// last sync learned - the identity, the preflight, the marketplace index, and
+/// each source's refresh result - because dropping those would blank the
+/// header and the badges and hide an outage.
+fn cached_app_state(paths: &SystemPaths, cache: &Path, config: &Path) -> Result<AppState, String> {
+    retire_unsupported_legacy_installs(paths);
     agent_profiles::apply_detected_defaults(paths)?;
-    let checked = read_last_sync(cache).unwrap_or_else(current_epoch_seconds);
-    let config_file = source::read_sources_config(config)?;
-    let repositories = config_file
-        .repositories
-        .into_iter()
-        .map(
-            |definition| match source::load_current_repository(cache, &definition) {
-                Ok(snapshot) => LoadedRepository {
-                    definition,
-                    snapshot,
-                    status: SourceStatus::Cached,
-                    refresh_failed: false,
-                    message: None,
-                },
-                Err(message) => LoadedRepository {
-                    definition,
-                    snapshot: None,
-                    status: SourceStatus::Error,
-                    refresh_failed: true,
-                    message: Some(message),
-                },
-            },
-        )
-        .collect::<Vec<_>>();
-    let loaded = config_file
-        .sources
-        .into_iter()
-        .map(
-            |definition| match source::load_current(cache, &definition) {
-                Ok(snapshot) => LoadedSource {
-                    definition,
-                    snapshot,
-                    status: SourceStatus::Cached,
-                    refresh_failed: false,
-                    message: None,
-                },
-                Err(message) => LoadedSource {
-                    definition,
-                    snapshot: None,
-                    status: SourceStatus::Error,
-                    refresh_failed: true,
-                    message: Some(message),
-                },
-            },
-        )
-        .collect::<Vec<_>>();
-    let mut state = super::project::build_app_state(
-        paths,
-        &repositories,
-        &loaded,
-        checked,
-        AutoUpdateReport::default(),
-        None,
-    )?;
-    super::project::apply_cached_marketplace(&mut state, cache);
-    Ok(state)
+    super::project::cached_state(paths, cache, config)
 }
 
-/// Re-runs the preflight on demand against the cached state.
+/// Re-runs the preflight on demand against the cached state. The ledger is
+/// read under `operation_lock`, so its journal recovery can never run in the
+/// middle of an install; the server checks run after the lock is released.
 pub(crate) async fn run_preflight(
     runtime: &RuntimeState,
 ) -> Result<crate::preflight::PreflightReport, String> {
     let _sync_guard = runtime.sync_lock.lock().await;
-    run_blocking("Preflight", || {
-        agent_profiles::clear_detection_cache();
-        let paths = SystemPaths::from_system()?;
+    let (paths, state, ledger_error) = {
+        let _operation_guard = runtime.operation_lock.lock().await;
+        run_blocking("Preflight", || {
+            agent_profiles::clear_detection_cache();
+            let paths = SystemPaths::from_system()?;
+            let state = super::project::cached_state_now()?;
+            let ledger_error = crate::executor::read_ledger(&paths).err();
+            Ok((paths, state, ledger_error))
+        })
+        .await?
+    };
+    run_blocking("Preflight", move || {
         let cache = cache_base_dir()?;
-        let state = super::project::cached_state_now()?;
-        let ledger_error = crate::executor::read_ledger(&paths).err();
-        let catalog_age = state
-            .repositories
-            .iter()
-            .find(|repository| {
-                crate::locator::default_catalog_locator()
-                    .ok()
-                    .flatten()
-                    .is_some_and(|default| {
-                        Locator::parse(&repository.url).ok().as_ref() == Some(&default)
-                    })
-            })
-            .and_then(|repository| repository.revision.as_ref().map(|_| 0));
         let (report, findings) = crate::preflight::run(&crate::preflight::PreflightInput {
             paths: &paths,
             startup: crate::STARTUP_REPORT.get(),
             profiles: &state.agent_profiles,
             items: &state.items,
-            catalog_age_seconds: catalog_age,
+            catalog_age_seconds: catalog_age(&read_health(&cache)),
             ledger_error,
         });
         report.write_cache(&cache);
-        let identity = findings
-            .identity
-            .map(|me| crate::app_state::MarketplaceIdentity {
-                account: me.account,
-                namespace: me.namespace,
-                display_name: me.display_name,
-                admin: me.admin,
-                auth_mode: report.auth_mode.clone(),
-            });
-        super::project::write_identity_cache(&cache, identity.as_ref());
+        super::project::remember_identity(&cache, &report, findings.identity);
         Ok(report)
     })
     .await
 }
 
-pub(crate) async fn sync_app_state(runtime: &RuntimeState) -> Result<AppState, String> {
-    let _sync_guard = runtime.sync_lock.lock().await;
-    let _operation_guard = runtime.operation_lock.lock().await;
-    run_blocking("Source synchronization", synchronize).await
+static SYNC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static LAST_PASS_FINISHED: AtomicU64 = AtomicU64::new(0);
+static FAILED_PASSES: AtomicU32 = AtomicU32::new(0);
+
+/// True while a sync runs, so a cached state can say a fresher one is coming.
+pub(super) fn sync_in_progress() -> bool {
+    SYNC_IN_PROGRESS.load(Ordering::SeqCst)
 }
 
-pub(super) fn synchronize() -> Result<AppState, String> {
-    // A sync is the app looking at the machine again, agents included.
-    agent_profiles::clear_detection_cache();
+/// When the last sync finished (epoch seconds, 0 for never) and how many
+/// passes in a row have failed, for the scheduler's retry ladder.
+pub(super) fn pass_record() -> (u64, u32) {
+    (
+        LAST_PASS_FINISHED.load(Ordering::SeqCst),
+        FAILED_PASSES.load(Ordering::SeqCst),
+    )
+}
+
+struct InProgress;
+
+impl Drop for InProgress {
+    fn drop(&mut self) {
+        SYNC_IN_PROGRESS.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(crate) async fn sync_app_state(runtime: &RuntimeState) -> Result<AppState, String> {
+    let _sync_guard = runtime.sync_lock.lock().await;
+    SYNC_IN_PROGRESS.store(true, Ordering::SeqCst);
+    let _in_progress = InProgress;
+    let result = synchronize(runtime).await;
+    if result
+        .as_ref()
+        .is_ok_and(|state| state.connectivity == Connectivity::Online)
+    {
+        FAILED_PASSES.store(0, Ordering::SeqCst);
+    } else {
+        FAILED_PASSES.fetch_add(1, Ordering::SeqCst);
+    }
+    LAST_PASS_FINISHED.store(current_epoch_seconds(), Ordering::SeqCst);
+    result
+}
+
+/// Network I/O runs under `sync_lock` alone, so installs and removals stay
+/// responsive while a server is slow. `operation_lock` is held only to read the
+/// configuration, then to activate what was fetched and reconcile the installed
+/// packages - the steps that must agree with the ledger.
+async fn synchronize(runtime: &RuntimeState) -> Result<AppState, String> {
+    let config = {
+        let _operation_guard = runtime.operation_lock.lock().await;
+        run_blocking("Source configuration", || {
+            source::read_sources_config(&config_base_dir()?)
+        })
+        .await?
+    };
+    let fetched = run_blocking("Source download", move || {
+        // A sync is the app looking at the machine again, agents included.
+        agent_profiles::clear_detection_cache();
+        Ok(fetch_all(&cache_base_dir()?, config))
+    })
+    .await?;
+    let (state, marketplace) = {
+        let _operation_guard = runtime.operation_lock.lock().await;
+        run_blocking("Source activation", move || apply_fetched(fetched)).await?
+    };
+    run_blocking("Marketplace check", move || {
+        Ok(enrich_with_marketplace(state, marketplace))
+    })
+    .await
+}
+
+/// What one fetch of a catalog or source produced, before anything is activated.
+enum Fetch<C> {
+    Ready(C),
+    /// The artifact no longer exists at its URL (HTTP 404 or 410).
+    Gone,
+    /// The server was not reached, timed out, or was overloaded; try again later.
+    Unreachable(String),
+    Failed(String),
+}
+
+impl<C> Fetch<C> {
+    fn from_result(result: Result<C, String>) -> Self {
+        match result {
+            Ok(candidate) => Self::Ready(candidate),
+            Err(message) if artifact::is_gone(&message) => Self::Gone,
+            Err(message) if artifact::is_transient(&message) => Self::Unreachable(message),
+            Err(message) => Self::Failed(message),
+        }
+    }
+}
+
+/// Hosts that could not be connected to during this pass. Later fetches from
+/// the same host are skipped, and marked stale, instead of each waiting out
+/// its own timeouts.
+#[derive(Default)]
+struct DeadHosts(std::sync::Mutex<BTreeSet<String>>);
+
+impl DeadHosts {
+    fn host(url: &str) -> String {
+        url::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    fn contains(&self, url: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(&Self::host(url))
+    }
+
+    fn fetch<C>(&self, url: &str, fetch: impl FnOnce() -> Result<C, String>) -> Fetch<C> {
+        let host = Self::host(url);
+        if self.contains(url) {
+            return Fetch::Unreachable(format!(
+                "Skipped this check because {host} could not be reached. The app tries again soon."
+            ));
+        }
+        let result = fetch();
+        if let Err(message) = &result {
+            if artifact::is_connect_failure(message) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .insert(host);
+            }
+        }
+        Fetch::from_result(result)
+    }
+}
+
+/// Everything the network part of a sync produced.
+struct Fetched {
+    cache: PathBuf,
+    catalog_message: Option<String>,
+    /// The default catalog when it is not configured yet.
+    default_catalog: Option<Fetch<RepositoryCandidate>>,
+    repositories: Vec<(ConfiguredRepository, Fetch<RepositoryCandidate>)>,
+    /// Sources the marketplace catalog lists that this machine has not added.
+    subscribed: Vec<(String, Fetch<SourceCandidate>)>,
+    sources: Vec<(ConfiguredSource, Fetch<SourceCandidate>)>,
+    dead_hosts: DeadHosts,
+}
+
+impl Fetched {
+    /// Online when every fetch reached its server, offline when none did.
+    fn connectivity(&self) -> Connectivity {
+        fn unreachable<C>(fetch: &Fetch<C>) -> bool {
+            matches!(fetch, Fetch::Unreachable(_))
+        }
+        let outcomes = self
+            .default_catalog
+            .iter()
+            .map(unreachable)
+            .chain(
+                self.repositories
+                    .iter()
+                    .map(|(_, fetch)| unreachable(fetch)),
+            )
+            .chain(self.subscribed.iter().map(|(_, fetch)| unreachable(fetch)))
+            .chain(self.sources.iter().map(|(_, fetch)| unreachable(fetch)))
+            .collect::<Vec<_>>();
+        let unreachable = outcomes.iter().filter(|unreachable| **unreachable).count();
+        if unreachable == 0 {
+            Connectivity::Online
+        } else if unreachable == outcomes.len() {
+            Connectivity::Offline
+        } else {
+            Connectivity::Degraded
+        }
+    }
+}
+
+/// Fetches every catalog and source, a few at a time. Nothing is activated
+/// here, so this runs without `operation_lock`.
+fn fetch_all(cache: &Path, config: SourcesConfig) -> Fetched {
+    let dead_hosts = DeadHosts::default();
+    let (default, catalog_message) = match default_catalog_locator() {
+        Ok(locator) => (locator, None),
+        Err(message) => (None, Some(message)),
+    };
+    let default_catalog = default
+        .as_ref()
+        .filter(|locator| {
+            !config
+                .repositories
+                .iter()
+                .any(|repository| repository.locator.same_identity(locator))
+        })
+        .map(|locator| {
+            dead_hosts.fetch(locator.url(), || {
+                source::prepare_new_repository(locator, cache)
+            })
+        });
+    let repositories = crate::parallel::map(&config.repositories, |definition| {
+        dead_hosts.fetch(definition.url(), || prepare_repository(cache, definition))
+    });
+    let repositories = config
+        .repositories
+        .into_iter()
+        .zip(repositories)
+        .collect::<Vec<_>>();
+    let listings = default
+        .as_ref()
+        .and_then(|default| catalog_listing(cache, default, &default_catalog, &repositories))
+        .map(|(repository_key, listed)| {
+            listed
+                .into_iter()
+                .filter_map(|entry| {
+                    let locator = entry.locator().ok()?;
+                    let configured = config.sources.iter().any(|source| {
+                        source.locator.same_identity(&locator)
+                            || entry.source_id.as_deref() == Some(source.source_id.as_str())
+                    });
+                    (!configured).then(|| (entry, locator, repository_key.clone()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let subscribed = crate::parallel::map(&listings, |(entry, locator, repository_key)| {
+        let fetch = dead_hosts.fetch(locator.url(), || {
+            source::prepare_new_source(
+                locator,
+                cache,
+                Some(repository_key.clone()),
+                entry.source_id.as_deref(),
+            )
+        });
+        (entry.name.clone(), fetch)
+    });
+    let sources = crate::parallel::map(&config.sources, |definition| {
+        dead_hosts.fetch(definition.url(), || prepare_source(cache, definition))
+    });
+    Fetched {
+        cache: cache.to_path_buf(),
+        catalog_message,
+        default_catalog,
+        repositories,
+        subscribed,
+        sources: config.sources.into_iter().zip(sources).collect(),
+        dead_hosts,
+    }
+}
+
+/// The sources the default catalog lists, from this pass's fetch when it
+/// produced a usable catalog, otherwise from the saved copy.
+fn catalog_listing(
+    cache: &Path,
+    default: &Locator,
+    new_default: &Option<Fetch<RepositoryCandidate>>,
+    repositories: &[(ConfiguredRepository, Fetch<RepositoryCandidate>)],
+) -> Option<(String, Vec<ListedSource>)> {
+    if let Some(Fetch::Ready(candidate)) = new_default {
+        return Some((
+            candidate.definition.repository_key.clone(),
+            candidate.manifest.canonical_sources().ok()?,
+        ));
+    }
+    let (definition, fetch) = repositories
+        .iter()
+        .find(|(definition, _)| definition.locator.same_identity(default))?;
+    let listed = match fetch {
+        Fetch::Ready(candidate)
+            if candidate.definition.repository_id == definition.repository_id =>
+        {
+            candidate.manifest.canonical_sources().ok()?
+        }
+        _ => source::load_current_repository(cache, definition)
+            .ok()??
+            .manifest
+            .canonical_sources()
+            .ok()?,
+    };
+    Some((definition.repository_key.clone(), listed))
+}
+
+/// Prepares a catalog refresh; an unreadable cache is wiped and fetched again.
+fn prepare_repository(
+    cache: &Path,
+    definition: &ConfiguredRepository,
+) -> Result<RepositoryCandidate, String> {
+    source::prepare_repository_refresh(definition, cache).or_else(|message| {
+        if !source::is_corrupt_cache_error(&message) {
+            return Err(message);
+        }
+        eprintln!(
+            "Wiping the unreadable cache of the catalog {} and refreshing it again: {message}",
+            definition.name
+        );
+        source::remove_repository_cache(cache, &definition.repository_key)?;
+        source::prepare_repository_refresh(definition, cache)
+    })
+}
+
+/// Prepares a source refresh; an unreadable cache is wiped and fetched again.
+fn prepare_source(cache: &Path, definition: &ConfiguredSource) -> Result<SourceCandidate, String> {
+    source::prepare_refresh(definition, cache).or_else(|message| {
+        if !source::is_corrupt_cache_error(&message) {
+            return Err(message);
+        }
+        eprintln!(
+            "Wiping the unreadable cache of the source {} and refreshing it again: {message}",
+            definition.name
+        );
+        source::remove_source_cache(cache, &definition.source_key)?;
+        source::prepare_refresh(definition, cache)
+    })
+}
+
+/// What the marketplace step after activation needs; it runs without
+/// `operation_lock`, so everything that reads the ledger is gathered first.
+struct MarketplaceCheck {
+    paths: SystemPaths,
+    cache: PathBuf,
+    ledger_error: Option<String>,
+    agents: Vec<String>,
+    /// Updated package ids with the marketplace version they had before.
+    updates: Vec<(String, Option<String>)>,
+    catalog_age_seconds: Option<u64>,
+    marketplace_unreachable: bool,
+}
+
+/// Activates what was fetched and reconciles installed packages. Runs under
+/// `operation_lock`. The configuration is read again, so a source added or
+/// removed while the network part ran is kept or stays removed.
+fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), String> {
     let paths = SystemPaths::from_system()?;
-    let cache = cache_base_dir()?;
-    let config = config_base_dir()?;
-    let checked = current_epoch_seconds();
-    let mut config_file = source::read_sources_config(&config)?;
-    let mut catalog_message = ensure_default_catalog(&cache, &mut config_file.repositories);
+    let config_dir = config_base_dir()?;
+    let cache = fetched.cache.clone();
+    let now = current_epoch_seconds();
+    let connectivity = fetched.connectivity();
+    let marketplace_unreachable =
+        crate::locator::marketplace_base_url().is_some_and(|url| fetched.dead_hosts.contains(url));
+    let mut health = read_health(&cache);
+    let mut config = source::read_sources_config(&config_dir)?;
+    let mut messages = fetched.catalog_message.into_iter().collect::<Vec<_>>();
+    let mut fetched_repositories = fetched.repositories;
+    match fetched.default_catalog {
+        Some(Fetch::Ready(candidate))
+            if !config.repositories.iter().any(|repository| {
+                repository
+                    .locator
+                    .same_identity(&candidate.definition.locator)
+            }) =>
+        {
+            config.repositories.push(candidate.definition.clone());
+            fetched_repositories.push((candidate.definition.clone(), Fetch::Ready(candidate)));
+        }
+        Some(Fetch::Ready(candidate)) => source::discard_repository(&candidate),
+        Some(Fetch::Failed(message) | Fetch::Unreachable(message)) => messages.push(message),
+        Some(Fetch::Gone) => {
+            messages.push("The marketplace catalog was not found on the server.".to_string())
+        }
+        None => {}
+    }
+    let mut fetched_sources = fetched.sources;
+    let mut problems = Vec::new();
+    for (name, fetch) in fetched.subscribed {
+        match fetch {
+            Fetch::Ready(candidate)
+                if !config.sources.iter().any(|source| {
+                    source.locator.same_identity(&candidate.definition.locator)
+                        || source.source_id == candidate.definition.source_id
+                }) =>
+            {
+                config.sources.push(candidate.definition.clone());
+                fetched_sources.push((candidate.definition.clone(), Fetch::Ready(candidate)));
+            }
+            Fetch::Ready(candidate) => source::discard_candidate(&candidate),
+            Fetch::Failed(message) => problems.push(format!("{name}: {message}")),
+            Fetch::Gone => problems.push(format!("{name}: it was not found on the server.")),
+            // Unreachable listings are added by a later sync.
+            Fetch::Unreachable(_) => {}
+        }
+    }
+    if !problems.is_empty() {
+        messages.push(format!(
+            "Some marketplace sources could not be added: {}",
+            problems.join(" ")
+        ));
+    }
     let installed_keys = crate::executor::read_ledger(&paths)
         .map(|ledger| {
             ledger
@@ -161,68 +470,106 @@ pub(super) fn synchronize() -> Result<AppState, String> {
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
-    let (updated_repositories, loaded_repositories, retired_repositories) =
-        refresh_repositories(&cache, config_file.repositories);
-    if let Some(message) =
-        subscribe_marketplace_sources(&cache, &loaded_repositories, &mut config_file.sources)
-    {
-        catalog_message = Some(match catalog_message {
-            Some(existing) => format!("{existing} {message}"),
-            None => message,
-        });
-    }
-    let (updated_sources, loaded_sources, retired_sources) =
-        refresh_sources(&cache, config_file.sources, &installed_keys);
-    if let Some(message) = retired_message(&retired_repositories, &retired_sources) {
-        catalog_message = Some(match catalog_message {
-            Some(existing) => format!("{existing} {message}"),
-            None => message,
-        });
-    }
+    let (repositories, loaded_repositories, retired_repositories) = apply_repositories(
+        &cache,
+        &mut health,
+        now,
+        config.repositories,
+        fetched_repositories,
+    );
+    let (mut sources, loaded_sources, retired_sources) = apply_sources(
+        &cache,
+        &mut health,
+        now,
+        config.sources,
+        fetched_sources,
+        &installed_keys,
+    );
+    messages.extend(retired_message(&retired_repositories, &retired_sources));
+    sources.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.source_id.cmp(&right.source_id))
+    });
+    let configured_keys = repositories
+        .iter()
+        .map(|repository| repository.repository_key.clone())
+        .chain(sources.iter().map(|source| source.source_key.clone()))
+        .collect::<BTreeSet<_>>();
     source::write_sources_config(
-        &config,
+        &config_dir,
         &SourcesConfig {
-            repositories: updated_repositories,
-            sources: updated_sources,
+            repositories,
+            sources,
         },
     )?;
-    retire_unsupported_legacy_installs(&paths)?;
+    health
+        .entries
+        .retain(|key, _| configured_keys.contains(key));
+    health.connectivity = connectivity;
+    write_health(&cache, &health);
+
+    retire_unsupported_legacy_installs(&paths);
     agent_profiles::apply_detected_defaults(&paths)?;
-    let report = reconcile_installed_items(&paths, &loaded_sources)?;
-    let updated_ids = report
+    let previous_index = crate::marketplace::read_cached_index(&cache);
+    let mut report = reconcile_installed_items(&paths, &loaded_sources)?;
+    match repair_missing_installs() {
+        Ok(names) => report.repaired_items = names,
+        Err(error) => eprintln!("Could not check installed packages for missing files: {error}"),
+    }
+    match extend_installs_to_new_agents() {
+        Ok(names) => report.extended_items = names,
+        Err(error) => eprintln!("Could not add installed packages to newly found agents: {error}"),
+    }
+    let updates = report
         .updated_items
         .iter()
-        .map(|item| item.id.clone())
-        .collect::<Vec<_>>();
+        .map(|item| {
+            let from = previous_index
+                .as_ref()
+                .and_then(|index| index.package(&item.id))
+                .map(|package| package.version.clone());
+            (item.id.clone(), from)
+        })
+        .collect();
+    // "Last checked" is the last pass that reached the servers.
+    let checked = if connectivity == Connectivity::Offline {
+        read_last_sync(&cache).unwrap_or(0)
+    } else {
+        write_last_sync(&cache, now);
+        now
+    };
     let mut state = super::project::build_app_state(
         &paths,
         &loaded_repositories,
         &loaded_sources,
         checked,
         report,
-        catalog_message,
+        (!messages.is_empty()).then(|| messages.join(" ")),
     )?;
-    enrich_with_marketplace(
-        &paths,
-        &cache,
-        &loaded_repositories,
-        &mut state,
-        &updated_ids,
-    );
-    write_last_sync(&cache, checked);
-    Ok(state)
+    state.connectivity = connectivity;
+    let check = MarketplaceCheck {
+        ledger_error: crate::executor::read_ledger(&paths).err(),
+        agents: super::items::enabled_agent_ids(&paths),
+        paths,
+        updates,
+        catalog_age_seconds: catalog_age(&health),
+        marketplace_unreachable,
+        cache,
+    };
+    Ok((state, check))
 }
 
 const LAST_SYNC_FILE: &str = "last-sync.json";
 
 /// The header says when the app last reached the sources. Cached loads happen
 /// after every operation, so they read this instead of claiming "just now".
-fn write_last_sync(cache: &std::path::Path, checked: u64) {
+fn write_last_sync(cache: &Path, checked: u64) {
     let _ = std::fs::create_dir_all(cache);
     let _ = std::fs::write(cache.join(LAST_SYNC_FILE), checked.to_string());
 }
 
-fn read_last_sync(cache: &std::path::Path) -> Option<u64> {
+pub(super) fn read_last_sync(cache: &Path) -> Option<u64> {
     std::fs::read_to_string(cache.join(LAST_SYNC_FILE))
         .ok()?
         .trim()
@@ -230,124 +577,131 @@ fn read_last_sync(cache: &std::path::Path) -> Option<u64> {
         .ok()
 }
 
-/// Adds every source the marketplace catalog lists that is not configured yet.
-/// The catalog is the authority: browsing the marketplace needs no Manage
-/// Sources step. Returns a message when some listed source could not be added.
-pub(super) fn subscribe_marketplace_sources(
-    cache: &std::path::Path,
-    repositories: &[LoadedRepository],
-    sources: &mut Vec<ConfiguredSource>,
-) -> Option<String> {
-    let default = crate::locator::default_catalog_locator().ok().flatten()?;
-    let repository = repositories
-        .iter()
-        .find(|repository| repository.definition.locator.same_identity(&default))?;
-    let snapshot = repository.snapshot.as_ref()?;
-    let listed = snapshot.manifest.canonical_sources().ok()?;
-    let mut problems = Vec::new();
-    let mut added = false;
-    for entry in listed {
-        let Ok(locator) = entry.locator() else {
-            continue;
-        };
-        let configured = sources.iter().any(|source| {
-            source.locator.same_identity(&locator)
-                || entry.source_id.as_deref() == Some(source.source_id.as_str())
-        });
-        if configured {
-            continue;
+const HEALTH_FILE: &str = "sync-health.json";
+/// A source is retired after this many "gone" answers in a row...
+const GONE_RETIRE_COUNT: u32 = 3;
+/// ...spanning at least this long (decision D2).
+const GONE_RETIRE_SECONDS: u64 = 3 * 86_400;
+
+/// What the syncs learned about each catalog and source, keyed by
+/// `repositoryKey` or `sourceKey`. Cached loads show it; the gone grace period
+/// counts with it.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SyncHealth {
+    #[serde(default)]
+    pub(super) connectivity: Connectivity,
+    #[serde(default)]
+    pub(super) entries: BTreeMap<String, HealthEntry>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct HealthEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) last_success_at: Option<u64>,
+    /// The last sync's result, shown again by cached loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) status: Option<SourceStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gone_since: Option<u64>,
+    #[serde(default)]
+    gone_count: u32,
+}
+
+impl HealthEntry {
+    fn record(&mut self, status: SourceStatus, message: Option<&String>, now: u64) {
+        if status == SourceStatus::Fresh {
+            self.last_success_at = Some(now);
+            self.gone_since = None;
+            self.gone_count = 0;
         }
-        match source::prepare_new_source(
-            &locator,
-            cache,
-            Some(repository.definition.repository_key.clone()),
-            entry.source_id.as_deref(),
-        ) {
-            Ok(candidate) => match source::activate_candidate(cache, candidate) {
-                Ok(activated) => {
-                    sources.push(activated.definition);
-                    added = true;
-                }
-                Err(message) => problems.push(format!("{}: {message}", entry.name)),
-            },
-            Err(message) => problems.push(format!("{}: {message}", entry.name)),
+        self.status = Some(status);
+        self.message = message.cloned();
+    }
+
+    /// The server answered with something other than "gone", so the next
+    /// "gone" starts a new streak. Unreachable answers leave it alone.
+    fn not_gone(&mut self) {
+        self.gone_since = None;
+        self.gone_count = 0;
+    }
+
+    /// Counts one more "gone" answer; true once there have been three in a
+    /// row spanning at least three days.
+    fn gone(&mut self, now: u64) -> bool {
+        self.gone_count += 1;
+        let since = *self.gone_since.get_or_insert(now);
+        self.gone_count >= GONE_RETIRE_COUNT && now.saturating_sub(since) >= GONE_RETIRE_SECONDS
+    }
+
+    fn gone_message(&self, name: &str, retires: bool) -> String {
+        let since = crate::marketplace::rfc3339_from_epoch(self.gone_since.unwrap_or_default());
+        let date = since.get(..10).unwrap_or(&since);
+        if retires {
+            format!(
+                "{name} was not found on the server (first noticed {date}). The saved copy stays available, and it is removed if it is still missing after 3 days."
+            )
+        } else {
+            format!(
+                "{name} was not found on the server (first noticed {date}). The saved copy stays available."
+            )
         }
     }
-    if added {
-        sources.sort_by(|left, right| {
-            left.name
-                .cmp(&right.name)
-                .then_with(|| left.source_id.cmp(&right.source_id))
-        });
+}
+
+pub(super) fn read_health(cache: &Path) -> SyncHealth {
+    std::fs::read(cache.join(HEALTH_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn write_health(cache: &Path, health: &SyncHealth) {
+    if let Ok(json) = serde_json::to_vec_pretty(health) {
+        let _ = std::fs::create_dir_all(cache);
+        let _ = std::fs::write(cache.join(HEALTH_FILE), json);
     }
-    (!problems.is_empty()).then(|| {
-        format!(
-            "Some marketplace sources could not be added: {}",
-            problems.join(" ")
-        )
-    })
+}
+
+/// Seconds since the default catalog was last fetched, for the preflight.
+fn catalog_age(health: &SyncHealth) -> Option<u64> {
+    let key = default_catalog_locator().ok().flatten()?.repository_key();
+    let at = health.entries.get(&key)?.last_success_at?;
+    Some(current_epoch_seconds().saturating_sub(at))
 }
 
 /// Joins the marketplace index, runs the preflight, and reports the heartbeat.
 /// Every step is best-effort: an unreachable server leaves the cached catalog
 /// and installed packages usable.
-fn enrich_with_marketplace(
-    paths: &SystemPaths,
-    cache: &std::path::Path,
-    repositories: &[LoadedRepository],
-    state: &mut AppState,
-    updated_ids: &[String],
-) {
+fn enrich_with_marketplace(mut state: AppState, check: MarketplaceCheck) -> AppState {
     let Some(base_url) = crate::locator::marketplace_base_url() else {
-        return;
+        return state;
     };
     state.marketplace_url = Some(base_url.to_string());
-    let index = crate::marketplace::index_with_cache(cache);
+    let index = if check.marketplace_unreachable {
+        crate::marketplace::read_cached_index(&check.cache)
+    } else {
+        crate::marketplace::index_with_cache(&check.cache)
+    };
     if let Some(index) = &index {
         super::project::apply_index(&mut state.items, index);
     }
-    let catalog_age = crate::locator::default_catalog_locator()
-        .ok()
-        .flatten()
-        .and_then(|default| {
-            repositories
-                .iter()
-                .find(|repository| repository.definition.locator.same_identity(&default))
-        })
-        .and_then(|repository| {
-            repository.snapshot.as_ref().map(|_| {
-                if repository.refresh_failed {
-                    25 * 60 * 60
-                } else {
-                    0
-                }
-            })
-        });
-    let ledger_error = crate::executor::read_ledger(paths).err();
     let (report, findings) = crate::preflight::run(&crate::preflight::PreflightInput {
-        paths,
+        paths: &check.paths,
         startup: crate::STARTUP_REPORT.get(),
         profiles: &state.agent_profiles,
         items: &state.items,
-        catalog_age_seconds: catalog_age,
-        ledger_error,
+        catalog_age_seconds: check.catalog_age_seconds,
+        ledger_error: check.ledger_error,
     });
-    report.write_cache(cache);
-    let identity = findings
-        .identity
-        .map(|me| crate::app_state::MarketplaceIdentity {
-            account: me.account,
-            namespace: me.namespace,
-            display_name: me.display_name,
-            admin: me.admin,
-            auth_mode: report.auth_mode.clone(),
-        });
-    super::project::write_identity_cache(cache, identity.as_ref());
-    state.identity = identity;
+    report.write_cache(&check.cache);
+    state.identity = super::project::remember_identity(&check.cache, &report, findings.identity);
     let checks = report.status_map();
     state.preflight = Some(report);
 
-    let agents = super::items::enabled_agent_ids(paths);
     let installed = state
         .items
         .iter()
@@ -355,50 +709,24 @@ fn enrich_with_marketplace(
         .map(|item| item.id.clone())
         .collect::<Vec<_>>();
     let mut events = vec![crate::marketplace::ClientEvent::heartbeat(
-        agents.clone(),
+        check.agents.clone(),
         installed,
         checks,
     )];
-    for id in updated_ids {
+    for (id, from_version) in check.updates {
         let version = index
             .as_ref()
-            .and_then(|index| index.package(id))
+            .and_then(|index| index.package(&id))
             .map(|package| package.version.clone());
         events.push(crate::marketplace::ClientEvent::update(
-            id,
-            None,
+            &id,
+            from_version,
             version,
-            agents.clone(),
+            check.agents.clone(),
         ));
     }
     crate::marketplace::send_events_background(events);
-}
-
-pub(super) fn ensure_default_catalog(
-    cache: &std::path::Path,
-    repositories: &mut Vec<ConfiguredRepository>,
-) -> Option<String> {
-    let locator = match default_catalog_locator() {
-        Ok(Some(locator)) => locator,
-        Ok(None) => return None,
-        Err(message) => return Some(message),
-    };
-    if repositories
-        .iter()
-        .any(|repository| repository.locator.same_identity(&locator))
-    {
-        return None;
-    }
-    match source::prepare_new_repository(&locator, cache) {
-        Ok(candidate) => match source::activate_repository(cache, candidate) {
-            Ok(snapshot) => {
-                repositories.push(snapshot.definition);
-                None
-            }
-            Err(message) => Some(message),
-        },
-        Err(message) => Some(message),
-    }
+    state
 }
 
 /// One line naming what sync retired because it no longer exists upstream.
@@ -421,82 +749,83 @@ fn retired_message(repositories: &[String], sources: &[String]) -> Option<String
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-/// Refreshes every configured catalog. A catalog whose URL no longer exists
-/// (HTTP 404/410) is retired: dropped from the configuration and its cache
-/// wiped, so a decommissioned host never surfaces as a persistent error. The
-/// returned names are the retired catalogs.
-pub(super) fn refresh_repositories(
-    cache: &std::path::Path,
+/// Takes the fetch result for the definition `matches` picks, if any.
+fn take_fetch<D, C>(
+    fetched: &mut Vec<(D, Fetch<C>)>,
+    matches: impl Fn(&D) -> bool,
+) -> Option<Fetch<C>> {
+    let index = fetched
+        .iter()
+        .position(|(definition, _)| matches(definition))?;
+    Some(fetched.swap_remove(index).1)
+}
+
+/// Activates each catalog's fetch. A catalog that is not found keeps its
+/// saved copy until it has been gone three times over three days; then it is
+/// retired - dropped from the configuration and its cache wiped - unless it is
+/// the default catalog. The returned names are the retired catalogs.
+fn apply_repositories(
+    cache: &Path,
+    health: &mut SyncHealth,
+    now: u64,
     definitions: Vec<ConfiguredRepository>,
+    mut fetched: Vec<(ConfiguredRepository, Fetch<RepositoryCandidate>)>,
 ) -> (
     Vec<ConfiguredRepository>,
     Vec<LoadedRepository>,
     Vec<String>,
 ) {
+    let default = default_catalog_locator().ok().flatten();
     let mut updated = Vec::with_capacity(definitions.len());
     let mut loaded = Vec::with_capacity(definitions.len());
     let mut retired = Vec::new();
     for definition in definitions {
-        let prepared = source::prepare_repository_refresh(&definition, cache).or_else(|message| {
-            if !source::is_corrupt_cache_error(&message) {
-                return Err(message);
-            }
-            eprintln!(
-                "Wiping the unreadable cache of the catalog {} and refreshing it again: {message}",
-                definition.name
-            );
-            source::remove_repository_cache(cache, &definition.repository_key)?;
-            source::prepare_repository_refresh(&definition, cache)
+        let entry = health
+            .entries
+            .entry(definition.repository_key.clone())
+            .or_default();
+        let fetch = take_fetch(&mut fetched, |fetched| {
+            fetched.repository_key == definition.repository_key
         });
-        match prepared {
-            Ok(candidate) => {
-                if candidate.definition.repository_id != definition.repository_id {
-                    source::discard_repository(&candidate);
-                    let snapshot = source::load_current_repository(cache, &definition)
-                        .ok()
-                        .flatten();
-                    let message = format!(
+        let (status, message) = match fetch {
+            // Configured while this sync ran; the next one refreshes it.
+            None => (SourceStatus::Cached, None),
+            Some(Fetch::Ready(candidate))
+                if candidate.definition.repository_id != definition.repository_id =>
+            {
+                source::discard_repository(&candidate);
+                (
+                    SourceStatus::Error,
+                    Some(format!(
                         "The catalog changed repository.id from {} to {}. The last validated revision remains active.",
                         definition.repository_id, candidate.definition.repository_id
-                    );
-                    updated.push(definition.clone());
+                    )),
+                )
+            }
+            Some(Fetch::Ready(candidate)) => match source::activate_repository(cache, candidate) {
+                Ok(snapshot) => {
+                    entry.record(SourceStatus::Fresh, None, now);
+                    updated.push(snapshot.definition.clone());
                     loaded.push(LoadedRepository {
-                        definition,
-                        snapshot,
-                        status: SourceStatus::Error,
-                        refresh_failed: true,
-                        message: Some(message),
+                        definition: snapshot.definition.clone(),
+                        snapshot: Some(snapshot),
+                        status: SourceStatus::Fresh,
+                        refresh_failed: false,
+                        message: None,
+                        last_success_at: Some(now),
                     });
                     continue;
                 }
-                match source::activate_repository(cache, candidate) {
-                    Ok(snapshot) => {
-                        updated.push(snapshot.definition.clone());
-                        loaded.push(LoadedRepository {
-                            definition: snapshot.definition.clone(),
-                            snapshot: Some(snapshot),
-                            status: SourceStatus::Fresh,
-                            refresh_failed: false,
-                            message: None,
-                        });
-                    }
-                    Err(message) => {
-                        let snapshot = source::load_current_repository(cache, &definition)
-                            .ok()
-                            .flatten();
-                        updated.push(definition.clone());
-                        loaded.push(LoadedRepository {
-                            definition,
-                            snapshot,
-                            status: SourceStatus::Error,
-                            refresh_failed: true,
-                            message: Some(message),
-                        });
-                    }
+                Err(message) => {
+                    entry.not_gone();
+                    (SourceStatus::Error, Some(message))
                 }
-            }
-            Err(message) => {
-                if crate::artifact::is_gone(&message) {
+            },
+            Some(Fetch::Gone) => {
+                let is_default = default
+                    .as_ref()
+                    .is_some_and(|default| definition.locator.same_identity(default));
+                if entry.gone(now) && !is_default {
                     if let Err(error) =
                         source::remove_repository_cache(cache, &definition.repository_key)
                     {
@@ -508,60 +837,78 @@ pub(super) fn refresh_repositories(
                     retired.push(definition.name.clone());
                     continue;
                 }
-                let snapshot = source::load_current_repository(cache, &definition)
-                    .ok()
-                    .flatten();
-                updated.push(definition.clone());
-                loaded.push(LoadedRepository {
-                    definition,
-                    snapshot,
-                    status: SourceStatus::Error,
-                    refresh_failed: true,
-                    message: Some(message),
-                });
+                (
+                    SourceStatus::Error,
+                    Some(entry.gone_message(&definition.name, !is_default)),
+                )
             }
+            Some(Fetch::Unreachable(message)) => (SourceStatus::Stale, Some(message)),
+            Some(Fetch::Failed(message)) => {
+                entry.not_gone();
+                (SourceStatus::Error, Some(message))
+            }
+        };
+        entry.record(status, message.as_ref(), now);
+        let snapshot = source::load_current_repository(cache, &definition)
+            .ok()
+            .flatten();
+        loaded.push(LoadedRepository {
+            definition: definition.clone(),
+            snapshot,
+            status,
+            refresh_failed: status != SourceStatus::Cached,
+            message,
+            last_success_at: entry.last_success_at,
+        });
+        updated.push(definition);
+    }
+    for (_, fetch) in fetched {
+        if let Fetch::Ready(candidate) = fetch {
+            source::discard_repository(&candidate);
         }
     }
     (updated, loaded, retired)
 }
 
-/// Refreshes every configured source. A source whose archive no longer exists
-/// (HTTP 404/410) and has nothing installed from it is retired: dropped from
-/// the configuration and its cache wiped. One with installed packages is kept
-/// with a note so the packages can still be removed. The returned names are
+/// Activates each source's fetch. A source that is not found keeps its saved
+/// copy until it has been gone three times over three days. Then, with nothing
+/// installed from it, it is retired: dropped from the configuration and its
+/// cache wiped. One with installed packages keeps its definition, without the
+/// saved copy, so the packages can still be removed. The returned names are
 /// the retired sources.
-pub(super) fn refresh_sources(
-    cache: &std::path::Path,
+fn apply_sources(
+    cache: &Path,
+    health: &mut SyncHealth,
+    now: u64,
     definitions: Vec<ConfiguredSource>,
+    mut fetched: Vec<(ConfiguredSource, Fetch<SourceCandidate>)>,
     installed_keys: &BTreeSet<String>,
 ) -> (Vec<ConfiguredSource>, Vec<LoadedSource>, Vec<String>) {
     let mut claimed = definitions
         .iter()
         .map(|source| (source.source_id.clone(), source.source_key.clone()))
         .collect::<BTreeMap<_, _>>();
-    let mut updated_definitions = Vec::with_capacity(definitions.len());
+    let mut updated = Vec::with_capacity(definitions.len());
     let mut loaded = Vec::with_capacity(definitions.len());
     let mut retired = Vec::new();
-
     for definition in definitions {
-        let prepared = source::prepare_refresh(&definition, cache).or_else(|message| {
-            if !source::is_corrupt_cache_error(&message) {
-                return Err(message);
-            }
-            eprintln!(
-                "Wiping the unreadable cache of the source {} and refreshing it again: {message}",
-                definition.name
-            );
-            source::remove_source_cache(cache, &definition.source_key)?;
-            source::prepare_refresh(&definition, cache)
+        let entry = health
+            .entries
+            .entry(definition.source_key.clone())
+            .or_default();
+        let fetch = take_fetch(&mut fetched, |fetched| {
+            fetched.source_key == definition.source_key
         });
-        match prepared {
-            Ok(candidate) => {
+        let (status, message) = match fetch {
+            // Configured while this sync ran; the next one refreshes it.
+            None => (SourceStatus::Cached, None),
+            Some(Fetch::Ready(candidate)) => {
                 let source_id_changed = candidate.definition.source_id != definition.source_id;
                 let duplicate_namespace = claimed
                     .get(&candidate.definition.source_id)
                     .is_some_and(|source_key| source_key != &definition.source_key);
                 if source_id_changed || duplicate_namespace {
+                    source::discard_candidate(&candidate);
                     let message = if source_id_changed {
                         format!(
                             "The source changed source.id from {} to {}. The last validated revision remains active.",
@@ -573,44 +920,35 @@ pub(super) fn refresh_sources(
                             candidate.definition.source_id
                         )
                     };
-                    source::discard_candidate(&candidate);
-                    let snapshot = source::load_current(cache, &definition).ok().flatten();
-                    updated_definitions.push(definition.clone());
-                    loaded.push(LoadedSource {
-                        definition,
-                        snapshot,
-                        status: SourceStatus::Error,
-                        refresh_failed: true,
-                        message: Some(message),
-                    });
-                    continue;
-                }
-                match source::activate_candidate(cache, candidate) {
-                    Ok(snapshot) => {
-                        claimed.insert(
-                            snapshot.definition.source_id.clone(),
-                            snapshot.definition.source_key.clone(),
-                        );
-                        updated_definitions.push(snapshot.definition.clone());
-                        loaded.push(LoadedSource {
-                            definition: snapshot.definition.clone(),
-                            snapshot: Some(snapshot),
-                            status: SourceStatus::Fresh,
-                            refresh_failed: false,
-                            message: None,
-                        });
+                    (SourceStatus::Error, Some(message))
+                } else {
+                    match source::activate_candidate(cache, candidate) {
+                        Ok(snapshot) => {
+                            claimed.insert(
+                                snapshot.definition.source_id.clone(),
+                                snapshot.definition.source_key.clone(),
+                            );
+                            entry.record(SourceStatus::Fresh, None, now);
+                            updated.push(snapshot.definition.clone());
+                            loaded.push(LoadedSource {
+                                definition: snapshot.definition.clone(),
+                                snapshot: Some(snapshot),
+                                status: SourceStatus::Fresh,
+                                refresh_failed: false,
+                                message: None,
+                                last_success_at: Some(now),
+                            });
+                            continue;
+                        }
+                        Err(message) => {
+                            entry.not_gone();
+                            (SourceStatus::Error, Some(message))
+                        }
                     }
-                    Err(message) => push_refresh_error(
-                        cache,
-                        definition,
-                        message,
-                        &mut updated_definitions,
-                        &mut loaded,
-                    ),
                 }
             }
-            Err(message) => {
-                if crate::artifact::is_gone(&message) {
+            Some(Fetch::Gone) => {
+                if entry.gone(now) {
                     if let Err(error) = source::remove_source_cache(cache, &definition.source_key) {
                         eprintln!(
                             "Could not remove the cache of the retired source {}: {error}",
@@ -623,31 +961,44 @@ pub(super) fn refresh_sources(
                     }
                     // The definition stays so installed packages can be uninstalled, but the
                     // snapshot is gone: nothing else from the source may be installed from cache.
-                    let message = format!(
-                        "{} is no longer available. Its installed packages remain until you uninstall them.",
-                        definition.name
-                    );
-                    updated_definitions.push(definition.clone());
-                    loaded.push(LoadedSource {
-                        definition,
-                        snapshot: None,
-                        status: SourceStatus::Error,
-                        refresh_failed: true,
-                        message: Some(message),
-                    });
-                    continue;
+                    (
+                        SourceStatus::Error,
+                        Some(format!(
+                            "{} is no longer available. Its installed packages remain until you uninstall them.",
+                            definition.name
+                        )),
+                    )
+                } else {
+                    (
+                        SourceStatus::Error,
+                        Some(entry.gone_message(&definition.name, true)),
+                    )
                 }
-                push_refresh_error(
-                    cache,
-                    definition,
-                    message,
-                    &mut updated_definitions,
-                    &mut loaded,
-                )
             }
+            Some(Fetch::Unreachable(message)) => (SourceStatus::Stale, Some(message)),
+            Some(Fetch::Failed(message)) => {
+                entry.not_gone();
+                (SourceStatus::Error, Some(message))
+            }
+        };
+        entry.record(status, message.as_ref(), now);
+        let snapshot = source::load_current(cache, &definition).ok().flatten();
+        loaded.push(LoadedSource {
+            definition: definition.clone(),
+            snapshot,
+            status,
+            refresh_failed: status != SourceStatus::Cached,
+            message,
+            last_success_at: entry.last_success_at,
+        });
+        updated.push(definition);
+    }
+    for (_, fetch) in fetched {
+        if let Fetch::Ready(candidate) = fetch {
+            source::discard_candidate(&candidate);
         }
     }
-    (updated_definitions, loaded, retired)
+    (updated, loaded, retired)
 }
 
 pub(super) fn is_unsupported_legacy_install(record: &InstallationRecord) -> bool {
@@ -658,8 +1009,17 @@ pub(super) fn is_unsupported_legacy_install(record: &InstallationRecord) -> bool
         )
 }
 
-pub(super) fn retire_unsupported_legacy_installs(paths: &SystemPaths) -> Result<(), String> {
-    let ledger = crate::executor::read_ledger(paths)?;
+/// Uninstalls installs this version no longer supports. A failure - a locked
+/// file, an unreadable ledger - is logged and the next load or sync tries
+/// again; it never blocks the app.
+pub(super) fn retire_unsupported_legacy_installs(paths: &SystemPaths) {
+    let ledger = match crate::executor::read_ledger(paths) {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            eprintln!("Could not check for retired legacy installs: {error}");
+            return;
+        }
+    };
     let mut groups = BTreeMap::<String, (ConfiguredSource, Vec<String>)>::new();
     for (id, record) in &ledger.items {
         if !is_unsupported_legacy_install(record) {
@@ -685,27 +1045,13 @@ pub(super) fn retire_unsupported_legacy_installs(paths: &SystemPaths) -> Result<
             .push(id.clone());
     }
     for (source, ids) in groups.into_values() {
-        crate::executor::uninstall_batch(paths, &source, &ids, true)?;
+        if let Err(error) = crate::executor::uninstall_batch(paths, &source, &ids, true) {
+            eprintln!(
+                "Could not remove the retired legacy installs from {}; the next sync tries again: {error}",
+                source.name
+            );
+        }
     }
-    Ok(())
-}
-
-pub(super) fn push_refresh_error(
-    cache: &std::path::Path,
-    definition: ConfiguredSource,
-    message: String,
-    updated_definitions: &mut Vec<ConfiguredSource>,
-    loaded: &mut Vec<LoadedSource>,
-) {
-    let snapshot = source::load_current(cache, &definition).ok().flatten();
-    updated_definitions.push(definition.clone());
-    loaded.push(LoadedSource {
-        definition,
-        snapshot,
-        status: SourceStatus::Error,
-        refresh_failed: true,
-        message: Some(message),
-    });
 }
 
 pub(super) fn reconcile_installed_items(
@@ -859,9 +1205,71 @@ mod retire_tests {
         format!("http://{address}")
     }
 
+    fn refresh_sources(
+        cache: &Path,
+        health: &mut SyncHealth,
+        now: u64,
+        definitions: Vec<ConfiguredSource>,
+        installed: &BTreeSet<String>,
+    ) -> (Vec<ConfiguredSource>, Vec<LoadedSource>, Vec<String>) {
+        let hosts = DeadHosts::default();
+        let fetched = definitions
+            .iter()
+            .map(|definition| {
+                let fetch = hosts.fetch(definition.url(), || prepare_source(cache, definition));
+                (definition.clone(), fetch)
+            })
+            .collect();
+        apply_sources(cache, health, now, definitions, fetched, installed)
+    }
+
+    const DAY: u64 = 86_400;
+
+    fn cache_snapshot(cache: &Path, definition: &ConfiguredSource) {
+        let staged = cache.join("staged");
+        std::fs::create_dir_all(staged.join("skills/review")).expect("skill");
+        std::fs::write(
+            staged.join("skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Reviews code\n---\nBody\n",
+        )
+        .expect("skill");
+        std::fs::write(
+            staged.join("agent-plugins.json"),
+            r#"{"version":2,"source":{"id":"retired","name":"Retired","description":"Gone"},
+               "packages":[{"id":"review","components":[{"kind":"skill","path":"skills/review"}]}]}"#,
+        )
+        .expect("manifest");
+        let catalog = crate::catalog::read_manifest_catalog(&staged, &definition.source_key)
+            .expect("catalog");
+        source::activate_candidate(
+            cache,
+            SourceCandidate {
+                definition: definition.clone(),
+                commit: "a".repeat(64),
+                path: staged,
+                catalog,
+                staged: true,
+                validators: crate::artifact::ArtifactValidators::default(),
+            },
+        )
+        .expect("snapshot");
+    }
+
     #[test]
-    fn a_gone_source_without_installs_is_retired_and_its_cache_wiped() {
-        let base = serve_not_found(4);
+    fn any_other_answer_from_the_server_restarts_the_gone_streak() {
+        let mut entry = HealthEntry::default();
+        assert!(!entry.gone(0));
+        assert!(!entry.gone(DAY));
+        entry.not_gone();
+        assert!(
+            !entry.gone(10 * DAY),
+            "one gone answer after a reset is not three"
+        );
+    }
+
+    #[test]
+    fn a_gone_source_is_retired_only_after_three_gone_answers_over_three_days() {
+        let base = serve_not_found(12);
         let cache = tempfile::tempdir().expect("cache");
         let locator = Locator::display_url(format!("{base}/retired-latest.zip"));
         let definition = ConfiguredSource {
@@ -873,33 +1281,53 @@ mod retire_tests {
             repository_key: None,
         };
         let root = source::source_cache_root(cache.path(), &definition.source_key);
-        std::fs::create_dir_all(&root).expect("cache root");
-        std::fs::write(root.join("current.json"), b"{}").expect("stale pointer");
+        cache_snapshot(cache.path(), &definition);
+        let mut health = SyncHealth::default();
+        let none = BTreeSet::new();
 
-        let (updated, loaded, retired) =
-            refresh_sources(cache.path(), vec![definition.clone()], &BTreeSet::new());
-        assert!(
-            updated.is_empty(),
-            "{:?}",
-            loaded
-                .iter()
-                .map(|source| source.message.clone())
-                .collect::<Vec<_>>()
+        for now in [DAY, 2 * DAY, 3 * DAY] {
+            let (updated, loaded, retired) = refresh_sources(
+                cache.path(),
+                &mut health,
+                now,
+                vec![definition.clone()],
+                &none,
+            );
+            assert_eq!(
+                updated.len(),
+                1,
+                "day {}: kept during the grace period",
+                now / DAY
+            );
+            assert!(retired.is_empty());
+            assert!(loaded[0].snapshot.is_some(), "the saved copy stays usable");
+            assert!(loaded[0]
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("not found on the server")));
+        }
+        let (updated, _, retired) = refresh_sources(
+            cache.path(),
+            &mut health,
+            4 * DAY,
+            vec![definition.clone()],
+            &none,
         );
-        assert!(loaded.is_empty());
+        assert!(updated.is_empty());
         assert_eq!(retired, vec!["Retired".to_string()]);
-        assert!(!root.exists());
+        assert!(!root.exists(), "a retired source keeps no cache");
 
-        std::fs::create_dir_all(&root).expect("cache root");
-        std::fs::write(root.join("current.json"), b"{}").expect("stale pointer");
         let installed = BTreeSet::from([definition.source_key.clone()]);
-        let (updated, loaded, retired) =
-            refresh_sources(cache.path(), vec![definition], &installed);
-        assert_eq!(updated.len(), 1);
-        assert_eq!(retired.len(), 0);
-        assert!(loaded[0].refresh_failed);
+        let (updated, loaded, retired) = refresh_sources(
+            cache.path(),
+            &mut health,
+            5 * DAY,
+            vec![definition],
+            &installed,
+        );
+        assert_eq!(updated.len(), 1, "installed packages keep the definition");
+        assert!(retired.is_empty());
         assert!(loaded[0].snapshot.is_none());
-        assert!(!root.exists(), "a gone source keeps no cached snapshot");
         assert!(loaded[0]
             .message
             .as_deref()
@@ -907,7 +1335,7 @@ mod retire_tests {
     }
 
     #[test]
-    fn a_gone_catalog_is_retired() {
+    fn a_gone_catalog_is_retired_after_the_grace_period() {
         let base = serve_not_found(2);
         let cache = tempfile::tempdir().expect("cache");
         let locator = Locator::display_url(format!("{base}/catalog.json"));
@@ -918,7 +1346,25 @@ mod retire_tests {
             description: "Retired host".to_string(),
             locator,
         };
-        let (updated, loaded, retired) = refresh_repositories(cache.path(), vec![definition]);
+        let mut health = SyncHealth::default();
+        health.entries.insert(
+            definition.repository_key.clone(),
+            HealthEntry {
+                gone_since: Some(0),
+                gone_count: 2,
+                ..HealthEntry::default()
+            },
+        );
+        let fetch = DeadHosts::default().fetch(definition.url(), || {
+            prepare_repository(cache.path(), &definition)
+        });
+        let (updated, loaded, retired) = apply_repositories(
+            cache.path(),
+            &mut health,
+            3 * DAY,
+            vec![definition.clone()],
+            vec![(definition, fetch)],
+        );
         assert!(updated.is_empty());
         assert!(loaded.is_empty());
         assert_eq!(retired, vec!["Nexus".to_string()]);
@@ -926,6 +1372,25 @@ mod retire_tests {
             retired_message(&retired, &[]).as_deref(),
             Some("Removed the retired catalog Nexus.")
         );
+    }
+
+    #[test]
+    fn an_unreachable_host_is_skipped_for_the_rest_of_the_pass() {
+        let closed = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base = format!("http://{}", closed.local_addr().expect("addr"));
+        drop(closed);
+        let hosts = DeadHosts::default();
+        let first = hosts.fetch(&format!("{base}/one.zip"), || {
+            crate::artifact::head_artifact(&format!("{base}/one.zip"))
+        });
+        assert!(matches!(first, Fetch::Unreachable(_)));
+        let mut called = false;
+        let second = hosts.fetch(&format!("{base}/two.zip"), || {
+            called = true;
+            Ok(())
+        });
+        assert!(!called, "a second source on a dead host is not fetched");
+        assert!(matches!(second, Fetch::Unreachable(message) if message.contains("Skipped")));
     }
 }
 
@@ -972,6 +1437,53 @@ mod tests {
             crate::locator::marketplace_base_url().map(|_| "jacob".to_string()),
             "a cached load must carry the identity the last sync stored"
         );
+    }
+
+    #[test]
+    fn cached_state_keeps_the_last_refresh_result() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let cache = root.path().join("cache-base");
+        let config = root.path().join("config-base");
+        let source = ConfiguredSource::test_fixture(
+            "skillbook",
+            "https://nexus.example.com/repository/raw/sources/skillbook-latest.zip",
+        );
+        source::write_sources_config(
+            &config,
+            &SourcesConfig {
+                repositories: Vec::new(),
+                sources: vec![source.clone()],
+            },
+        )
+        .expect("sources");
+        let mut health = SyncHealth {
+            connectivity: Connectivity::Offline,
+            ..SyncHealth::default()
+        };
+        health.entries.insert(
+            source.source_key.clone(),
+            HealthEntry {
+                last_success_at: Some(42),
+                status: Some(SourceStatus::Stale),
+                message: Some("Could not connect to nexus.example.com".to_string()),
+                ..HealthEntry::default()
+            },
+        );
+        write_health(&cache, &health);
+        write_last_sync(&cache, 42);
+
+        let state = cached_app_state(&paths, &cache, &config).expect("cached state");
+
+        assert_eq!(state.connectivity, Connectivity::Offline);
+        assert_eq!(state.checked_at_epoch_seconds, 42);
+        assert_eq!(state.sources[0].status, SourceStatus::Stale);
+        assert!(state.sources[0].refresh_failed);
+        assert_eq!(state.sources[0].last_success_at_epoch_seconds, Some(42));
+        assert!(state.sources[0]
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("Could not connect")));
     }
 
     fn snapshot(root: &Path, body: &str, commit: char) -> (ConfiguredSource, SourceSnapshot) {
@@ -1048,6 +1560,7 @@ mod tests {
             status: SourceStatus::Fresh,
             refresh_failed: false,
             message: None,
+            last_success_at: None,
         }];
         let report = reconcile_installed_items(&paths, &loaded).expect("reconcile");
 

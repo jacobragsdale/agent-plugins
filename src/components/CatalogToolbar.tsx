@@ -1,5 +1,5 @@
 import type { JSX } from "react";
-import { Button, Text, TextField } from "@radix-ui/themes";
+import { Button, Spinner, Text, TextField, VisuallyHidden } from "@radix-ui/themes";
 import type { AppIdentity, PreflightCheck } from "../ipc/schemas";
 
 export function StatusButton({
@@ -37,9 +37,14 @@ export function CatalogToolbar({
   const searching = query.trim().length > 0;
   return (
     <div className="catalog-toolbar">
+      <VisuallyHidden>
+        <label htmlFor="package-search">Search packages</label>
+      </VisuallyHidden>
       <TextField.Root
+        id="package-search"
+        type="search"
         className="search-field"
-        placeholder="Search skills, publishers, tags…"
+        placeholder="Search packages, publishers, tags…"
         value={query}
         onChange={(event) => {
           onQueryChange(event.currentTarget.value);
@@ -64,7 +69,7 @@ export function CatalogToolbar({
   );
 }
 
-export function SyncMeta({ checked, problems, blocked }: Readonly<{ checked: string; problems: readonly PreflightCheck[]; blocked: boolean }>): JSX.Element {
+export function SyncMeta({ checked, checking, problems, blocked }: Readonly<{ checked: string; checking: boolean; problems: readonly PreflightCheck[]; blocked: boolean }>): JSX.Element {
   const problem = problems.at(0) ?? null;
   return (
     <>
@@ -72,12 +77,17 @@ export function SyncMeta({ checked, problems, blocked }: Readonly<{ checked: str
         <Text color="gray" size="1">
           Last checked: {checked}
         </Text>
+        {checking ? (
+          <Text className="sync-checking" color="gray" size="1" role="status">
+            <Spinner size="1" /> Checking…
+          </Text>
+        ) : null}
       </div>
       {problem === null ? null : (
         <Text as="p" color="red" size="2">
           {problem.title}: {problem.detail}
           {problems.length > 1 ? ` (+${String(problems.length - 1)} more)` : ""}
-          {blocked ? " Agent Plugins will not install or sync until it is resolved." : ""} Open System status for details.
+          {blocked ? " Agent Plugins can't install or update packages until this is fixed." : ""} Open System status for details.
         </Text>
       )}
     </>

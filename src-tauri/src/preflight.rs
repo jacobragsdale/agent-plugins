@@ -2,8 +2,9 @@
 //! the marketplace server, detected agents, and dependencies.
 //!
 //! Every check has a stable ID, a status, a remediation, and a blocking flag.
-//! The report is shown in the app and summarized in the heartbeat. See
-//! `docs/preflight-reference.md`.
+//! Blocking marks a failure that stops every install and update until it is
+//! fixed; nothing else enforces it. The report is shown in the app and
+//! summarized in the heartbeat. See `docs/preflight-reference.md`.
 
 use crate::agent_profiles::AgentProfileState;
 use crate::app_state::CatalogItemState;
@@ -12,7 +13,7 @@ use crate::install::ItemStatus;
 use crate::locator;
 use crate::marketplace::{self, AuthMode};
 use crate::paths::SystemPaths;
-use crate::startup::StartupReport;
+use crate::startup::{ProxyStatus, StartupReport, ToolInstallStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::net::ToSocketAddrs as _;
@@ -103,7 +104,7 @@ impl PreflightReport {
 /// What the preflight needs from the rest of the app.
 pub(crate) struct PreflightInput<'a> {
     pub(crate) paths: &'a SystemPaths,
-    pub(crate) startup: Option<&'a StartupReport>,
+    pub(crate) startup: Option<StartupReport>,
     pub(crate) profiles: &'a [AgentProfileState],
     pub(crate) items: &'a [CatalogItemState],
     /// Age of the marketplace catalog snapshot, when one exists.
@@ -182,7 +183,17 @@ pub(crate) fn run(input: &PreflightInput<'_>) -> (PreflightReport, PreflightFind
     );
     catalog_check(&mut out, input.catalog_age_seconds);
     agent_checks(&mut out, input);
-    dependency_checks(&mut out, input);
+    // A missing `uv` gets another download attempt rather than a manual step.
+    let tool_install = if input
+        .startup
+        .as_ref()
+        .is_some_and(|report| report.tools.iter().any(|tool| tool.path.is_none()))
+    {
+        crate::startup::retry_tool_install()
+    } else {
+        ToolInstallStatus::Idle
+    };
+    dependency_checks(&mut out, input, &tool_install);
 
     let blocked = out.checks.iter().any(|check| check.blocking);
     let report = PreflightReport {
@@ -344,59 +355,39 @@ fn host_checks(
         }
     }
 
-    let started = Instant::now();
-    match input.startup {
-        Some(report) => {
-            let notes = report
-                .notes
-                .iter()
-                .filter(|note| note.contains("proxy"))
-                .cloned()
-                .collect::<Vec<_>>();
-            if notes.is_empty() {
-                out.push(
-                    started,
-                    "host.proxy",
-                    "Proxy configuration",
-                    CheckStatus::Ok,
-                    report.proxy.describe(),
-                    Some(Remediation::AutoFixed),
-                    false,
-                );
-            } else {
-                out.push(
-                    started,
-                    "host.proxy",
-                    "Proxy configuration",
-                    CheckStatus::Warn,
-                    notes.join(" "),
-                    manual("Set HTTPS_PROXY and NO_PROXY consistently."),
-                    false,
-                );
-            }
-        }
-        None => out.push(
-            started,
-            "host.proxy",
-            "Proxy configuration",
-            CheckStatus::Skipped,
-            "Host preparation has not run in this process.",
-            None,
-            false,
-        ),
-    }
+    proxy_check(out, input.startup.as_ref());
 
     let started = Instant::now();
-    let mut unwritable = Vec::new();
     let mut created = false;
-    for dir in home_directories(input.paths) {
-        match ensure_writable(&dir) {
-            Ok(true) => created = true,
-            Ok(false) => {}
-            Err(error) => unwritable.push(format!("{}: {error}", dir.display())),
-        }
-    }
-    if unwritable.is_empty() {
+    let app_problems = unwritable(&app_directories(input.paths), &mut created);
+    let skill_problems = unwritable(&agent_skill_directories(input), &mut created);
+    if !app_problems.is_empty() {
+        out.push(
+            started,
+            "host.homeDirs",
+            "Home directories",
+            CheckStatus::Fail,
+            format!(
+                "Agent Plugins cannot write to its own folders, so it cannot install or update anything: {}",
+                app_problems.join("; ")
+            ),
+            manual("Ask IT to give your account write access to the listed folders."),
+            true,
+        );
+    } else if !skill_problems.is_empty() {
+        out.push(
+            started,
+            "host.homeDirs",
+            "Home directories",
+            CheckStatus::Warn,
+            format!(
+                "Skills cannot be installed into these agent folders: {}",
+                skill_problems.join("; ")
+            ),
+            manual("Ask IT to give your account write access to the listed folders."),
+            false,
+        );
+    } else {
         out.push(
             started,
             "host.homeDirs",
@@ -405,16 +396,6 @@ fn host_checks(
             "Skill and data directories are writable.",
             created.then_some(Remediation::AutoFixed),
             false,
-        );
-    } else {
-        out.push(
-            started,
-            "host.homeDirs",
-            "Home directories",
-            CheckStatus::Fail,
-            unwritable.join("; "),
-            manual("Fix the permissions on the listed directories."),
-            true,
         );
     }
 
@@ -493,7 +474,7 @@ fn host_checks(
     }
 
     let started = Instant::now();
-    match input.startup {
+    match &input.startup {
         Some(report) => {
             let notes = report
                 .notes
@@ -502,17 +483,13 @@ fn host_checks(
                 .cloned()
                 .collect::<Vec<_>>();
             if notes.is_empty() {
-                let detail = if report.prepended_path_dirs.is_empty() {
+                let added = report.published_path_dirs.len();
+                let detail = if added == 0 {
                     "The user PATH already lists every tool directory.".to_string()
                 } else {
                     format!(
-                        "Published {} director{} to the user PATH.",
-                        report.prepended_path_dirs.len(),
-                        if report.prepended_path_dirs.len() == 1 {
-                            "y"
-                        } else {
-                            "ies"
-                        }
+                        "Published {added} director{} to the user PATH.",
+                        if added == 1 { "y" } else { "ies" }
                     )
                 };
                 out.push(
@@ -521,7 +498,7 @@ fn host_checks(
                     "User PATH",
                     CheckStatus::Ok,
                     detail,
-                    (!report.prepended_path_dirs.is_empty()).then_some(Remediation::AutoFixed),
+                    (added > 0).then_some(Remediation::AutoFixed),
                     false,
                 );
             } else {
@@ -531,7 +508,7 @@ fn host_checks(
                     "User PATH",
                     CheckStatus::Warn,
                     notes.join(" "),
-                    manual("Add the tool directories to the user PATH."),
+                    manual("Restart Agent Plugins to try again."),
                     false,
                 );
             }
@@ -540,6 +517,59 @@ fn host_checks(
             started,
             "host.path",
             "User PATH",
+            CheckStatus::Skipped,
+            "Host preparation has not run in this process.",
+            None,
+            false,
+        ),
+    }
+}
+
+/// Only a failed publish of a proxy variable is worth a warning; the other
+/// startup notes are about PATH and `uv`.
+fn proxy_check(out: &mut Collector, startup: Option<&StartupReport>) {
+    let started = Instant::now();
+    match startup {
+        Some(report) => {
+            let notes = report
+                .notes
+                .iter()
+                .filter(|note| note.contains("_PROXY") || note.contains("_proxy"))
+                .cloned()
+                .collect::<Vec<_>>();
+            if notes.is_empty() {
+                let applied = matches!(
+                    report.proxy,
+                    ProxyStatus::FromSystem { .. } | ProxyStatus::Socks { .. }
+                );
+                out.push(
+                    started,
+                    "host.proxy",
+                    "Proxy configuration",
+                    CheckStatus::Ok,
+                    report.proxy.describe(),
+                    applied.then_some(Remediation::AutoFixed),
+                    false,
+                );
+            } else {
+                out.push(
+                started,
+                "host.proxy",
+                "Proxy configuration",
+                CheckStatus::Warn,
+                format!(
+                    "{} Agents started from now on may not use your proxy.",
+                    notes.join(" ")
+                ),
+                manual("Restart Agent Plugins. If this stays, ask IT to set the proxy variables for your account."),
+                false,
+            );
+            }
+        }
+        None => out.push(
+            started,
+            "host.proxy",
+            "Proxy configuration",
             CheckStatus::Skipped,
             "Host preparation has not run in this process.",
             None,
@@ -668,7 +698,7 @@ fn server_checks(out: &mut Collector, base_url: Option<&str>) -> Option<marketpl
                         probe.health.minimum_client_version
                     ),
                     action("update"),
-                    true,
+                    false,
                 );
             } else if marketplace::version_less_than(client, &probe.health.latest_client_version) {
                 out.push(
@@ -993,9 +1023,13 @@ fn agent_checks(out: &mut Collector, input: &PreflightInput<'_>) {
     }
 }
 
-fn dependency_checks(out: &mut Collector, input: &PreflightInput<'_>) {
+fn dependency_checks(
+    out: &mut Collector,
+    input: &PreflightInput<'_>,
+    tool_install: &ToolInstallStatus,
+) {
     let started = Instant::now();
-    match input.startup {
+    match &input.startup {
         Some(report) => {
             let missing = report
                 .tools
@@ -1024,16 +1058,31 @@ fn dependency_checks(out: &mut Collector, input: &PreflightInput<'_>) {
                     false,
                 );
             } else {
+                let missing = missing.join(", ");
+                let (detail, remediation) = match tool_install {
+                    ToolInstallStatus::Running => (
+                        format!("Missing: {missing}. Agent Plugins is downloading uv in the background."),
+                        None,
+                    ),
+                    ToolInstallStatus::GaveUp(error) => (
+                        format!(
+                            "Missing: {missing}. Agent Plugins could not download uv{}. Skills and MCP servers that invoke it will fail.",
+                            error.as_deref().map(|error| format!(": {error}")).unwrap_or_default()
+                        ),
+                        manual("Check the internet connection and restart Agent Plugins to try again, or ask IT to install uv."),
+                    ),
+                    ToolInstallStatus::Idle => (
+                        format!("Missing: {missing}. Skills and MCP servers that invoke them will fail."),
+                        manual("Install uv from https://astral.sh/uv or ask IT for the package."),
+                    ),
+                };
                 out.push(
                     started,
                     "dependencies.uv",
                     "uv and uvx",
                     CheckStatus::Warn,
-                    format!(
-                        "Missing: {}. Skills and MCP servers that invoke them will fail.",
-                        missing.join(", ")
-                    ),
-                    manual("Install uv from https://astral.sh/uv or ask IT for the package."),
+                    detail,
+                    remediation,
                     false,
                 );
             }
@@ -1100,10 +1149,22 @@ fn dependency_checks(out: &mut Collector, input: &PreflightInput<'_>) {
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
     {
         Some(dir) => {
-            let on_path = std::env::var_os("PATH").is_some_and(|path| {
-                std::env::split_paths(&path).any(|entry| same_dir(&entry, &dir))
-            });
+            let published = input
+                .startup
+                .as_ref()
+                .and_then(|report| report.cli_dir_on_path.as_deref())
+                .is_some_and(|published| same_dir(published, &dir));
+            let on_path = published
+                || std::env::var_os("PATH").is_some_and(|path| {
+                    std::env::split_paths(&path).any(|entry| same_dir(&entry, &dir))
+                });
             if on_path {
+                let added = input.startup.as_ref().is_some_and(|report| {
+                    report
+                        .published_path_dirs
+                        .iter()
+                        .any(|entry| same_dir(entry, &dir))
+                });
                 out.push(
                     started,
                     "dependencies.cli",
@@ -1113,7 +1174,7 @@ fn dependency_checks(out: &mut Collector, input: &PreflightInput<'_>) {
                         "{} is on PATH; agents can run the publish command.",
                         dir.display()
                     ),
-                    None,
+                    added.then_some(Remediation::AutoFixed),
                     false,
                 );
             } else {
@@ -1162,13 +1223,39 @@ fn dependency_checks(out: &mut Collector, input: &PreflightInput<'_>) {
     }
 }
 
-fn home_directories(paths: &SystemPaths) -> Vec<PathBuf> {
+/// The app's own folders. Without them nothing can be installed.
+fn app_directories(paths: &SystemPaths) -> Vec<PathBuf> {
     vec![
-        paths.home.join(".agents").join("skills"),
-        paths.home.join(".claude").join("skills"),
         paths.data.join("agent-plugins"),
         paths.cache.join("agent-plugins"),
     ]
+}
+
+/// The home skill folders of the agents in use, such as `~/.claude/skills`
+/// only when Claude Code is.
+fn agent_skill_directories(input: &PreflightInput<'_>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for profile in input.profiles.iter().filter(|profile| profile.enabled) {
+        if let Some(relative) = profile.skill_directory.strip_prefix("~/") {
+            let dir = input.paths.home.join(relative);
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
+}
+
+fn unwritable(dirs: &[PathBuf], created: &mut bool) -> Vec<String> {
+    let mut problems = Vec::new();
+    for dir in dirs {
+        match ensure_writable(dir) {
+            Ok(true) => *created = true,
+            Ok(false) => {}
+            Err(error) => problems.push(format!("{}: {error}", dir.display())),
+        }
+    }
+    problems
 }
 
 /// Creates the directory when missing and proves it is writable. Returns true when it was created.
@@ -1213,6 +1300,7 @@ fn which(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_profiles::TargetId;
 
     #[test]
     fn report_status_map_uses_stable_ids() {
@@ -1245,5 +1333,71 @@ mod tests {
         assert!(ensure_writable(&dir).expect("writable"));
         assert!(!ensure_writable(&dir).expect("writable again"));
         assert!(std::fs::read_dir(&dir).expect("read").next().is_none());
+    }
+
+    #[test]
+    fn the_uv_trust_note_is_not_a_proxy_problem() {
+        let mut report = StartupReport::default();
+        report.notes.push(
+            "Set UV_NATIVE_TLS=1 so uv uses the platform certificate store behind a corporate proxy."
+                .to_string(),
+        );
+        let mut out = Collector { checks: Vec::new() };
+        proxy_check(&mut out, Some(&report));
+        assert_eq!(out.checks[0].status, CheckStatus::Ok);
+
+        report
+            .notes
+            .push("Could not publish HTTPS_PROXY to the user session: denied".to_string());
+        let mut out = Collector { checks: Vec::new() };
+        proxy_check(&mut out, Some(&report));
+        assert_eq!(out.checks[0].status, CheckStatus::Warn);
+    }
+
+    fn profile_state(target_id: TargetId, enabled: bool) -> AgentProfileState {
+        AgentProfileState {
+            target_id,
+            display_name: target_id.display_name().to_string(),
+            enabled,
+            scopes: vec!["user".to_string()],
+            dialect_id: target_id.current_dialect(),
+            detected: enabled,
+            detected_version: None,
+            detection_message: None,
+            verification_guidance: String::new(),
+            reload_guidance: String::new(),
+            skill_directory: crate::adapters::skill_display_root(target_id).to_string(),
+            skill_directory_shared: false,
+        }
+    }
+
+    #[test]
+    fn checks_only_the_skill_folders_of_agents_in_use() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = SystemPaths {
+            home: temp.path().join("home"),
+            config: temp.path().join("config"),
+            data: temp.path().join("data"),
+            local_data: temp.path().join("local-data"),
+            cache: temp.path().join("cache"),
+            onedrive_commercial: None,
+        };
+        let profiles = [
+            profile_state(TargetId::Codex, true),
+            profile_state(TargetId::ClaudeCode, false),
+            profile_state(TargetId::ClaudeDesktop, true),
+        ];
+        let input = PreflightInput {
+            paths: &paths,
+            startup: None,
+            profiles: &profiles,
+            items: &[],
+            catalog_age_seconds: None,
+            ledger_error: None,
+        };
+        assert_eq!(
+            agent_skill_directories(&input),
+            [paths.home.join(".agents/skills")]
+        );
     }
 }

@@ -44,7 +44,7 @@ function describe(detail: PackageDetail): Omit<PackageStatus, "badge"> {
   }
 
   return detail.liveVersion === null
-    ? { label: "Not live", tone: "rejected", detail: "Every version was withdrawn. Publish a new version to share it again." }
+    ? { label: "Not live", tone: "rejected", detail: "Every version was withdrawn. Restore one or publish a new version to share it again." }
     : { label: "Live", tone: "live", detail: `Version ${detail.liveVersion} is available to everyone who can see it.` };
 }
 

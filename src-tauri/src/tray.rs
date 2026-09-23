@@ -32,7 +32,7 @@ pub(crate) fn is_background_launch() -> bool {
     has_background_arg(std::env::args_os())
 }
 
-pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<bool> {
+fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<bool> {
     let Some(window) = app.get_webview_window("main") else {
         return Ok(false);
     };
@@ -41,6 +41,17 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<
     window.unminimize()?;
     window.set_focus()?;
     Ok(true)
+}
+
+/// Shows the main window and logs, instead of failing, when it cannot.
+pub(crate) fn open_main_window<R: Runtime>(app: &AppHandle<R>) {
+    match show_main_window(app) {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("Could not open Agent Plugins because its main window is unavailable.");
+        }
+        Err(error) => eprintln!("Could not open Agent Plugins: {error}"),
+    }
 }
 
 fn toggle_launch_at_login<R: Runtime>(
@@ -134,13 +145,7 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
         // and reserves the menu for the right button.
         .show_menu_on_left_click(cfg!(not(windows)))
         .on_menu_event(move |app, event| match event.id().as_ref() {
-            OPEN_MENU_ID => match show_main_window(app) {
-                Ok(true) => {}
-                Ok(false) => eprintln!(
-                    "Could not open Agent Plugins because its main window is unavailable."
-                ),
-                Err(error) => eprintln!("Could not open Agent Plugins: {error}"),
-            },
+            OPEN_MENU_ID => open_main_window(app),
             CHECK_NOW_MENU_ID => crate::application::spawn_app_sync(app.clone()),
             LAUNCH_AT_LOGIN_MENU_ID => {
                 if let Err(error) = toggle_launch_at_login(app, &launch_item_for_handler) {
@@ -161,23 +166,15 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
         else {
             return;
         };
-        match show_main_window(tray.app_handle()) {
-            Ok(true) => {}
-            Ok(false) => {
-                eprintln!("Could not open Agent Plugins because its main window is unavailable.");
-            }
-            Err(error) => eprintln!("Could not open Agent Plugins: {error}"),
-        }
+        open_main_window(tray.app_handle());
     });
 
     tray.build(app)?;
 
-    if !is_background_launch() && !show_main_window(app.handle())? {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "Agent Plugins' main window was not created.",
-        )
-        .into());
+    // The tray icon is up, so a window that cannot be shown now can still be
+    // opened from it; failing setup here would end the app.
+    if !is_background_launch() {
+        open_main_window(app.handle());
     }
 
     Ok(())

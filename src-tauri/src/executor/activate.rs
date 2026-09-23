@@ -1,6 +1,6 @@
 //! Ledger commit after a staged journal activates.
 
-use super::journal::{activate, cleanup_committed, rollback, write_journal};
+use super::journal::{activate, cleanup_staging, finish_committed, rollback, write_journal};
 use super::{resource_document, transaction_id, TransactionJournal, JOURNAL_FILE};
 use crate::fs_retry;
 use crate::ledger::{self, InstallationLedger, OwnedResource};
@@ -14,27 +14,39 @@ pub(super) fn commit(
     journal: &TransactionJournal,
     ledger_state: &InstallationLedger,
 ) -> Result<(), String> {
-    write_journal(paths, journal)?;
+    if let Err(error) = write_journal(paths, journal) {
+        cleanup_staging(journal);
+        return Err(error);
+    }
     if let Err(error) = activate(journal) {
-        let rollback_error = rollback(journal).err();
-        let _ = fs_retry::remove_file(&paths.app_data().join(JOURNAL_FILE));
-        return match rollback_error {
-            Some(rollback_error) => Err(format!("{error} Rollback also failed: {rollback_error}")),
-            None => Err(error),
-        };
+        return Err(undo(paths, journal, error));
     }
     if let Err(error) = ledger::write(&paths.app_data(), ledger_state) {
-        let rollback_error = rollback(journal).err();
-        let _ = fs_retry::remove_file(&paths.app_data().join(JOURNAL_FILE));
-        return match rollback_error {
-            Some(rollback_error) => Err(format!("{error} Rollback also failed: {rollback_error}")),
-            None => Err(error),
-        };
+        return Err(undo(paths, journal, error));
     }
-    cleanup_committed(journal)?;
-    fs_retry::remove_file(&paths.app_data().join(JOURNAL_FILE))
-        .map_err(|error| format!("Could not remove the committed transaction journal: {error}"))?;
-    sync_directory(&paths.app_data())
+    finish_committed(paths, journal);
+    Ok(())
+}
+
+/// Rolls back a transaction that failed before its ledger committed. The
+/// journal is removed only when the rollback succeeded; otherwise it stays so
+/// recovery retries the rollback and restores the user's files.
+fn undo(paths: &SystemPaths, journal: &TransactionJournal, error: String) -> String {
+    match rollback(journal) {
+        Ok(()) => {
+            if let Err(remove_error) = fs_retry::remove_file(&paths.app_data().join(JOURNAL_FILE))
+            {
+                eprintln!("Could not remove the rolled-back transaction journal: {remove_error}");
+            }
+            if let Err(sync_error) = sync_directory(&paths.app_data()) {
+                eprintln!("{sync_error}");
+            }
+            error
+        }
+        Err(rollback_error) => format!(
+            "{error} Some files could not be put back yet ({rollback_error}). Agent Plugins tries again the next time it checks for updates."
+        ),
+    }
 }
 
 pub(super) fn persist_reset_ledger(
@@ -62,9 +74,11 @@ pub(super) fn update_document_digests_from_journal(
         if !affects_document {
             continue;
         }
-        let digest = ledger::bytes_digest(
-            &fs::read(staging).map_err(|error| format!("Could not hash {staging}: {error}"))?,
-        );
+        let bytes = fs::read(staging).map_err(|error| {
+            cleanup_staging(journal);
+            format!("Could not hash {staging}: {error}")
+        })?;
+        let digest = ledger::bytes_digest(&bytes);
         for resource in ledger.resources.values_mut() {
             match &mut resource.owned {
                 OwnedResource::StructuredEntry(owned)

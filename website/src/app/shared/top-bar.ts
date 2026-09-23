@@ -4,7 +4,6 @@ import { MatButtonModule } from "@angular/material/button";
 import { MatProgressBarModule } from "@angular/material/progress-bar";
 import { RouterLink, RouterLinkActive } from "@angular/router";
 import { Session } from "../session";
-import { runTask } from "./tasks";
 import { Icon } from "./icon";
 
 /** The signed-in person, the main action, and (development only) sign-out. */
@@ -47,7 +46,7 @@ export class Account {
   protected readonly session = inject(Session);
 
   protected signOut(): void {
-    runTask(this.session.signOut());
+    this.session.signOut();
   }
 }
 
@@ -61,19 +60,19 @@ export class Account {
         <span>Agent Plugins</span>
       </a>
       <nav aria-label="Main">
-        <a routerLink="/browse" routerLinkActive="active">Browse</a>
+        <a routerLink="/browse" routerLinkActive="active" ariaCurrentWhenActive="page">Browse</a>
         @if (session.me()) {
-          <a routerLink="/mine" routerLinkActive="active">My skills</a>
+          <a routerLink="/mine" routerLinkActive="active" ariaCurrentWhenActive="page">My skills</a>
         }
         @if (session.isAdmin()) {
-          <a routerLink="/admin" routerLinkActive="active" class="with-count">
+          <a routerLink="/admin" routerLinkActive="active" ariaCurrentWhenActive="page" class="with-count">
             Admin
             @if (session.pendingReviews() > 0) {
-              <span class="count" [attr.aria-label]="session.pendingReviews() + ' waiting for review'">{{ session.pendingReviews() }}</span>
+              <span class="count">{{ session.pendingReviews() }}<span class="visually-hidden"> waiting for review</span></span>
             }
           </a>
         }
-        <a routerLink="/help" routerLinkActive="active">Help</a>
+        <a routerLink="/help" routerLinkActive="active" ariaCurrentWhenActive="page">Help</a>
       </nav>
       <span class="spacer"></span>
       <app-account />

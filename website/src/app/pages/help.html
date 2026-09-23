@@ -1,8 +1,8 @@
 <div class="page help">
   <nav class="topics" aria-label="Help topics">
-    <a routerLink="/help/publish" routerLinkActive="active">Command line</a>
-    <a routerLink="/help/source-manifest" routerLinkActive="active">Source manifest</a>
-    <a routerLink="/help/source-repository" routerLinkActive="active">Source repository</a>
+    <a routerLink="/help/publish" routerLinkActive="active" ariaCurrentWhenActive="page">Command line</a>
+    <a routerLink="/help/source-manifest" routerLinkActive="active" ariaCurrentWhenActive="page">Source manifest</a>
+    <a routerLink="/help/source-repository" routerLinkActive="active" ariaCurrentWhenActive="page">Source repository</a>
   </nav>
 
   <article class="spec">
@@ -20,43 +20,43 @@
           <h2 id="create-heading">Create a compatible source</h2>
           <ol class="spec-steps">
             <li>
-              <h2>Make the source tree</h2>
+              <h3>Make the source tree</h3>
               <p>
                 Put <code>agent-plugins.json</code> at the top level. Host a zip, tar, or tar.gz of that tree at an <code>https://</code> artifact URL. Artifact URLs may include a query string and
                 must not include credentials.
               </p>
               <pre><code>example-source/
-        ├── agent-plugins.json
-        ├── mcp/
-        │   └── database.json
-        └── skills/
-        └── review/
-          └── SKILL.md</code></pre>
+├── agent-plugins.json
+├── mcp/
+│   └── database.json
+└── skills/
+    └── review/
+        └── SKILL.md</code></pre>
             </li>
 
             <li>
-              <h2>Write the manifest</h2>
+              <h3>Write the manifest</h3>
               <p>
                 Set <code>version</code> to <code>2</code>. Give the source a stable id. Add one package for each installable unit. A package lists one or more <code>skill</code> or
                 <code>mcpServer</code> components.
               </p>
               <pre><code>&#123;
-        "version": 2,
-        "source": &#123;
-        "id": "example",
-        "name": "Example source",
-        "description": "Portable review configuration."
-        &#125;,
-        "packages": [
-        &#123;
-        "id": "review",
-        "components": [
-          &#123; "kind": "skill", "id": "review", "path": "skills/review" &#125;,
-          &#123; "kind": "mcpServer", "id": "database", "path": "mcp/database.json" &#125;
-        ]
-        &#125;
-        ]
-        &#125;</code></pre>
+  "version": 2,
+  "source": &#123;
+    "id": "example",
+    "name": "Example source",
+    "description": "Portable review configuration."
+  &#125;,
+  "packages": [
+    &#123;
+      "id": "review",
+      "components": [
+        &#123; "kind": "skill", "id": "review", "path": "skills/review" &#125;,
+        &#123; "kind": "mcpServer", "id": "database", "path": "mcp/database.json" &#125;
+      ]
+    &#125;
+  ]
+&#125;</code></pre>
 
               <div class="table-wrap">
                 <table>
@@ -109,20 +109,20 @@
             </li>
 
             <li>
-              <h2>Write the skill</h2>
+              <h3>Write the skill</h3>
               <p>
                 A skill path is a directory that contains <code>SKILL.md</code>. The frontmatter <code>name</code> must match the component id. The directory name does not have to match. Agent Plugins
                 rewrites only <code>name</code> to <code>source-id-component-id</code> on install; other keys and the Markdown body are copied through.
               </p>
               <pre><code>---
-        name: review
-        description: Reviews a change before it is submitted.
-        disable-model-invocation: true
-        ---
+name: review
+description: Reviews a change before it is submitted.
+disable-model-invocation: true
+---
 
-        # Review
+# Review
 
-        Follow the repository's review workflow.</code></pre>
+Follow the repository's review workflow.</code></pre>
               <div class="table-wrap">
                 <table>
                   <thead>
@@ -150,21 +150,21 @@
             </li>
 
             <li>
-              <h2>Write the MCP document</h2>
+              <h3>Write the MCP document</h3>
               <p>
                 An <code>mcpServer</code> path is a JSON file. Set <code>$schema</code> to the Agent Plugins 1.0.0 MCP schema and declare one or more servers. A stdio <code>command</code> must be a
                 bare executable on <code>PATH</code>.
               </p>
               <pre><code>&#123;
-        "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
-        "mcpServers": &#123;
-        "database": &#123;
-        "type": "stdio",
-        "command": "npx",
-        "args": ["&#64;acme/database-mcp"]
-        &#125;
-        &#125;
-        &#125;</code></pre>
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": &#123;
+    "database": &#123;
+      "type": "stdio",
+      "command": "npx",
+      "args": ["&#64;acme/database-mcp"]
+    &#125;
+  &#125;
+&#125;</code></pre>
               <div class="table-wrap">
                 <table>
                   <thead>
@@ -204,7 +204,7 @@
             </li>
 
             <li>
-              <h2>Check paths and limits</h2>
+              <h3>Check paths and limits</h3>
               <ul>
                 <li>Directories are copied recursively. Executable permission bits are preserved where supported.</li>
                 <li>Symlinks, special files, globs, commands, hooks, and environment-variable expansion are not supported.</li>
@@ -213,13 +213,13 @@
             </li>
 
             <li>
-              <h2>Validate and publish</h2>
+              <h3>Validate and publish</h3>
               <p>Check the JSON before committing it:</p>
               <pre><code>jq empty agent-plugins.json</code></pre>
               <p>For structural validation, save the <a href="/schema/v2/source-manifest.schema.json">v2 JSON Schema</a> beside the manifest and run:</p>
               <pre><code>npx ajv-cli validate --spec=draft2020 --strict=false \
-        -s source-manifest.schema.json \
-        -d agent-plugins.json</code></pre>
+  -s source-manifest.schema.json \
+  -d agent-plugins.json</code></pre>
               <p>
                 Upload an archive of the tree with every referenced path. List that HTTPS URL in a
                 <a routerLink="/help/source-repository">source repository</a>. In Agent Plugins, add the listed source from Manage Sources. Adding a source validates the tree and makes packages
@@ -242,23 +242,23 @@
           <h2 id="create-heading">Create a compatible catalog</h2>
           <ol class="spec-steps">
             <li>
-              <h2>Write the catalog</h2>
+              <h3>Write the catalog</h3>
               <p>Set <code>version</code> to <code>1</code>. Give the catalog a stable id, then list each source by name, description, and HTTPS archive URL.</p>
               <pre><code>&#123;
-        "version": 1,
-        "repository": &#123;
-        "id": "acme",
-        "name": "Acme sources",
-        "description": "Official portable sources."
-        &#125;,
-        "sources": [
-        &#123;
-        "name": "Review workflows",
-        "description": "Review skill and database MCP server.",
-        "url": "https://nexus.example.com/repository/raw/sources/review-latest.zip"
-        &#125;
-        ]
-        &#125;</code></pre>
+  "version": 1,
+  "repository": &#123;
+    "id": "acme",
+    "name": "Acme sources",
+    "description": "Official portable sources."
+  &#125;,
+  "sources": [
+    &#123;
+      "name": "Review workflows",
+      "description": "Review skill and database MCP server.",
+      "url": "https://nexus.example.com/repository/raw/sources/review-latest.zip"
+    &#125;
+  ]
+&#125;</code></pre>
 
               <div class="table-wrap">
                 <table>
@@ -296,13 +296,13 @@
             </li>
 
             <li>
-              <h2>Validate and publish</h2>
+              <h3>Validate and publish</h3>
               <p>Check the JSON before publishing it:</p>
               <pre><code>jq empty agent-plugins-repository.json</code></pre>
               <p>For structural validation, save the <a href="/schema/v1/source-repository.schema.json">catalog JSON Schema</a> beside the document and run:</p>
               <pre><code>npx ajv-cli validate --spec=draft2020 --strict=false \
-        -s source-repository.schema.json \
-        -d agent-plugins-repository.json</code></pre>
+  -s source-repository.schema.json \
+  -d agent-plugins-repository.json</code></pre>
               <p>
                 Host the JSON at a stable HTTPS URL. In Agent Plugins, listed sources appear in Manage Sources by name and description. Select Add on a listed source. Adding a source does not install
                 its packages.
@@ -315,20 +315,20 @@
         <header class="intro">
           <h1>Publishing from the command line</h1>
           <p class="spec-intro">
-            Everything the portal does, the <code>agent-plugins</code> command does too, signed in as you. Use it from a terminal, a script, or a coding agent. The desktop app puts it on your
-            <code>PATH</code> the first time it runs.
+            Everything the portal does, the <code>agent-plugins</code> command does too, signed in as you. Use it from a terminal, a script, or a coding agent. If <code>agent-plugins</code> is not
+            found, run it by its full path, <code>"%LOCALAPPDATA%\Programs\Agent Plugins\agent-plugins.exe"</code>, or add that folder to your user <code>PATH</code>.
           </p>
         </header>
 
-        <section aria-labelledby="who-heading">
+        <section aria-label="Steps">
           <ol class="spec-steps">
             <li>
-              <h2 id="who-heading">Check who you publish as</h2>
+              <h3>Check who you publish as</h3>
               <pre><code>agent-plugins whoami</code></pre>
               <p><code>publishes to</code> lists every space you may publish to: your own, your team spaces, and <code>official</code> if you are an approved publisher.</p>
             </li>
             <li>
-              <h2>Publish</h2>
+              <h3>Publish</h3>
               <p>Point <code>publish</code> at what you have. It is wrapped into one package, checked for credentials, validated, and uploaded.</p>
               <div class="table-wrap">
                 <table>
@@ -364,22 +364,22 @@
               </p>
             </li>
             <li>
-              <h2>Review</h2>
+              <h3>Review</h3>
               <p>
                 A package's first version, and every version that contains an MCP server, waits for an admin. The command prints <code>submitted … for review</code>; later skill-only versions of an
                 approved package go live at once. The result shows on <a routerLink="/mine">My skills</a>.
               </p>
             </li>
             <li>
-              <h2>Choose who can see it</h2>
+              <h3>Choose who can see it</h3>
               <pre><code>agent-plugins access jacob/review --group "Finance Team" --user CORP\jane
-        agent-plugins access jacob/review --public</code></pre>
+agent-plugins access jacob/review --public</code></pre>
               <p>Without a list, everyone who signs in can see a package. A package's list replaces its space's list.</p>
             </li>
             <li>
-              <h2>Install</h2>
+              <h3>Install</h3>
               <pre><code>agent-plugins search meeting
-        agent-plugins install jacob/meeting-notes</code></pre>
+agent-plugins install jacob/meeting-notes</code></pre>
               <p>Installing an MCP server needs <code>--approve-mcp</code>, after you have read what it runs.</p>
             </li>
           </ol>

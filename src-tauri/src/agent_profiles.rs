@@ -30,6 +30,7 @@ const NOT_DETECTED: Detection = Detection {
     detected: false,
     version: None,
     message: None,
+    inconclusive: false,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -157,25 +158,84 @@ struct ProfilesFile {
     profiles: Vec<AgentProfile>,
 }
 
+/// Serializes the read-merge-write of the profiles file. Detection runs
+/// outside it, so a slow probe never holds it.
+static PROFILES_LOCK: Mutex<()> = Mutex::new(());
+
+fn profiles_lock() -> std::sync::MutexGuard<'static, ()> {
+    PROFILES_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Never fails: an unusable profiles file falls back to the previous copy,
+/// then to nothing, which the next detection pass fills in again.
 pub(crate) fn read(paths: &SystemPaths) -> Result<Vec<AgentProfile>, String> {
-    let configured = read_configured(paths)?;
+    let (configured, _) = read_configured(paths);
     Ok(materialize(&configured))
 }
 
+/// Enables what detection finds and disables what it no longer finds. A probe
+/// that timed out or failed keeps the agent as it was. Never fails: a profile
+/// file that cannot be written is logged and retried on the next pass.
 pub(crate) fn apply_detected_defaults(paths: &SystemPaths) -> Result<Vec<AgentProfile>, String> {
-    let configured = read_configured(paths)?;
-    let detected = TargetId::ALL
-        .into_iter()
-        .filter(|target| detect(*target).detected)
+    Ok(apply_detections(paths, &detect_all()).0)
+}
+
+/// Looks at the machine again: forgets cached detection, then applies what it
+/// finds. Returns true when an agent was enabled or disabled.
+pub(crate) fn refresh_detection() -> bool {
+    clear_detection_cache();
+    match SystemPaths::from_system() {
+        Ok(paths) => apply_detections(&paths, &detect_all()).1,
+        Err(error) => {
+            eprintln!("Could not look for installed agents: {error}");
+            false
+        }
+    }
+}
+
+fn apply_detections(
+    paths: &SystemPaths,
+    detections: &BTreeMap<TargetId, Detection>,
+) -> (Vec<AgentProfile>, bool) {
+    let detected = detections
+        .iter()
+        .filter(|(_, detection)| detection.detected)
+        .map(|(target, _)| *target)
         .collect::<Vec<_>>();
-    let (next, changed) = merge_detected_defaults(configured, &detected);
-    if changed {
-        write(
+    let inconclusive = detections
+        .iter()
+        .filter(|(_, detection)| detection.inconclusive)
+        .map(|(target, _)| *target)
+        .collect::<Vec<_>>();
+    let _guard = profiles_lock();
+    let (configured, damaged) = read_configured(paths);
+    let enabled_before = enabled_targets(&configured);
+    let (next, changed) = merge_detected_defaults(configured, &detected, &inconclusive);
+    if changed || damaged {
+        if let Err(error) = write(
             paths,
             &next.values().cloned().collect::<Vec<AgentProfile>>(),
-        )?;
+        ) {
+            eprintln!("Agent Plugins could not save the detected agents: {error}");
+        }
     }
-    Ok(materialize(&next))
+    let enabled_changed = enabled_targets(&next) != enabled_before;
+    (materialize(&next), enabled_changed)
+}
+
+fn enabled_targets(configured: &BTreeMap<TargetId, AgentProfile>) -> Vec<TargetId> {
+    configured
+        .values()
+        .filter(|profile| profile.enabled)
+        .map(|profile| profile.target_id)
+        .collect()
+}
+
+fn detect_all() -> BTreeMap<TargetId, Detection> {
+    let detections = crate::parallel::map(&TargetId::ALL, |target| detect(*target));
+    TargetId::ALL.into_iter().zip(detections).collect()
 }
 
 /// Only tests choose an agent by hand; the app enables what it detects.
@@ -185,7 +245,8 @@ pub(crate) fn set_enabled(
     target_id: TargetId,
     enabled: bool,
 ) -> Result<Vec<AgentProfile>, String> {
-    let mut configured = read_configured(paths)?;
+    let _guard = profiles_lock();
+    let (mut configured, _) = read_configured(paths);
     configured
         .entry(target_id)
         .or_insert_with(|| AgentProfile::disabled(target_id))
@@ -198,10 +259,13 @@ pub(crate) fn set_enabled(
 }
 
 pub(crate) fn states(paths: &SystemPaths) -> Result<Vec<AgentProfileState>, String> {
+    let mut detections = detect_all();
     read(paths)?
         .into_iter()
         .map(|profile| {
-            let detection = detect(profile.target_id);
+            let detection = detections
+                .remove(&profile.target_id)
+                .unwrap_or(NOT_DETECTED);
             Ok(AgentProfileState {
                 target_id: profile.target_id,
                 display_name: profile.target_id.display_name().to_string(),
@@ -265,6 +329,9 @@ struct Detection {
     detected: bool,
     version: Option<String>,
     message: Option<String>,
+    /// The probe timed out or failed, which says nothing about whether the
+    /// agent is installed.
+    inconclusive: bool,
 }
 
 /// Detection runs `<agent> --version` for most targets, so a burst of state
@@ -351,6 +418,7 @@ fn detect_m365_copilot_from(onedrive: Option<&Path>) -> Detection {
             detected: true,
             version: None,
             message: None,
+            inconclusive: false,
         },
         Some(_) => Detection {
             detected: false,
@@ -359,6 +427,7 @@ fn detect_m365_copilot_from(onedrive: Option<&Path>) -> Detection {
                 "OneDrive for work or school is signed in, but it has no Documents\\Cowork folder yet. Use Cowork once, then refresh."
                     .to_string(),
             ),
+            inconclusive: false,
         },
         None => NOT_DETECTED,
     }
@@ -408,6 +477,7 @@ fn detect_msix_from(
             detected: true,
             version,
             message: None,
+            inconclusive: false,
         })
     })
 }
@@ -422,6 +492,7 @@ fn detect_squirrel_claude_from(root: &Path) -> Option<Detection> {
                 .map(|name| name["app-".len()..].to_string())
         }),
         message: None,
+        inconclusive: false,
     })
 }
 
@@ -430,6 +501,7 @@ fn detect_app_bundle(app: &Path) -> Option<Detection> {
         detected: true,
         version: None,
         message: None,
+        inconclusive: false,
     })
 }
 
@@ -444,6 +516,7 @@ fn detect_cursor_application_from(roots: &[PathBuf]) -> Option<Detection> {
             detected: true,
             version: read_json_string_field(&product, "version"),
             message: None,
+            inconclusive: false,
         })
     })
 }
@@ -589,6 +662,7 @@ fn detect_vscode_copilot_from(editions: &[VscodeEdition]) -> Option<Detection> {
             detected: true,
             version: read_json_string_field(&dir.join("package.json"), "version"),
             message: None,
+            inconclusive: false,
         })
     })
 }
@@ -608,6 +682,7 @@ fn detect_jetbrains_copilot_from(
                     detected: true,
                     version: read_json_string_field(&plugin.join("package.json"), "version"),
                     message: None,
+                    inconclusive: false,
                 });
             }
         }
@@ -767,7 +842,12 @@ fn detect_command(target: TargetId) -> Detection {
     let Some(program) = target.command() else {
         return NOT_DETECTED;
     };
-    let mut command = process::command(Path::new(program));
+    // The PATH this process started with misses anything installed since, and
+    // `Command` does not resolve `.cmd` shims on Windows, so look it up fresh.
+    let Some(program) = crate::startup::find_program(program) else {
+        return NOT_DETECTED;
+    };
+    let mut command = process::command(&program);
     command.arg("--version");
     match process::run(
         command,
@@ -781,56 +861,63 @@ fn detect_command(target: TargetId) -> Detection {
                 detected: true,
                 version,
                 message: None,
+                inconclusive: false,
             }
         }
-        Ok(_) => Detection {
-            detected: false,
-            version: None,
-            message: None,
-        },
+        Ok(_) => NOT_DETECTED,
+        Err(error) if is_missing_program_error(&error) => NOT_DETECTED,
         Err(error) => Detection {
             detected: false,
             version: None,
-            message: (!is_missing_program_error(&error)).then_some(error),
+            message: Some(error),
+            inconclusive: true,
         },
     }
 }
 
-fn read_configured(paths: &SystemPaths) -> Result<BTreeMap<TargetId, AgentProfile>, String> {
-    recover(&paths.app_data())?;
-    let path = paths.app_data().join(PROFILES_FILE);
-    let configured = match fs::read(&path) {
-        Ok(contents) => {
-            let file = serde_json::from_slice::<ProfilesFile>(&contents)
-                .map_err(|error| format!("Could not parse {}: {error}", path.display()))?;
-            if file.version != PROFILES_VERSION {
-                return Err(format!(
-                    "{} uses an unsupported profile version.",
-                    path.display()
-                ));
+/// The saved profiles, or the previous copy when the current file is missing
+/// or unusable. Profiles only record what detection found, so when neither
+/// copy is usable the app starts empty and detection rebuilds them. The flag
+/// is true when the current file needs rewriting.
+fn read_configured(paths: &SystemPaths) -> (BTreeMap<TargetId, AgentProfile>, bool) {
+    let data_base = paths.app_data();
+    let mut damaged = false;
+    for name in [PROFILES_FILE, PROFILES_BACKUP_FILE] {
+        match read_profiles_file(&data_base.join(name)) {
+            Ok(Some(profiles)) => return (profiles, damaged),
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("Agent Plugins ignored an unusable agent profile file: {error}")
             }
-            file.profiles
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(format!("Could not read {}: {error}", path.display())),
+        damaged = true;
+    }
+    (BTreeMap::new(), damaged)
+}
+
+/// `Ok(None)` when the file does not exist. A profile that fails validation is
+/// dropped, and detection adds the agent back.
+fn read_profiles_file(path: &Path) -> Result<Option<BTreeMap<TargetId, AgentProfile>>, String> {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Could not read {}: {error}.", path.display())),
     };
+    let file = serde_json::from_slice::<ProfilesFile>(&contents)
+        .map_err(|error| format!("Could not parse {}: {error}.", path.display()))?;
+    if file.version != PROFILES_VERSION {
+        return Err(format!(
+            "{} uses an unsupported profile version.",
+            path.display()
+        ));
+    }
     let mut profiles = BTreeMap::new();
-    for profile in configured {
-        if profile.scopes != ["user"] || profile.dialect_id.is_empty() {
-            return Err(format!(
-                "{} contains an invalid profile for {}.",
-                path.display(),
-                profile.target_id.as_str()
-            ));
-        }
-        if profiles.insert(profile.target_id, profile).is_some() {
-            return Err(format!(
-                "{} contains a duplicate agent profile.",
-                path.display()
-            ));
+    for profile in file.profiles {
+        if profile.scopes == ["user"] && !profile.dialect_id.is_empty() {
+            profiles.entry(profile.target_id).or_insert(profile);
         }
     }
-    Ok(profiles)
+    Ok(Some(profiles))
 }
 
 fn materialize(configured: &BTreeMap<TargetId, AgentProfile>) -> Vec<AgentProfile> {
@@ -848,6 +935,7 @@ fn materialize(configured: &BTreeMap<TargetId, AgentProfile>) -> Vec<AgentProfil
 fn merge_detected_defaults(
     mut configured: BTreeMap<TargetId, AgentProfile>,
     detected: &[TargetId],
+    inconclusive: &[TargetId],
 ) -> (BTreeMap<TargetId, AgentProfile>, bool) {
     let mut changed = false;
     for target in TargetId::ALL {
@@ -862,11 +950,18 @@ fn merge_detected_defaults(
                 });
                 changed = true;
             }
-            std::collections::btree_map::Entry::Occupied(mut entry)
-                if entry.get().enabled != should_enable =>
-            {
-                entry.get_mut().enabled = should_enable;
-                changed = true;
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let profile = entry.get_mut();
+                // The adapters block a dialect they do not recognize, and a
+                // stored one only ever lags behind this build.
+                if profile.dialect_id != target.current_dialect() {
+                    profile.dialect_id = target.current_dialect();
+                    changed = true;
+                }
+                if profile.enabled != should_enable && !inconclusive.contains(&target) {
+                    profile.enabled = should_enable;
+                    changed = true;
+                }
             }
             _ => {}
         }
@@ -886,7 +981,6 @@ fn write(paths: &SystemPaths, profiles: &[AgentProfile]) -> Result<(), String> {
     let data_base = paths.app_data();
     fs::create_dir_all(&data_base)
         .map_err(|error| format!("Could not create {}: {error}", data_base.display()))?;
-    recover(&data_base)?;
     let file = ProfilesFile {
         version: PROFILES_VERSION,
         profiles: profiles.to_vec(),
@@ -902,6 +996,10 @@ fn write(paths: &SystemPaths, profiles: &[AgentProfile]) -> Result<(), String> {
     )
 }
 
+/// Replaces `path` and keeps the file it replaces as `backup`, the last good
+/// copy. A current file that does not parse is not worth keeping, so the
+/// backup stays as it was. Reads fall back to the backup while `path` is
+/// briefly missing.
 fn atomic_write(
     directory: &Path,
     path: &Path,
@@ -909,47 +1007,29 @@ fn atomic_write(
     contents: &[u8],
 ) -> Result<(), String> {
     let staging = temporary_path(directory, "agent-profiles-writing");
-    let mut file = OpenOptions::new()
+    let staged = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&staging)
-        .map_err(|error| format!("Could not create {}: {error}", staging.display()))?;
-    file.write_all(contents)
-        .and_then(|()| file.sync_all())
-        .map_err(|error| format!("Could not write {}: {error}", staging.display()))?;
-    if path.exists() {
-        if backup.exists() {
-            fs_retry::remove_file(backup)
-                .map_err(|error| format!("Could not remove {}: {error}", backup.display()))?;
+        .and_then(|mut file| file.write_all(contents).and_then(|()| file.sync_all()));
+    if let Err(error) = staged {
+        let _ = fs_retry::remove_file(&staging);
+        return Err(format!("Could not write {}: {error}", staging.display()));
+    }
+    if matches!(read_profiles_file(path), Ok(Some(_))) {
+        if let Err(error) = fs_retry::rename(path, backup) {
+            let _ = fs_retry::remove_file(&staging);
+            return Err(format!(
+                "Could not keep a copy of {}: {error}",
+                path.display()
+            ));
         }
-        fs_retry::rename(path, backup)
-            .map_err(|error| format!("Could not stage {}: {error}", path.display()))?;
     }
     if let Err(error) = fs_retry::rename(&staging, path) {
-        if backup.exists() {
-            let _ = fs_retry::rename(backup, path);
-        }
+        let _ = fs_retry::remove_file(&staging);
         return Err(format!("Could not activate {}: {error}", path.display()));
     }
-    sync_directory(directory)?;
-    if backup.exists() {
-        fs_retry::remove_file(backup)
-            .map_err(|error| format!("Could not remove {}: {error}", backup.display()))?;
-    }
-    Ok(())
-}
-
-fn recover(data_base: &Path) -> Result<(), String> {
-    let path = data_base.join(PROFILES_FILE);
-    if path.exists() {
-        return Ok(());
-    }
-    let backup = data_base.join(PROFILES_BACKUP_FILE);
-    match fs_retry::rename(&backup, &path) {
-        Ok(()) => sync_directory(data_base),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Could not recover {}: {error}", path.display())),
-    }
+    sync_directory(directory)
 }
 
 #[cfg(test)]
@@ -999,14 +1079,78 @@ mod tests {
             },
         )]);
         let (next, changed) =
-            merge_detected_defaults(configured, &[TargetId::Cursor, TargetId::Codex]);
+            merge_detected_defaults(configured, &[TargetId::Cursor, TargetId::Codex], &[]);
         assert!(changed);
         assert!(next[&TargetId::Cursor].enabled);
         assert!(next[&TargetId::Codex].enabled);
-        let (after_loss, lost) = merge_detected_defaults(next, &[TargetId::Cursor]);
+        let (after_loss, lost) = merge_detected_defaults(next, &[TargetId::Cursor], &[]);
         assert!(lost);
         assert!(after_loss[&TargetId::Cursor].enabled);
         assert!(!after_loss[&TargetId::Codex].enabled);
+    }
+
+    fn profile(target_id: TargetId, enabled: bool, dialect_id: &str) -> AgentProfile {
+        AgentProfile {
+            target_id,
+            enabled,
+            scopes: vec!["user".to_string()],
+            dialect_id: dialect_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_failed_probe_keeps_the_agent_as_it_was() {
+        let configured = BTreeMap::from([(
+            TargetId::Codex,
+            profile(TargetId::Codex, true, &TargetId::Codex.current_dialect()),
+        )]);
+        let (kept, changed) = merge_detected_defaults(configured, &[], &[TargetId::Codex]);
+        assert!(!changed);
+        assert!(kept[&TargetId::Codex].enabled);
+        let (lost, changed) = merge_detected_defaults(kept, &[], &[]);
+        assert!(changed);
+        assert!(!lost[&TargetId::Codex].enabled);
+    }
+
+    #[test]
+    fn merging_refreshes_a_stale_dialect() {
+        let configured = BTreeMap::from([(
+            TargetId::ClaudeDesktop,
+            profile(TargetId::ClaudeDesktop, true, "claude-desktop-2026-08"),
+        )]);
+        let (next, changed) = merge_detected_defaults(configured, &[TargetId::ClaudeDesktop], &[]);
+        assert!(changed);
+        assert_eq!(
+            next[&TargetId::ClaudeDesktop].dialect_id,
+            TargetId::ClaudeDesktop.current_dialect()
+        );
+    }
+
+    #[test]
+    fn damaged_profiles_fall_back_to_the_previous_copy_then_to_detection() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        set_enabled(&paths, TargetId::Codex, true).expect("first write");
+        set_enabled(&paths, TargetId::Cursor, true).expect("second write");
+        let current = paths.app_data().join(PROFILES_FILE);
+        let previous = paths.app_data().join(PROFILES_BACKUP_FILE);
+        let enabled = |paths: &SystemPaths| {
+            read(paths)
+                .expect("read never fails")
+                .into_iter()
+                .filter(|profile| profile.enabled)
+                .map(|profile| profile.target_id)
+                .collect::<Vec<_>>()
+        };
+
+        fs::write(&current, b"{ not json").expect("corrupt current");
+        assert_eq!(enabled(&paths), [TargetId::Codex]);
+
+        fs::write(&previous, b"").expect("corrupt previous");
+        assert!(enabled(&paths).is_empty());
+
+        apply_detections(&paths, &BTreeMap::new());
+        assert!(matches!(read_profiles_file(&current), Ok(Some(_))));
     }
 
     fn write_vscode_like_product_json(root: &Path, version: &str) {

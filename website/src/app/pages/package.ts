@@ -36,6 +36,7 @@ export class PackagePage {
   /** Publisher, lane, and install counts come from the index, which lists live packages only. */
   protected readonly listing = resource({ params: () => ({ id: `${this.ns()}/${this.pkg()}` }), loader: async ({ params }) => (await this.api.index()).find((item) => item.id === params.id) ?? null });
 
+  protected readonly loadProblem = computed(() => (this.detail.error() === undefined ? null : ApiError.from(this.detail.error())));
   protected readonly entry = computed(() => (this.listing.hasValue() ? this.listing.value() : null));
 
   protected readonly owner = computed(() => {
@@ -74,13 +75,13 @@ export class PackagePage {
   protected readonly shownVersion = computed(() => this.versions().find((version) => version.version === this.shown()) ?? null);
   protected readonly ownerStatus = computed(() => (this.owner() && this.detail.hasValue() ? packageStatus(this.detail.value()) : null));
   protected readonly kinds = computed(() => describeKinds(this.shownVersion()?.componentKinds ?? []));
-  protected readonly editable = computed(() => {
-    const kinds = this.shownVersion()?.componentKinds ?? [];
-    return kinds.length > 0 && kinds.every((kind) => kind === "skill");
-  });
 
   protected withdraw(version: PackageVersion): void {
     runTask(this.confirmWithdraw(version));
+  }
+
+  protected restore(version: PackageVersion): void {
+    runTask(this.confirmRestore(version));
   }
 
   protected report(): void {
@@ -93,7 +94,7 @@ export class PackagePage {
       title: `Withdraw version ${version.version}?`,
       message: live
         ? "People who don't have it yet won't be able to install it. The previous approved version, if any, becomes the live one again."
-        : "It will no longer be offered to anyone. This can't be undone; publish a new version instead.",
+        : "It will no longer be offered to anyone. You can restore it later.",
       confirm: "Withdraw",
       danger: true
     });
@@ -104,6 +105,29 @@ export class PackagePage {
     try {
       await this.api.withdraw(this.ns(), this.pkg(), version.version);
       this.snackBar.open(`Version ${version.version} withdrawn.`, undefined, { duration: 4000 });
+      this.detail.reload();
+      this.listing.reload();
+    } catch (error) {
+      this.snackBar.open(ApiError.from(error).message, "Dismiss");
+    }
+  }
+
+  private async confirmRestore(version: PackageVersion): Promise<void> {
+    const confirmed = await prompt(this.dialog, {
+      title: `Restore version ${version.version}?`,
+      message:
+        version.reviewState === "approved"
+          ? "It will be offered again. If it's the newest approved version, it becomes the live one."
+          : "It comes back in its review state and goes live only if an admin approves it.",
+      confirm: "Restore"
+    });
+    if (confirmed === undefined) {
+      return;
+    }
+
+    try {
+      await this.api.restore(this.ns(), this.pkg(), version.version);
+      this.snackBar.open(`Version ${version.version} restored.`, undefined, { duration: 4000 });
       this.detail.reload();
       this.listing.reload();
     } catch (error) {
@@ -123,7 +147,7 @@ export class PackagePage {
     }
 
     try {
-      await this.api.report(`${this.ns()}/${this.pkg()}`, reason);
+      await this.api.report(this.ns(), this.pkg(), reason);
       this.snackBar.open("Thanks. The admins have your report.", undefined, { duration: 4000 });
     } catch (error) {
       this.snackBar.open(ApiError.from(error).message, "Dismiss");

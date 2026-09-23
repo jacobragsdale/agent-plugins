@@ -15,6 +15,7 @@ mod host_identity;
 mod install;
 #[cfg(feature = "app")]
 mod ipc;
+mod ipc_error;
 mod ledger;
 mod locator;
 mod managed_documents;
@@ -34,17 +35,14 @@ mod sources;
 pub mod staging;
 mod startup;
 
-/// The host preparation report from process start, for the preflight.
-pub(crate) static STARTUP_REPORT: std::sync::OnceLock<startup::StartupReport> =
-    std::sync::OnceLock::new();
+/// The host preparation report, for the preflight.
+pub(crate) static STARTUP_REPORT: startup::SharedReport = startup::SharedReport::new();
 
-/// Runs host preparation once and remembers the report.
-pub(crate) fn prepare_host() -> &'static startup::StartupReport {
-    STARTUP_REPORT.get_or_init(|| {
-        let report = startup::prepare();
-        report.log();
-        report
-    })
+/// Runs host preparation for the command line, `uv` download included.
+pub(crate) fn prepare_host() {
+    let report = startup::prepare();
+    report.log();
+    STARTUP_REPORT.set(report);
 }
 
 pub use repository::{
@@ -63,19 +61,12 @@ pub fn run() {
     if let Some(code) = cli::maybe_run() {
         std::process::exit(code);
     }
-    prepare_host();
     let runtime_state =
         application::RuntimeState::new().expect("could not initialize the Agent Plugins runtime");
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-        match crate::tray::show_main_window(app) {
-            Ok(true) => {}
-            Ok(false) => {
-                eprintln!("Could not open Agent Plugins because its main window is unavailable.");
-            }
-            Err(error) => eprintln!("Could not open Agent Plugins: {error}"),
-        }
+        crate::tray::open_main_window(app);
     }));
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
@@ -89,10 +80,18 @@ pub fn run() {
     builder
         .manage(runtime_state)
         .setup(|app| {
+            // Plugins set up first, so a second launch has already handed
+            // over to the running app. Nothing here touches the network, and
+            // the event loop runs no command until setup returns, so every
+            // sync sees the repaired proxy variables.
+            let report = startup::prepare_process();
+            report.log();
+            STARTUP_REPORT.set(report);
             #[cfg(desktop)]
             crate::tray::setup(app)?;
             let _scheduler =
                 tauri::async_runtime::spawn(application::run_scheduled_sync(app.handle().clone()));
+            startup::finish_in_background();
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -101,11 +100,17 @@ pub fn run() {
                 if window.label() != "main" {
                     return;
                 }
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    if let Err(error) = window.hide() {
-                        eprintln!("Could not hide Agent Plugins in the system tray: {error}");
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        if let Err(error) = window.hide() {
+                            eprintln!("Could not hide Agent Plugins in the system tray: {error}");
+                        }
                     }
+                    tauri::WindowEvent::Focused(true) => {
+                        application::sync_on_focus(tauri::Manager::app_handle(window));
+                    }
+                    _ => {}
                 }
             }
         })

@@ -1,4 +1,4 @@
-<a class="skip-link" href="#content">Skip to content</a>
+<a class="skip-link" href="#content" (click)="skipToContent($event)">Skip to content</a>
 
 <app-top-bar />
 
@@ -12,16 +12,20 @@
     <mat-form-field appearance="outline" subscriptSizing="dynamic">
       <mat-label>Windows account</mat-label>
       <input matInput name="account" autocomplete="username" placeholder="CORP\jane" [value]="devAccount()" (input)="setDevAccount($event)" />
+      <mat-hint>{{ devAccountProblem() }}</mat-hint>
     </mat-form-field>
     <button mat-flat-button type="submit">Sign in</button>
   </form>
 } @else if (state.kind === "signed-out") {
   <p class="banner" role="alert">Windows didn't sign you in. Open this page in Edge or Chrome on your work PC to see skills and share your own.</p>
 } @else if (state.kind === "unavailable") {
-  <p class="banner" role="alert">The marketplace isn't reachable right now. Browsing and publishing will work again once it is.</p>
+  <p class="banner" role="alert">
+    The marketplace isn't reachable right now. Browsing and publishing will work again once it is.
+    <button mat-button type="button" (click)="retry()">Try again</button>
+  </p>
 }
 
-<main id="content">
+<main id="content" tabindex="-1">
   <router-outlet />
 </main>
 

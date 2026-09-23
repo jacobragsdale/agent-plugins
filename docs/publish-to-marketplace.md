@@ -4,7 +4,7 @@ This tutorial publishes a skill you already have on your machine to the company 
 
 ## From the web portal
 
-Open the marketplace in your browser and choose **Share a skill**. Write the skill there (a name, when the AI should use it, and the instructions), or choose **Upload files** and drag in a skill folder, a folder of skill folders, a `SKILL.md`, or a zip. Add another skill in the editor to make a skill pack. The rest of this page is the command-line route.
+Open the marketplace in your browser and choose **Share a skill**. Pick who it is for (just you, or one of your teams), then drag in what you already have: a skill folder, a folder of skill folders (a skill pack), a `SKILL.md`, a zip, or an MCP server's `.json`. Skills you use in Claude Code live in `%USERPROFILE%\.claude\skills`. To change a published skill, edit it on your machine and choose **Upload a new version** on its page. The rest of this page is the command-line route.
 
 ## From an agent
 
@@ -16,7 +16,7 @@ The skill validates the package, proposes a better description and tags, runs a 
 
 ## From a terminal
 
-`agent-plugins` is the Agent Plugins executable. It is on PATH after the app's first run; otherwise use `"%LOCALAPPDATA%\Programs\Agent Plugins\agent-plugins.exe"`.
+`agent-plugins` is the Agent Plugins executable. The installer does not add it to PATH; run it as `"%LOCALAPPDATA%\Programs\Agent Plugins\agent-plugins.exe"`, or add that folder to your user PATH.
 
 1. Check who you are:
 
@@ -24,7 +24,7 @@ The skill validates the package, proposes a better description and tags, runs a 
    agent-plugins whoami
    ```
 
-   The `namespace` line is where your packages publish: your lowercase account name.
+   The `namespace` line is where your packages publish: your lowercase account name, or that name with a number on the end (`christopher-jo-2`) when another account claimed it first.
 
 2. Point at the skill directory (it contains `SKILL.md`):
 
@@ -67,7 +67,7 @@ The skill validates the package, proposes a better description and tags, runs a 
 
 ## Versions
 
-Versions are immutable semantic versions. Publish a new version to change anything; the namespace archive always carries the latest non-yanked version of each package, so clients update on their next sync. Withdraw a version from its page in the portal, or yank it with the API, when it must disappear from the catalog (installed copies are unaffected). A version number that was ever used, including one an admin sent back, cannot be reused.
+Versions are immutable release versions, `major.minor.patch`; a pre-release such as `1.0.0-beta.1` is refused. Publish a new version to change anything; the namespace archive always carries the latest non-yanked version of each package, so clients update on their next sync. Withdraw a version from its page in the portal, or yank it with the API, when it must disappear from the catalog (installed copies are unaffected). A withdrawn version can be restored the same way. A version number that was ever used, including one an admin sent back or one you withdrew, cannot be reused; the server names the next free one.
 
 ## Rules the CLI enforces
 
@@ -75,5 +75,7 @@ Versions are immutable semantic versions. Publish a new version to change anythi
 - No `.env`, key, certificate, or token-looking content.
 - `SKILL.md` has a non-empty `name` and `description`; the name equals the package ID.
 - The package validates: the server runs the same validator and credential scan and rejects a mismatch.
+
+The server also refuses more than 10 tags, a tag that is not up to 32 lowercase letters, digits, and single hyphens, and a changelog over 4,096 characters.
 
 See [the API reference](marketplace-api.md) for the request the CLI makes and [ADR 0004](decisions/0004-internal-marketplace.md) for why publishing works this way.

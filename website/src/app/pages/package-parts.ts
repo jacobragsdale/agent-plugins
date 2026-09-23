@@ -6,6 +6,7 @@ import { MatSelectModule } from "@angular/material/select";
 import { MatSnackBar } from "@angular/material/snack-bar";
 import { RouterLink } from "@angular/router";
 import type { IndexPackage, PackageDetail, PackageStats, PackageVersion } from "../api";
+import { archiveUrl } from "../api";
 import { formatAge, formatBytes, formatDate } from "../format";
 import { editVisibility } from "../shared/dialogs";
 import { FileViewer } from "../shared/file-viewer";
@@ -61,10 +62,7 @@ export class PackageHeader {
       <p class="detail">{{ status().detail }}</p>
     </div>
     <div class="row">
-      @if (editable()) {
-        <a mat-flat-button [routerLink]="['/p', ns(), pkg(), 'edit']"><app-icon name="edit" />Edit</a>
-      }
-      <a mat-stroked-button [routerLink]="['/p', ns(), pkg(), 'upload']"><app-icon name="upload" />Upload a new version</a>
+      <a mat-flat-button [routerLink]="['/p', ns(), pkg(), 'upload']"><app-icon name="upload" />Upload a new version</a>
       <button mat-stroked-button type="button" (click)="visibility()"><app-icon name="visibility" />Who can see this</button>
     </div>
   `,
@@ -86,7 +84,6 @@ export class OwnerPanel {
   public readonly pkg = input.required<string>();
   public readonly name = input.required<string>();
   public readonly status = input.required<PackageStatus>();
-  public readonly editable = input.required<boolean>();
   public readonly changed = output();
 
   private readonly dialog = inject(MatDialog);
@@ -152,16 +149,49 @@ export class VersionFiles {
   }
 }
 
+/** A version's download link, and for owners the button that withdraws or restores it. */
+@Component({
+  selector: "app-version-actions",
+  imports: [MatButtonModule, Icon],
+  template: `
+    @if (archive(); as href) {
+      <a mat-button [href]="href" download><app-icon name="download" />Download</a>
+    }
+    @if (owner()) {
+      <button mat-button type="button" [class.withdraw]="!version().yanked" (click)="toggle()">{{ version().yanked ? "Restore" : "Withdraw" }}</button>
+    }
+  `,
+  styles: `
+    .withdraw {
+      color: var(--mat-sys-error);
+    }
+  `,
+  host: { class: "row" }
+})
+export class VersionActions {
+  public readonly version = input.required<PackageVersion>();
+  /** The zip, for versions the viewer may read: owners any, everyone else live ones. */
+  public readonly archive = input.required<string | null>();
+  public readonly owner = input.required<boolean>();
+  public readonly withdraw = output<PackageVersion>();
+  public readonly restore = output<PackageVersion>();
+
+  protected toggle(): void {
+    const version = this.version();
+    (version.yanked ? this.restore : this.withdraw).emit(version);
+  }
+}
+
 interface VersionRow {
   readonly version: PackageVersion;
   readonly badges: readonly { readonly label: string; readonly badge: string }[];
   readonly when: string;
-  readonly canWithdraw: boolean;
+  readonly archive: string | null;
 }
 
 @Component({
   selector: "app-version-list",
-  imports: [MatButtonModule],
+  imports: [VersionActions],
   template: `
     <ol>
       @for (row of rows(); track row.version.version) {
@@ -180,9 +210,7 @@ interface VersionRow {
           @if (row.version.reviewNote; as note) {
             <p class="note"><strong>Reviewer:</strong> {{ note }}</p>
           }
-          @if (row.canWithdraw) {
-            <button mat-button type="button" class="withdraw" (click)="withdraw.emit(row.version)">Withdraw</button>
-          }
+          <app-version-actions class="actions" [version]="row.version" [archive]="row.archive" [owner]="owner()" (withdraw)="withdraw.emit($event)" (restore)="restore.emit($event)" />
         </li>
       }
     </ol>
@@ -203,23 +231,26 @@ interface VersionRow {
     .note {
       color: var(--mat-sys-on-surface-variant);
     }
-    .withdraw {
+    .actions {
       margin-top: 0.25rem;
-      color: var(--mat-sys-error);
     }
   `
 })
 export class VersionList {
+  public readonly ns = input.required<string>();
+  public readonly pkg = input.required<string>();
   public readonly versions = input.required<readonly PackageVersion[]>();
   public readonly liveVersion = input.required<string | null>();
   public readonly owner = input.required<boolean>();
   public readonly withdraw = output<PackageVersion>();
+  public readonly restore = output<PackageVersion>();
 
   protected readonly rows = computed<readonly VersionRow[]>(() =>
     this.versions().map((version) => {
       const state = versionState(version);
       const badges = [...(this.owner() || version.yanked ? [state] : []), ...(version.version === this.liveVersion() ? [{ label: "Live", badge: "badge live" }] : [])];
-      return { version, badges, when: formatDate(version.publishedAt), canWithdraw: this.owner() && !version.yanked };
+      const readable = this.owner() || (version.reviewState === "approved" && !version.yanked);
+      return { version, badges, when: formatDate(version.publishedAt), archive: readable ? archiveUrl(this.ns(), this.pkg(), version.version) : null };
     })
   );
 }

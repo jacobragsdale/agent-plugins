@@ -12,15 +12,17 @@ use crate::paths::SystemPaths;
 use crate::planner;
 #[cfg(test)]
 use crate::resource::StructuredFormat;
-use crate::resource::{DesiredResource, OperationPlan};
+use crate::resource::{DesiredResource, DesiredStructuredEntry, OperationPlan};
 use crate::source::{ConfiguredSource, SourceSnapshot};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod activate;
 mod journal;
+pub(crate) use journal::{UNDO_PENDING, UNDO_RUNNING};
 mod matching;
 mod stage;
 
@@ -29,14 +31,214 @@ use journal::{
     cleanup_staging, read_ledger_raw, JournalMutation, TransactionJournal, JOURNAL_FILE,
 };
 use matching::plan_matches_ledger;
-use stage::{mutation_backup, stage_changes, StageRequest};
+use stage::{identical_to_desired, mutation_backup, stage_changes, StageRequest};
 
 pub(crate) use journal::recover;
-pub(crate) use matching::{installation_matches, plan_satisfied, resource_matches};
+pub(crate) use matching::{installation_state, plan_satisfied, resource_state, ContentState};
 
+/// Staging names the executor and the ledger create next to their targets.
+/// Backups (`.resource-previous-*`) are not listed: one may be the only copy
+/// of a user's file while a rollback is pending.
+const STAGING_PREFIXES: [&str; 4] = [
+    ".resource-installing-",
+    ".document-writing-",
+    ".installations-writing-",
+    ".resource-transaction-writing-",
+];
+const STALE_STAGING_AGE: Duration = Duration::from_secs(10 * 60);
+
+/// The ledger for display. Reads never wait on recovery: a rollback that
+/// cannot finish yet is retried by the next change or sync.
 pub(crate) fn read_ledger(paths: &SystemPaths) -> Result<InstallationLedger, String> {
-    recover(paths)?;
+    if let Err(error) = recover(paths) {
+        eprintln!("{error}");
+    }
     read_ledger_raw(paths)
+}
+
+/// The ledger a change starts from, after recovery. A ledger that a newer
+/// version wrote is shown but never changed.
+fn ledger_for_change(paths: &SystemPaths) -> Result<InstallationLedger, String> {
+    recover(paths)?;
+    let ledger = read_ledger_raw(paths)?;
+    if ledger.read_only {
+        return Err(ledger::NEWER_LEDGER_MESSAGE.to_string());
+    }
+    Ok(ledger)
+}
+
+/// How a refusal to overwrite a person's edits reads.
+pub(crate) const LOCAL_CHANGES: &str = "contains local changes";
+
+fn protected_error(installation_id: &str, state: &ContentState, action: &str) -> String {
+    match state {
+        ContentState::Unknown(error) => {
+            format!("{installation_id} could not be checked, so it cannot be {action}. {error}")
+        }
+        _ => format!("{installation_id} {LOCAL_CHANGES} and cannot be {action}."),
+    }
+}
+
+/// Packages that skipped an agent because its settings file was unreadable
+/// or locked. The next sync retries them.
+// ponytail: in memory, so a restart forgets the retry; persist it if agents stay skipped.
+fn skipped_agents() -> &'static Mutex<BTreeSet<String>> {
+    static SKIPPED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+    &SKIPPED
+}
+
+/// Whether `installation_id` skipped an agent since the last call, clearing it.
+pub(crate) fn take_skipped_agent(installation_id: &str) -> bool {
+    skipped_agents()
+        .lock()
+        .is_ok_and(|mut skipped| skipped.remove(installation_id))
+}
+
+/// One agent's unreadable or locked settings file skips only that agent: the
+/// bindings that would write to it leave the plan, and each skipped file
+/// becomes a warning. Fails only when nothing else is left to install.
+fn skip_unusable_documents(
+    plan: &mut OperationPlan,
+    installation_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut problems = BTreeMap::<PathBuf, String>::new();
+    for planned in plan.resources.values() {
+        let DesiredResource::StructuredEntry(desired) = &planned.desired else {
+            continue;
+        };
+        if problems.contains_key(&desired.document_path) {
+            continue;
+        }
+        if let Some(problem) = document_problem(desired, &planned.adapter_id) {
+            problems.insert(desired.document_path.clone(), problem);
+        }
+    }
+    if problems.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dropped_resources = plan
+        .resources
+        .values()
+        .filter(|planned| {
+            matches!(&planned.desired, DesiredResource::StructuredEntry(desired)
+                if problems.contains_key(&desired.document_path))
+        })
+        .map(|planned| planned.id.clone())
+        .collect::<BTreeSet<_>>();
+    let dropped_bindings = plan
+        .bindings
+        .values()
+        .filter(|binding| {
+            binding
+                .resource_ids
+                .iter()
+                .any(|resource_id| dropped_resources.contains(resource_id))
+        })
+        .map(|binding| binding.id.clone())
+        .collect::<BTreeSet<_>>();
+    let warnings = problems.into_values().collect::<Vec<_>>();
+    if dropped_bindings.len() == plan.bindings.len() {
+        return Err(warnings.join(" "));
+    }
+    plan.bindings
+        .retain(|binding_id, _| !dropped_bindings.contains(binding_id));
+    plan.resources.retain(|_, planned| {
+        planned
+            .consumer_binding_ids
+            .retain(|binding_id| !dropped_bindings.contains(binding_id));
+        !planned.consumer_binding_ids.is_empty()
+    });
+    if let Ok(mut skipped) = skipped_agents().lock() {
+        skipped.insert(installation_id.to_string());
+    }
+    Ok(warnings)
+}
+
+fn document_problem(desired: &DesiredStructuredEntry, adapter_id: &str) -> Option<String> {
+    let path = &desired.document_path;
+    let unreadable = managed_documents::read_or_empty(path, desired.format).and_then(|contents| {
+        managed_documents::entry_value(&contents, desired.format, &desired.key_path)
+    });
+    if let Err(error) = unreadable {
+        return Some(managed_documents::document_error(
+            path,
+            [adapter_id],
+            &error,
+        ));
+    }
+    document_locked(path).then(|| {
+        let app = managed_documents::app_names([adapter_id]);
+        format!(
+            "{app} is using its settings file {}, so the package was not added to {app}. Close {app}; Agent Plugins tries again the next time it checks for updates.",
+            path.display()
+        )
+    })
+}
+
+/// A settings file another process holds without sharing, which a rename
+/// cannot replace until that app closes.
+#[cfg(windows)]
+fn document_locked(path: &Path) -> bool {
+    fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .is_err_and(|error| matches!(error.raw_os_error(), Some(32 | 33)))
+}
+
+#[cfg(not(windows))]
+fn document_locked(_path: &Path) -> bool {
+    false
+}
+
+/// Removes staging that an interrupted run left next to agent files and in
+/// Agent Plugins' own data folder. Only names older than a few minutes are
+/// touched, and nothing while a transaction is pending.
+pub(crate) fn sweep_stale_staging(paths: &SystemPaths) {
+    if path_entry_exists(&paths.app_data().join(JOURNAL_FILE)) {
+        return;
+    }
+    let mut directories = crate::adapters::managed_skill_roots(paths)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    directories.insert(paths.app_data());
+    if let Ok(ledger) = read_ledger_raw(paths) {
+        for resource in ledger.resources.values() {
+            let owned = match &resource.owned {
+                OwnedResource::Path(owned) => &owned.path,
+                OwnedResource::StructuredEntry(owned) => &owned.document_path,
+                OwnedResource::TextBlock(owned) => &owned.document_path,
+            };
+            if let Some(parent) = Path::new(owned).parent() {
+                directories.insert(parent.to_path_buf());
+            }
+        }
+    }
+    for directory in directories {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !STAGING_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+            {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > STALE_STAGING_AGE);
+            if stale {
+                if let Err(error) = remove_any(&entry.path()) {
+                    eprintln!("{error}");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -68,11 +270,10 @@ pub(crate) fn install_components(
     trust_approved: bool,
     component_ids: Option<&[String]>,
 ) -> Result<OperationOutcome, String> {
-    recover(paths)?;
-    let ledger_state = read_ledger_raw(paths)?;
+    let ledger_state = ledger_for_change(paths)?;
     let existing = ledger_state.items.get(&item.id).cloned();
     let operate_on = resolve_operate_on(item, component_ids)?;
-    let plan = planner::plan(paths, snapshot, item, None, Some(&operate_on))?;
+    let mut plan = planner::plan(paths, snapshot, item, None, Some(&operate_on))?;
     let preview = planner::preview(item, &plan);
     if preview.requires_approval && !trust_approved {
         return Err(format!(
@@ -80,28 +281,37 @@ pub(crate) fn install_components(
             item.id
         ));
     }
+    let warnings = skip_unusable_documents(&mut plan, &item.id)?;
 
-    if replace_unmanaged && existing.is_some() {
-        return Err(format!(
-            "{} is already managed; use the normal update operation.",
-            item.id
-        ));
-    }
+    // Replacing an installed package restores the published content; the
+    // user's changed copies are moved to kept backups.
+    let restore = replace_unmanaged && existing.is_some();
     if let Some(record) = &existing {
         if record.source_key != source.source_key {
             return Err(format!("{} is owned by a different source.", item.id));
         }
-        if !components_match(paths, &ledger_state, &item.id, &operate_on) {
-            return Err(format!(
-                "{} contains local changes and cannot be updated.",
-                item.id
-            ));
+        let state = installation_state(paths, &ledger_state, &item.id, Some(&operate_on));
+        if state.is_protected() && !restore {
+            return Err(protected_error(&item.id, &state, "updated"));
         }
         let already_selected = operate_on.iter().all(|component_id| {
             planner::selected_component_ids(record, item).contains(component_id)
         });
-        if record.item_digest == item.digest
+        // Bindings the plan no longer produces belong to agents that are no
+        // longer detected; applying the plan releases them.
+        let stale_bindings = record.binding_ids.iter().any(|binding_id| {
+            ledger_state
+                .bindings
+                .get(binding_id)
+                .is_some_and(|binding| {
+                    operate_on.contains(&binding.component_id)
+                        && !plan.bindings.contains_key(binding_id)
+                })
+        });
+        if state == ContentState::Match
+            && record.item_digest == item.digest
             && already_selected
+            && !stale_bindings
             && plan_matches_ledger(&ledger_state, &plan)?
         {
             return Err(format!("{} is already installed.", item.id));
@@ -146,7 +356,7 @@ pub(crate) fn install_components(
         removed: &removed,
         remaining_ledger: &next,
         replace_unmanaged,
-        force_modified: false,
+        force_modified: restore,
     })?;
     for mut record in installed {
         if let Some(existing_resource) = next.resource_by_identity_mut(&record.identity) {
@@ -178,7 +388,8 @@ pub(crate) fn install_components(
     binding_ids.extend(plan.bindings.keys().cloned());
     binding_ids.sort();
     binding_ids.dedup();
-    let destination = compatibility_destination(&next, &plan, paths)?;
+    let destination = compatibility_destination(&next, &plan, paths)
+        .inspect_err(|_| cleanup_staging(&journal))?;
     next.items.insert(
         item.id.clone(),
         InstallationRecord {
@@ -207,6 +418,7 @@ pub(crate) fn install_components(
             .into_iter()
             .map(|path| path.display().to_string())
             .collect(),
+        warnings,
     })
 }
 
@@ -225,9 +437,9 @@ pub(crate) fn install_batch(
     if requests.is_empty() {
         return Ok(OperationOutcome::default());
     }
-    recover(paths)?;
-    let original = read_ledger_raw(paths)?;
+    let original = ledger_for_change(paths)?;
     let mut next = original.clone();
+    let mut warnings = Vec::new();
     let batch_ids = requests
         .iter()
         .map(|request| request.item.id.clone())
@@ -241,13 +453,14 @@ pub(crate) fn install_batch(
             .items
             .get(&item.id)
             .map(|record| planner::selected_component_ids(record, item));
-        let plan = planner::plan(paths, request.snapshot, item, None, selected.as_deref())?;
+        let mut plan = planner::plan(paths, request.snapshot, item, None, selected.as_deref())?;
         if planner::preview(item, &plan).requires_approval && !trust_approved {
             return Err(format!(
                 "{} contains an MCP server and requires explicit Tier 3 approval.",
                 item.id
             ));
         }
+        warnings.extend(skip_unusable_documents(&mut plan, &item.id)?);
         if item
             .conflicts_with
             .iter()
@@ -268,8 +481,9 @@ pub(crate) fn install_batch(
             if existing.source_key != request.source.source_key {
                 return Err(format!("{} is owned by a different source.", item.id));
             }
-            if !installation_matches(paths, &original, &item.id) {
-                return Err(format!("{} contains local changes.", item.id));
+            let state = installation_state(paths, &original, &item.id, None);
+            if state.is_protected() {
+                return Err(protected_error(&item.id, &state, "updated"));
             }
         }
         planner::preflight_installed_conflicts(&original, request.source, item, &plan)?;
@@ -331,7 +545,8 @@ pub(crate) fn install_batch(
         let item = request.item;
         let plan = &item_plans[&item.id];
         let mut record =
-            installation_record(paths, &next, plan, request.source, request.snapshot, item)?;
+            installation_record(paths, &next, plan, request.source, request.snapshot, item)
+                .inspect_err(|_| cleanup_staging(&journal))?;
         record.selected_component_ids = original
             .items
             .get(&item.id)
@@ -346,6 +561,7 @@ pub(crate) fn install_batch(
             .into_iter()
             .map(|path| path.display().to_string())
             .collect(),
+        warnings,
     })
 }
 
@@ -358,8 +574,7 @@ pub(crate) fn uninstall_batch(
     if installation_ids.is_empty() {
         return Ok(OperationOutcome::default());
     }
-    recover(paths)?;
-    let original = read_ledger_raw(paths)?;
+    let original = ledger_for_change(paths)?;
     for installation_id in installation_ids {
         let record = original
             .items
@@ -368,8 +583,9 @@ pub(crate) fn uninstall_batch(
         if record.source_key != source.source_key {
             return Err(format!("{installation_id} is owned by a different source."));
         }
-        if !force_modified && !installation_matches(paths, &original, installation_id) {
-            return Err(format!("{installation_id} contains local changes."));
+        let state = installation_state(paths, &original, installation_id, None);
+        if !force_modified && state.is_protected() {
+            return Err(protected_error(installation_id, &state, "removed"));
         }
     }
     let mut next = original;
@@ -395,6 +611,7 @@ pub(crate) fn uninstall_batch(
             .into_iter()
             .map(|path| path.display().to_string())
             .collect(),
+        ..OperationOutcome::default()
     })
 }
 
@@ -403,8 +620,7 @@ pub(crate) fn reset_source(
     source: &ConfiguredSource,
     snapshot: Option<&SourceSnapshot>,
 ) -> Result<OperationOutcome, String> {
-    recover(paths)?;
-    let original = read_ledger_raw(paths)?;
+    let original = read_ledger(paths)?;
     let catalog_ids = snapshot
         .map(|snapshot| {
             snapshot
@@ -427,7 +643,10 @@ pub(crate) fn reset_source(
     ));
     backup_paths.sort();
     backup_paths.dedup();
-    Ok(OperationOutcome { backup_paths })
+    Ok(OperationOutcome {
+        backup_paths,
+        ..OperationOutcome::default()
+    })
 }
 
 pub(crate) fn reset_app(
@@ -435,11 +654,32 @@ pub(crate) fn reset_app(
     sources: &[(ConfiguredSource, Option<SourceSnapshot>)],
 ) -> Result<OperationOutcome, String> {
     let mut backup_paths = Vec::new();
+    // Reset is the way out of a damaged or newer ledger, so without a usable
+    // one it removes what it can find and leaves the rest to the state wipe.
+    let usable = read_ledger(paths);
+    if !usable.as_ref().is_ok_and(|ledger| !ledger.read_only) {
+        let resources = usable
+            .map(|ledger| ledger.resources.into_values().collect::<Vec<_>>())
+            .unwrap_or_default();
+        backup_paths.extend(best_effort_remove(paths, &resources, "app-reset"));
+        for (source, snapshot) in sources {
+            backup_paths.extend(remove_leftover_source_skills(
+                paths,
+                source,
+                snapshot.as_ref(),
+                &InstallationLedger::default(),
+                "app-reset",
+            ));
+        }
+        return Ok(OperationOutcome {
+            backup_paths,
+            ..OperationOutcome::default()
+        });
+    }
     for (source, snapshot) in sources {
         backup_paths.extend(reset_source(paths, source, snapshot.as_ref())?.backup_paths);
     }
-    recover(paths)?;
-    let remaining = read_ledger_raw(paths)?
+    let remaining = read_ledger(paths)?
         .items
         .keys()
         .cloned()
@@ -448,7 +688,10 @@ pub(crate) fn reset_app(
     backup_paths.extend(leftover);
     backup_paths.sort();
     backup_paths.dedup();
-    Ok(OperationOutcome { backup_paths })
+    Ok(OperationOutcome {
+        backup_paths,
+        ..OperationOutcome::default()
+    })
 }
 
 fn force_detach_installations(
@@ -541,7 +784,7 @@ fn strip_structured_entry(path: &Path, owned: &OwnedStructuredEntry) -> Result<(
         std::slice::from_ref(&owned.key_path),
     )?;
     if updated != original {
-        fs::write(path, updated)
+        fs_retry::replace_file(path, &updated)
             .map_err(|error| format!("Could not update {}: {error}", path.display()))?;
     }
     Ok(())
@@ -552,7 +795,7 @@ fn strip_text_block(path: &Path, owned: &OwnedTextBlock) -> Result<(), String> {
     let updated =
         managed_documents::remove_text_blocks(&original, std::slice::from_ref(&owned.marker_id))?;
     if updated != original {
-        fs::write(path, updated)
+        fs_retry::replace_file(path, &updated)
             .map_err(|error| format!("Could not update {}: {error}", path.display()))?;
     }
     Ok(())
@@ -626,8 +869,7 @@ pub(crate) fn uninstall_components(
     component_ids: Option<&[String]>,
     force_modified: bool,
 ) -> Result<OperationOutcome, String> {
-    recover(paths)?;
-    let ledger_state = read_ledger_raw(paths)?;
+    let ledger_state = ledger_for_change(paths)?;
     let record = ledger_state
         .items
         .get(installation_id)
@@ -648,16 +890,9 @@ pub(crate) fn uninstall_components(
             }
         }
     };
-    if let Some(ids) = &operate_on {
-        if !force_modified && !components_match(paths, &ledger_state, installation_id, ids) {
-            return Err(format!(
-                "{installation_id} contains local changes and cannot be uninstalled."
-            ));
-        }
-    } else if !force_modified && !installation_matches(paths, &ledger_state, installation_id) {
-        return Err(format!(
-            "{installation_id} contains local changes and cannot be uninstalled."
-        ));
+    let state = installation_state(paths, &ledger_state, installation_id, operate_on.as_deref());
+    if !force_modified && state.is_protected() {
+        return Err(protected_error(installation_id, &state, "uninstalled"));
     }
     let mut next = ledger_state.clone();
     let removed = match &operate_on {
@@ -682,6 +917,7 @@ pub(crate) fn uninstall_components(
             .into_iter()
             .map(|path| path.display().to_string())
             .collect(),
+        ..OperationOutcome::default()
     })
 }
 
@@ -802,31 +1038,6 @@ fn binding_component_ids(ledger: &InstallationLedger, record: &InstallationRecor
         .collect()
 }
 
-fn components_match(
-    paths: &SystemPaths,
-    ledger: &InstallationLedger,
-    installation_id: &str,
-    component_ids: &[String],
-) -> bool {
-    let Some(record) = ledger.items.get(installation_id) else {
-        return true;
-    };
-    let component_set = component_ids.iter().cloned().collect::<BTreeSet<_>>();
-    record.binding_ids.iter().all(|binding_id| {
-        ledger.bindings.get(binding_id).is_none_or(|binding| {
-            if !component_set.contains(&binding.component_id) {
-                return true;
-            }
-            binding.resource_ids.iter().all(|resource_id| {
-                ledger
-                    .resources
-                    .get(resource_id)
-                    .is_some_and(|resource| resource_matches(paths, resource).unwrap_or(false))
-            })
-        })
-    })
-}
-
 fn detach_components(
     ledger: &mut InstallationLedger,
     installation_id: &str,
@@ -943,7 +1154,9 @@ fn preflight_new_resources(
         }
         match &planned.desired {
             DesiredResource::Path(desired) if path_entry_exists(&desired.path) => {
-                if !replace_unmanaged {
+                // A folder that already holds exactly this content, such as a
+                // OneDrive copy another computer installed, is taken over.
+                if !replace_unmanaged && !identical_to_desired(desired, &desired.path) {
                     return Err(format!(
                         "{} already exists and is not an owned destination.",
                         desired.path.display()
@@ -954,7 +1167,7 @@ fn preflight_new_resources(
                 let contents =
                     managed_documents::read_or_empty(&desired.document_path, desired.format)?;
                 if managed_documents::entry_value(&contents, desired.format, &desired.key_path)?
-                    .is_some()
+                    .is_some_and(|value| value != desired.value)
                     && !replace_unmanaged
                 {
                     return Err(format!(
@@ -1853,7 +2066,174 @@ mod tests {
             .contains("acme-database"));
     }
 
+    fn forget_ledger(paths: &SystemPaths) {
+        for name in ["installations.json", "installations.json.previous"] {
+            let _ = fs::remove_file(paths.app_data().join(name));
+        }
+    }
+
     fn ledger_has_item(paths: &SystemPaths, id: &str) -> bool {
         read_ledger(paths).expect("ledger").items.contains_key(id)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_rollback_keeps_the_journal_for_the_next_recovery() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let folder = paths.home.join("config");
+        fs::create_dir_all(&folder).expect("folder");
+        let target = folder.join("settings.json");
+        let backup = folder.join("settings-backup.json");
+        fs::write(&target, "new").expect("activated target");
+        fs::write(&backup, "old").expect("backup");
+        let journal = TransactionJournal {
+            version: 1,
+            transaction_id: "tx-stuck".to_string(),
+            mutations: vec![JournalMutation {
+                target: target.display().to_string(),
+                staging: Some(folder.join("settings-stage.json").display().to_string()),
+                backup: Some(backup.display().to_string()),
+                persistent_backup: false,
+                target_existed: true,
+                original_digest: Some(ledger::bytes_digest(b"old")),
+            }],
+        };
+        super::journal::write_journal(&paths, &journal).expect("journal");
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).expect("lock folder");
+        if fs::write(folder.join("probe"), "").is_ok() {
+            return; // Running as root; permissions cannot simulate the failure.
+        }
+        assert!(recover(&paths).is_err());
+        assert!(paths.app_data().join(JOURNAL_FILE).exists());
+        read_ledger(&paths).expect("reads do not wait on recovery");
+
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).expect("unlock folder");
+        recover(&paths).expect("retried rollback");
+        assert_eq!(fs::read_to_string(&target).expect("restored"), "old");
+        assert!(!paths.app_data().join(JOURNAL_FILE).exists());
+    }
+
+    #[test]
+    fn unreadable_journal_is_moved_aside_and_reads_continue() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        fs::create_dir_all(paths.app_data()).expect("data");
+        fs::write(paths.app_data().join(JOURNAL_FILE), "{not json").expect("journal");
+        read_ledger(&paths).expect("ledger");
+        assert!(!paths.app_data().join(JOURNAL_FILE).exists());
+        assert!(fs::read_dir(paths.app_data())
+            .expect("data")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")));
+    }
+
+    #[test]
+    fn missing_files_are_missing_not_modified_and_uninstall_succeeds() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, TargetId::Cursor, true).expect("enable");
+        let (source, snapshot, item) = fixture(root.path());
+        install(&paths, &source, &snapshot, &item, false, false).expect("install");
+        fs::remove_dir_all(paths.home.join(".agents/skills/acme-review")).expect("delete");
+        let ledger = read_ledger(&paths).expect("ledger");
+        assert_eq!(
+            crate::application::status::item_status(&paths, &ledger, Some(&item), &item.id),
+            crate::install::ItemStatus::Missing
+        );
+        uninstall(&paths, &source, &item.id, false).expect("uninstall");
+        assert!(read_ledger(&paths).expect("ledger").items.is_empty());
+    }
+
+    #[test]
+    fn replace_restores_a_modified_install_and_keeps_the_users_copy() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, TargetId::Cursor, true).expect("enable");
+        let (source, snapshot, item) = fixture(root.path());
+        install(&paths, &source, &snapshot, &item, false, false).expect("install");
+        let target = paths.home.join(".agents/skills/acme-review");
+        fs::write(target.join("local.txt"), "mine").expect("edit");
+        let outcome = install(&paths, &source, &snapshot, &item, true, false).expect("restore");
+        assert_eq!(outcome.backup_paths.len(), 1);
+        assert!(Path::new(&outcome.backup_paths[0])
+            .join("local.txt")
+            .exists());
+        assert!(!target.join("local.txt").exists());
+        let ledger = read_ledger(&paths).expect("ledger");
+        assert_eq!(
+            crate::application::status::item_status(&paths, &ledger, Some(&item), &item.id),
+            crate::install::ItemStatus::Installed
+        );
+    }
+
+    #[test]
+    fn unreadable_agent_config_skips_only_that_agent() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let (source, snapshot, item) = mixed_fixture(root.path());
+        crate::agent_profiles::set_enabled(&paths, TargetId::Cursor, true).expect("cursor");
+        crate::agent_profiles::set_enabled(&paths, TargetId::Codex, true).expect("codex");
+        fs::create_dir_all(paths.home.join(".codex")).expect("codex");
+        fs::write(paths.home.join(".codex/config.toml"), "model = = broken").expect("broken");
+        let outcome = install(&paths, &source, &snapshot, &item, false, true).expect("install");
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(outcome.warnings[0].starts_with("Codex"));
+        assert!(fs::read_to_string(paths.home.join(".cursor/mcp.json"))
+            .expect("cursor config")
+            .contains("acme-database"));
+        assert!(paths.home.join(".agents/skills/acme-review").is_dir());
+        assert!(take_skipped_agent(&item.id));
+    }
+
+    #[test]
+    fn stale_staging_is_swept_and_fresh_staging_is_kept() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let skills = paths.home.join(".agents/skills");
+        fs::create_dir_all(&skills).expect("skills");
+        let stale = skills.join(".resource-installing-1-1");
+        let fresh = skills.join(".resource-installing-1-2");
+        let backup = skills.join(".resource-previous-1-3");
+        for path in [&stale, &fresh, &backup] {
+            fs::write(path, "staged").expect("staging");
+        }
+        let hour_ago = SystemTime::now() - Duration::from_secs(60 * 60);
+        for path in [&stale, &backup] {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(hour_ago))
+                .expect("age");
+        }
+        sweep_stale_staging(&paths);
+        assert!(!stale.exists());
+        assert!(fresh.exists());
+        assert!(backup.exists());
+    }
+
+    #[test]
+    fn identical_unmanaged_folder_is_taken_over() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, TargetId::Cursor, true).expect("enable");
+        let (source, snapshot, item) = fixture(root.path());
+        install(&paths, &source, &snapshot, &item, false, false).expect("install");
+        // Another computer installed it into a shared folder; this one has no record.
+        forget_ledger(&paths);
+        let outcome = install(&paths, &source, &snapshot, &item, false, false).expect("adopt");
+        assert!(outcome.backup_paths.is_empty());
+        assert!(ledger_has_item(&paths, &item.id));
+
+        forget_ledger(&paths);
+        fs::write(
+            paths.home.join(".agents/skills/acme-review/extra.txt"),
+            "different",
+        )
+        .expect("differ");
+        assert!(install(&paths, &source, &snapshot, &item, false, false)
+            .expect_err("different content")
+            .contains("already exists"));
     }
 }

@@ -108,16 +108,28 @@ button {
   margin-bottom: 18px;
 }
 
-.notice,
 .app-callout {
   width: 100%;
   margin-bottom: 14px;
 }
 
-.notice {
+/* Every notice stacks in one sticky column, so none can scroll over another. */
+.notices {
   position: sticky;
   top: 0.5rem;
   z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.notices:empty {
+  display: none;
+}
+
+.notices > .app-callout {
+  margin-bottom: 0;
 }
 
 .app-callout.rt-CalloutRoot {
@@ -133,6 +145,43 @@ button {
 
 .callout-action {
   flex: none;
+}
+
+.callout-actions {
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+
+.notice-copy {
+  min-width: 0;
+}
+
+.error-details {
+  margin-top: 6px;
+  font-size: var(--font-size-1);
+}
+
+.error-details > summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.error-details pre {
+  margin: 6px 0 0;
+  max-height: 12rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--font-size-1);
+}
+
+.load-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 32px 0;
 }
 
 .loading-state {
@@ -165,15 +214,6 @@ button {
 
 .source-heading > div:first-child {
   min-width: 0;
-}
-
-.source-title-link.rt-Button {
-  height: auto;
-  margin: -2px 0 -2px -7px;
-  padding: 2px 7px;
-  color: var(--accent);
-  font: inherit;
-  letter-spacing: inherit;
 }
 
 .source-group > .app-callout {
@@ -507,4 +547,11 @@ button {
   gap: 0.15rem;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.sync-checking {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
 }

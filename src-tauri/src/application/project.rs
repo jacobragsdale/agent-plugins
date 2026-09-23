@@ -1,7 +1,7 @@
-use super::{current_epoch_seconds, LoadedRepository, LoadedSource};
+use super::{LoadedRepository, LoadedSource};
 use crate::agent_profiles;
 use crate::app_state::{
-    AppState, AutoUpdateReport, CatalogItemState, ComponentState, ListedSourceState,
+    AppState, AutoUpdateReport, CatalogItemState, ComponentState, Connectivity, ListedSourceState,
     RepositoryState, SourceState, SourceStatus,
 };
 use crate::catalog::{CatalogComponentKind, CatalogItem};
@@ -52,6 +52,7 @@ pub(super) fn build_app_state(
                 .as_ref()
                 .map(|snapshot| snapshot.commit.clone()),
             checked_at_epoch_seconds: checked,
+            last_success_at_epoch_seconds: loaded_source.last_success_at,
             catalog_errors,
         });
         if let Some(snapshot) = &loaded_source.snapshot {
@@ -63,7 +64,7 @@ pub(super) fn build_app_state(
                     &loaded_source.definition,
                     snapshot,
                     item,
-                )?);
+                ));
             }
         }
     }
@@ -90,7 +91,7 @@ pub(super) fn build_app_state(
             &definition,
             id,
             record,
-        )?);
+        ));
     }
     items.sort_by(|left, right| left.id.cmp(&right.id));
     sources.sort_by(|left, right| {
@@ -105,6 +106,8 @@ pub(super) fn build_app_state(
     });
     Ok(AppState {
         checked_at_epoch_seconds: checked,
+        connectivity: Connectivity::Online,
+        sync_in_progress: false,
         auto_update_report: report,
         catalog_message,
         repositories: repository_states,
@@ -126,6 +129,38 @@ pub(super) fn apply_index(items: &mut [CatalogItemState], index: &crate::marketp
         item.marketplace = index
             .package(&item.id)
             .map(crate::app_state::MarketplaceMeta::from_index);
+    }
+}
+
+/// Stores what the marketplace said about the caller and returns the identity
+/// to show. Only a 401 or 403 means the identity is gone; when the server
+/// could not be asked, the cached identity stays.
+pub(super) fn remember_identity(
+    cache: &std::path::Path,
+    report: &crate::preflight::PreflightReport,
+    me: Option<crate::marketplace::Me>,
+) -> Option<crate::app_state::MarketplaceIdentity> {
+    let identity = me.map(|me| crate::app_state::MarketplaceIdentity {
+        account: me.account,
+        namespace: me.namespace,
+        display_name: me.display_name,
+        admin: me.admin,
+        auth_mode: report.auth_mode.clone(),
+    });
+    let rejected = report.checks.iter().any(|check| {
+        check.id == "auth.identity"
+            && (check.detail.contains("HTTP 401") || check.detail.contains("HTTP 403"))
+    });
+    match identity {
+        Some(identity) => {
+            write_identity_cache(cache, Some(&identity));
+            Some(identity)
+        }
+        None if rejected => {
+            write_identity_cache(cache, None);
+            None
+        }
+        None => read_identity_cache(cache),
     }
 }
 
@@ -203,6 +238,7 @@ pub(super) fn repository_state(
             .as_ref()
             .map(|snapshot| snapshot.revision.clone()),
         checked_at_epoch_seconds: checked,
+        last_success_at_epoch_seconds: loaded.last_success_at,
         sources: listed,
     }
 }
@@ -213,7 +249,7 @@ pub(super) fn current_item_state(
     source: &ConfiguredSource,
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
-) -> Result<CatalogItemState, String> {
+) -> CatalogItemState {
     let plan = crate::planner::plan(paths, snapshot, item, None, None).ok();
     let compatibility = plan
         .as_ref()
@@ -229,7 +265,7 @@ pub(super) fn current_item_state(
             (preview.requires_approval, preview.risk_details)
         },
     );
-    Ok(CatalogItemState {
+    CatalogItemState {
         id: item.id.clone(),
         local_id: item.local_id.clone(),
         source_id: source.source_id.clone(),
@@ -263,20 +299,27 @@ pub(super) fn current_item_state(
             })
             .collect(),
         compatibility,
-        destination: match record {
-            Some(record) => Some(
-                paths
-                    .resolve_owned(&record.destination)?
-                    .display()
-                    .to_string(),
-            ),
-            None => None,
-        },
+        destination: record.and_then(|record| destination(paths, record)),
         status,
         requires_approval: approval.0,
         risk_details: approval.1,
         marketplace: None,
-    })
+    }
+}
+
+/// Where a record says the install lives. One unresolvable record shows no
+/// destination instead of failing the whole state.
+fn destination(paths: &SystemPaths, record: &InstallationRecord) -> Option<String> {
+    match paths.resolve_owned(&record.destination) {
+        Ok(path) => Some(path.display().to_string()),
+        Err(error) => {
+            eprintln!(
+                "Could not resolve where {} is installed: {error}",
+                record.name
+            );
+            None
+        }
+    }
 }
 
 pub(super) fn removed_item_state(
@@ -285,8 +328,8 @@ pub(super) fn removed_item_state(
     source: &ConfiguredSource,
     id: &str,
     record: &InstallationRecord,
-) -> Result<CatalogItemState, String> {
-    Ok(CatalogItemState {
+) -> CatalogItemState {
+    CatalogItemState {
         id: id.to_string(),
         local_id: record.local_id.clone(),
         source_id: record.source_id.clone(),
@@ -311,18 +354,13 @@ pub(super) fn removed_item_state(
             requires_approval: false,
         }],
         compatibility: Vec::new(),
-        destination: Some(
-            paths
-                .resolve_owned(&record.destination)?
-                .display()
-                .to_string(),
-        ),
+        destination: destination(paths, record),
         status: super::status::item_status(paths, ledger_state, None, id),
         // An uninstall never needs the Tier 3 approval.
         requires_approval: false,
         risk_details: Vec::new(),
         marketplace: None,
-    })
+    }
 }
 
 pub(super) fn component_kind_label(kind: CatalogComponentKind) -> &'static str {
@@ -333,44 +371,82 @@ pub(super) fn component_kind_label(kind: CatalogComponentKind) -> &'static str {
 }
 
 pub(super) fn cached_state_now() -> Result<AppState, String> {
-    let paths = SystemPaths::from_system()?;
-    let cache = cache_base_dir()?;
-    let config = config_base_dir()?;
-    let checked = current_epoch_seconds();
-    let config_file = source::read_sources_config(&config)?;
+    cached_state(
+        &SystemPaths::from_system()?,
+        &cache_base_dir()?,
+        &config_base_dir()?,
+    )
+}
+
+/// The state from saved copies alone, with what the last sync learned about
+/// each source: its result and message, when it last succeeded, and whether
+/// the servers were reachable.
+pub(super) fn cached_state(
+    paths: &SystemPaths,
+    cache: &std::path::Path,
+    config: &std::path::Path,
+) -> Result<AppState, String> {
+    let health = super::sync::read_health(cache);
+    let checked = super::sync::read_last_sync(cache).unwrap_or(0);
+    let config_file = source::read_sources_config(config)?;
+    let last_sync = |key: &str, load_error: Option<&String>| {
+        let entry = health.entries.get(key).cloned().unwrap_or_default();
+        let (status, message) = match load_error {
+            Some(message) => (SourceStatus::Error, Some(message.clone())),
+            None => match entry.status {
+                Some(status @ (SourceStatus::Stale | SourceStatus::Error)) => {
+                    (status, entry.message)
+                }
+                _ => (SourceStatus::Cached, None),
+            },
+        };
+        (status, message, entry.last_success_at)
+    };
     let repositories = config_file
         .repositories
         .into_iter()
-        .map(|definition| LoadedRepository {
-            snapshot: source::load_current_repository(&cache, &definition)
-                .ok()
-                .flatten(),
-            definition,
-            status: SourceStatus::Cached,
-            refresh_failed: false,
-            message: None,
+        .map(|definition| {
+            let snapshot = source::load_current_repository(cache, &definition);
+            let (status, message, last_success_at) =
+                last_sync(&definition.repository_key, snapshot.as_ref().err());
+            LoadedRepository {
+                snapshot: snapshot.ok().flatten(),
+                definition,
+                status,
+                refresh_failed: status != SourceStatus::Cached,
+                message,
+                last_success_at,
+            }
         })
         .collect::<Vec<_>>();
     let loaded = config_file
         .sources
         .into_iter()
-        .map(|definition| LoadedSource {
-            snapshot: source::load_current(&cache, &definition).ok().flatten(),
-            definition,
-            status: SourceStatus::Cached,
-            refresh_failed: false,
-            message: None,
+        .map(|definition| {
+            let snapshot = source::load_current(cache, &definition);
+            let (status, message, last_success_at) =
+                last_sync(&definition.source_key, snapshot.as_ref().err());
+            LoadedSource {
+                snapshot: snapshot.ok().flatten(),
+                definition,
+                status,
+                refresh_failed: status != SourceStatus::Cached,
+                message,
+                last_success_at,
+            }
         })
         .collect::<Vec<_>>();
     let mut state = build_app_state(
-        &paths,
+        paths,
         &repositories,
         &loaded,
         checked,
         AutoUpdateReport::default(),
         None,
     )?;
-    apply_cached_marketplace(&mut state, &cache);
+    state.connectivity = health.connectivity;
+    state.sync_in_progress = super::sync::sync_in_progress();
+    apply_cached_marketplace(&mut state, cache);
     Ok(state)
 }
 
@@ -391,6 +467,52 @@ mod tests {
             cache: root.join("cache"),
             onedrive_commercial: None,
         }
+    }
+
+    #[test]
+    fn only_a_rejection_clears_the_cached_identity() {
+        let cache = tempfile::tempdir().expect("cache");
+        let identity = crate::app_state::MarketplaceIdentity {
+            account: "CORP\\jacob".to_string(),
+            namespace: "jacob".to_string(),
+            display_name: "Jacob".to_string(),
+            admin: false,
+            auth_mode: "Negotiate".to_string(),
+        };
+        write_identity_cache(cache.path(), Some(&identity));
+        let report = |detail: &str| crate::preflight::PreflightReport {
+            started_at_epoch_seconds: 0,
+            duration_millis: 0,
+            blocked: false,
+            auth_mode: "Negotiate".to_string(),
+            checks: vec![crate::preflight::PreflightCheck {
+                id: "auth.identity".to_string(),
+                group: "auth".to_string(),
+                title: "Signed in".to_string(),
+                status: crate::preflight::CheckStatus::Fail,
+                detail: detail.to_string(),
+                remediation: None,
+                blocking: false,
+                duration_millis: 0,
+            }],
+        };
+
+        let offline = remember_identity(
+            cache.path(),
+            &report("Could not connect to https://marketplace.example.com/api/me"),
+            None,
+        );
+        assert_eq!(
+            offline.map(|identity| identity.namespace).as_deref(),
+            Some("jacob")
+        );
+        let rejected = remember_identity(
+            cache.path(),
+            &report("The marketplace rejected this machine's identity (HTTP 401)."),
+            None,
+        );
+        assert!(rejected.is_none());
+        assert!(read_identity_cache(cache.path()).is_none());
     }
 
     /// The app asks before installing an MCP server, so the state has to say
@@ -444,8 +566,7 @@ mod tests {
         };
         let ledger_state = crate::executor::read_ledger(&paths).expect("ledger");
 
-        let state =
-            current_item_state(&paths, &ledger_state, &source, &snapshot, &item).expect("state");
+        let state = current_item_state(&paths, &ledger_state, &source, &snapshot, &item);
 
         assert!(state.requires_approval);
         assert!(

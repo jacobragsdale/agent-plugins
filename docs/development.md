@@ -24,6 +24,7 @@ Run what the change touched, and everything before you push:
 ```bash
 pnpm typecheck                                                    # both tsconfigs
 pnpm lint                                                         # eslint, zero warnings
+pnpm test                                                         # vitest
 pnpm format:check
 pnpm build                                                        # typecheck + vite build
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
@@ -31,7 +32,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 ```
 
-There is no frontend test runner. React is held to `typecheck` and `lint`; the behavior worth testing lives in Rust, so a change that matters belongs in a Rust test.
+`pnpm test` runs Vitest over the `*.test.ts` files under `src/`: the pure logic in `src/lib/` and `src/ipc/client.ts`, and the IPC contract, which parses the Rust-generated `src/ipc/fixtures/app-state.json` with the Zod schemas. Components have no tests; the behavior that decides what is written lives in Rust, so a change that matters there belongs in a Rust test.
 
 Rust tests build real trees in `tempfile` directories and drive the actual planner, executor, and ledger. Copy the shape from `src-tauri/src/application/project.rs`: build a `SystemPaths` under a temp root, write a source tree, `read_manifest_catalog`, then assert on what the code produced.
 
@@ -78,7 +79,7 @@ The Rust types are authoritative; the JSON Schemas are generated from them.
 - **Stage, then activate.** Every path and every fully rewritten document is staged, the journal is written, and only then is anything activated. Activation re-checks the original digest before it replaces anything.
 - **All or nothing.** An activation or ledger error rolls the whole operation back. Bulk install, uninstall, and source removal share that boundary.
 
-So a change here needs a test that fails in the middle and asserts the machine came back unchanged. Recovery is exercised through `executor/journal.rs`: a journal whose transaction ID is absent from the ledger is rolled back at launch, and one already committed is cleaned up.
+So a change here needs a test that fails in the middle and asserts the machine came back unchanged. Recovery is exercised through `executor/journal.rs`, which runs before every ledger read and change: a journal whose transaction ID is absent from the ledger is rolled back, and one already committed is cleaned up. A failed rollback keeps the journal, so test that path too.
 
 If a change would let anything else write to a planned path, it is the wrong change.
 
@@ -86,7 +87,7 @@ If a change would let anything else write to a planned path, it is the wrong cha
 
 Checks are declarative and live in `preflight.rs`. Give the check a stable dotted ID in an existing group, a status rule, a remediation (`autoFixed`, an `action` the UI knows, or `manual` text), and a `blocking` flag.
 
-Only make a check blocking when the app genuinely cannot operate — today only `host.homeDirs`, `agents.ledger`, and `server.clientVersion` qualify. An ID is never renamed: retire it and add a new one, because the report is sent with the heartbeat and read centrally.
+Only make a check blocking when its failure makes every install and update fail on its own — today only `host.homeDirs` and `agents.ledger` qualify. Nothing enforces the flag; it tells the person why everything fails. An ID is never renamed: retire it and add a new one, because the report is sent with the heartbeat and read centrally.
 
 A new `action` remediation needs a matching handler in `App.tsx` and a label in `SystemStatusDialog.tsx`, or the button will render its raw action name. Update [the preflight reference](preflight-reference.md) with the new row.
 
@@ -95,6 +96,17 @@ A new `action` remediation needs a matching handler in `App.tsx` and a label in 
 Commands live in `ipc.rs`, are registered in `lib.rs`, and are validated on the React side by a Zod schema in `src/ipc/schemas.ts`. All three change together; a command registered but unparsed fails at runtime, not at build time.
 
 IPC returns plain data. Filesystem and manifest policy stays in Rust — React must not decide what is safe to write.
+
+Commands return `Result<_, IpcError>` and convert internal strings with `.map_err(IpcError::from)`. The kind comes from markers such as `fs_retry::is_locked` and `artifact::is_connect_failure`, so a new failure that the window should retry or treat as offline needs its message to carry one of those markers, or a new case in `ipc_error.rs`. The kinds are listed in [the codebase map](codebase-map.md#ipc-errors).
+
+`src/ipc/fixtures/app-state.json` is generated from `AppState` by the Rust test `app_state_fixture_matches_the_checked_in_contract`, which fails when the checked-in copy is out of date. After changing `AppState` or anything it contains, regenerate it and let Prettier format it:
+
+```bash
+UPDATE_FIXTURES=1 cargo test --manifest-path src-tauri/Cargo.toml app_state_fixture
+pnpm exec prettier --write src/ipc/fixtures/app-state.json
+```
+
+Then update `src/ipc/schemas.ts` until `pnpm test` passes. The comparison is by value, so Prettier's layout does not matter.
 
 ## Work on the marketplace server
 
@@ -112,7 +124,7 @@ dotnet run --project server/tests/Marketplace.Api.Tests
 curl -H 'X-Dev-User: CORP\jacob' http://localhost:8080/api/me
 ```
 
-After changing endpoints, regenerate `server/openapi.json` with the command in [`server/README.md`](../server/README.md) and update [the API reference](marketplace-api.md).
+After changing endpoints, regenerate `server/openapi.json` with the command in [`server/README.md`](../server/README.md) and update [the API reference](marketplace-api.md). CI regenerates the document and fails when the checked-in copy is stale.
 
 ## Where documentation goes
 

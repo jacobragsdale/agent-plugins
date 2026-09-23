@@ -5,13 +5,17 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    mpsc, Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
 
 const MAX_CAPTURED_STREAM_BYTES: usize = 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// How long the output readers may keep going once the process has exited. A
+/// program that leaves a background child holding its stdout would otherwise
+/// keep the readers, and every lock the caller holds, waiting forever.
+const READER_GRACE: Duration = Duration::from_secs(2);
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -63,16 +67,18 @@ pub(crate) fn run(
     let status = loop {
         if exceeded.load(Ordering::Relaxed) {
             let cleanup = terminate_child(&mut child);
-            let _ = join_reader(stdout_reader, operation, "stdout");
-            let _ = join_reader(stderr_reader, operation, "stderr");
+            let deadline = Instant::now() + READER_GRACE;
+            let _ = stdout_reader.finish(deadline, operation, "stdout");
+            let _ = stderr_reader.finish(deadline, operation, "stderr");
             return Err(format!(
                 "{operation}: output exceeded 1 MB per stream.{cleanup}"
             ));
         }
         if started.elapsed() >= timeout {
             let cleanup = terminate_child(&mut child);
-            let _ = join_reader(stdout_reader, operation, "stdout");
-            let _ = join_reader(stderr_reader, operation, "stderr");
+            let deadline = Instant::now() + READER_GRACE;
+            let _ = stdout_reader.finish(deadline, operation, "stdout");
+            let _ = stderr_reader.finish(deadline, operation, "stderr");
             return Err(format!(
                 "{operation}: timed out after {} seconds.{cleanup}",
                 timeout.as_secs()
@@ -86,8 +92,9 @@ pub(crate) fn run(
             None => thread::sleep(POLL_INTERVAL),
         }
     };
-    let stdout = join_reader(stdout_reader, operation, "stdout")?;
-    let stderr = join_reader(stderr_reader, operation, "stderr")?;
+    let deadline = Instant::now() + READER_GRACE;
+    let stdout = stdout_reader.finish(deadline, operation, "stdout")?;
+    let stderr = stderr_reader.finish(deadline, operation, "stderr")?;
     if exceeded.load(Ordering::Relaxed) {
         return Err(format!("{operation}: output exceeded 1 MB per stream."));
     }
@@ -98,39 +105,58 @@ pub(crate) fn run(
     })
 }
 
-fn spawn_reader<R: Read + Send + 'static>(
-    mut reader: R,
-    exceeded: Arc<AtomicBool>,
-) -> thread::JoinHandle<Result<Vec<u8>, String>> {
-    thread::spawn(move || {
-        let mut captured = Vec::new();
-        let mut buffer = [0_u8; 8192];
-        loop {
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|error| format!("Could not read process output: {error}"))?;
-            if read == 0 {
-                break;
+/// One output stream being drained on its own thread.
+struct Reader {
+    captured: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<Result<(), String>>,
+}
+
+impl Reader {
+    /// Waits for the stream to close until `deadline`. When a leftover child
+    /// still holds the pipe open, the thread is abandoned and the output read
+    /// so far is returned.
+    fn finish(self, deadline: Instant, operation: &str, stream: &str) -> Result<Vec<u8>, String> {
+        match self
+            .done
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(result) => result?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(format!("{operation}: {stream} reader panicked"));
             }
+        }
+        let captured = self
+            .captured
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Ok(captured.clone())
+    }
+}
+
+fn spawn_reader<R: Read + Send + 'static>(mut reader: R, exceeded: Arc<AtomicBool>) -> Reader {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (sender, done) = mpsc::channel();
+    let sink = Arc::clone(&captured);
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        let result = loop {
+            let read = match reader.read(&mut buffer) {
+                Ok(0) => break Ok(()),
+                Ok(read) => read,
+                Err(error) => break Err(format!("Could not read process output: {error}")),
+            };
+            let mut captured = sink.lock().unwrap_or_else(|error| error.into_inner());
             let remaining = MAX_CAPTURED_STREAM_BYTES.saturating_sub(captured.len());
             let retained = read.min(remaining);
             captured.extend_from_slice(&buffer[..retained]);
             if retained < read {
                 exceeded.store(true, Ordering::Relaxed);
             }
-        }
-        Ok(captured)
-    })
-}
-
-fn join_reader(
-    reader: thread::JoinHandle<Result<Vec<u8>, String>>,
-    operation: &str,
-    stream: &str,
-) -> Result<Vec<u8>, String> {
-    reader
-        .join()
-        .map_err(|_| format!("{operation}: {stream} reader panicked"))?
+        };
+        let _ = sender.send(result);
+    });
+    Reader { captured, done }
 }
 
 #[cfg(unix)]
@@ -266,6 +292,21 @@ mod tests {
                 .expect_err("timeout")
                 .contains("timed out")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_background_child_holding_stdout_does_not_hold_the_caller() {
+        let started = Instant::now();
+        let output = run(
+            shell_command("sleep 8 & printf done"),
+            "leftover child",
+            Duration::from_secs(5),
+        )
+        .expect("process output");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"done");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[cfg(unix)]

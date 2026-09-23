@@ -21,7 +21,7 @@ public interface IPackageValidator
     /// <summary>Validates a source tree and scans it for files that look like credentials.</summary>
     Task<ValidationOutcome> ValidateAsync(string sourceDirectory, CancellationToken cancellationToken);
 
-    /// <summary>Wraps a skill, a folder of skills, an MCP document, or a source tree; throws <see cref="ArchiveRejectedException"/> when it cannot.</summary>
+    /// <summary>Wraps a skill, a folder of skills, an MCP document, or a source tree; throws a 422 <see cref="ProblemException"/> when it cannot.</summary>
     Task StageAsync(StagingRequest request, CancellationToken cancellationToken);
 }
 
@@ -64,7 +64,7 @@ public sealed class ProcessPackageValidator(IOptions<ValidatorOptions> options, 
         var report = Parse(stdout, stderr);
         if (report?.Fatal is { } fatal)
         {
-            throw new ArchiveRejectedException(fatal);
+            throw new ProblemException(422, fatal);
         }
 
         if (!File.Exists(request.OutputZip))
@@ -94,7 +94,7 @@ public sealed class ProcessPackageValidator(IOptions<ValidatorOptions> options, 
         catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
         {
             logger.LogError(error, "Could not start the validator at {Path}.", options.Value.Path);
-            throw new InvalidOperationException($"The validator at {options.Value.Path} could not be started.", error);
+            throw new ProblemException(503, "The package validator is unavailable, so nothing can be published right now. Tell the marketplace admins.");
         }
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -115,7 +115,9 @@ public sealed class ProcessPackageValidator(IOptions<ValidatorOptions> options, 
             {
             }
 
-            throw new InvalidOperationException($"The validator did not finish within {options.Value.TimeoutSeconds} seconds.");
+            cancellationToken.ThrowIfCancellationRequested();
+            logger.LogWarning("The validator did not finish within {Seconds} seconds.", options.Value.TimeoutSeconds);
+            throw new ProblemException(503, $"Checking the package took longer than {options.Value.TimeoutSeconds} seconds. Try again; a very large package may need to be split.");
         }
 
         var stdout = await stdoutTask;

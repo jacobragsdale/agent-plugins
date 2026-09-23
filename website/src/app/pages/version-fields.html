@@ -20,7 +20,7 @@
   <mat-hint>Separate with commas. They help people find it.</mat-hint>
 </mat-form-field>
 
-<details class="technical">
+<details class="technical" [open]="idProblem() !== null">
   <summary>Technical details</summary>
   <dl>
     <dt>Space ID</dt>
@@ -42,8 +42,8 @@
   </dl>
 </details>
 
-@if (taken()) {
-  <p class="problem" role="alert">{{ spaceLabel() }} already has a package called “{{ packageId() }}”. Pick another name, or publish a new version of that one from My skills.</p>
+@if (idProblem(); as message) {
+  <p class="problem" role="alert">{{ message }}</p>
 }
 @if (reviewed()) {
   <p class="notice">An admin checks new skills before others can see them. You'll find the status on <a routerLink="/mine">My skills</a>.</p>

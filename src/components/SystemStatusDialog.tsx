@@ -1,6 +1,7 @@
 import type { JSX, ReactNode } from "react";
 import { Button, Dialog, Text } from "@radix-ui/themes";
 import type { AgentProfile, AppIdentity, CheckStatus, PreflightCheck, PreflightReport } from "../ipc/schemas";
+import { detectionUnsure } from "../lib/status";
 
 const GROUP_TITLES: Readonly<Record<string, string>> = { host: "Windows host", auth: "Authentication", server: "Marketplace server", agents: "Agents", dependencies: "Dependencies" };
 
@@ -166,6 +167,7 @@ function StatusSummary({
   const server = summarize(report, SERVER_CHECKS, marketplaceUrl ?? "No marketplace is configured.");
   const elsewhere = seriousProblems(report).filter((check) => !AUTH_CHECKS.includes(check.id) && !SERVER_CHECKS.includes(check.id));
   const detected = profiles.filter((profile) => profile.detected);
+  const unsure = profiles.filter(detectionUnsure);
   return (
     <div className="status-summary">
       <SummaryRow label="Windows sign-in" detail={auth.detail} problem={auth.problem} onAction={onAction}>
@@ -179,9 +181,11 @@ function StatusSummary({
       <SummaryRow
         label="Agents"
         detail={
-          detected.length === 0
-            ? "No supported AI app was found. Install Claude Desktop, ChatGPT, or Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then refresh."
-            : detected.map(agentSummary).join(", ")
+          detected.length === 0 && unsure.length > 0
+            ? `Couldn't check ${unsure.map((profile) => profile.displayName).join(", ")} just now. Agent Plugins will check again.`
+            : detected.length === 0
+              ? "No supported AI app was found. Install Claude Desktop, ChatGPT, or Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then refresh."
+              : detected.map(agentSummary).join(", ")
         }
         problem={null}
         onAction={onAction}
@@ -206,7 +210,7 @@ function AgentDetails({ profiles }: Readonly<{ profiles: readonly AgentProfile[]
         <div key={profile.targetId} className="status-agent">
           <Text as="p" size="2">
             {agentSummary(profile)}
-            {profile.detected ? "" : " — not installed"}
+            {profile.detected ? "" : ` — ${detectionUnsure(profile) ? "couldn't check just now" : "not installed"}`}
           </Text>
           {profile.detected ? (
             <Text as="p" color="gray" size="1">
@@ -231,7 +235,7 @@ function headline(report: PreflightReport | null, problems: readonly PreflightCh
   if (problems.length === 0) {
     return "Windows sign-in, the marketplace server, and the agents on this machine are working.";
   }
-  const blocked = report.blocked ? " Agent Plugins will not install or sync until it is resolved." : "";
+  const blocked = report.blocked ? " Agent Plugins can't install or update packages until this is fixed." : "";
   return `${String(problems.length)} check${problems.length === 1 ? "" : "s"} failed.${blocked}`;
 }
 

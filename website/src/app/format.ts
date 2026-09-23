@@ -2,13 +2,13 @@
 
 export type Bump = "patch" | "minor" | "major";
 
-type SemVer = readonly [number, number, number];
+type SemVer = readonly [number, number, number, string | null];
 
-const semverPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
+const semverPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?$/u;
 
 function parseSemVer(text: string): SemVer | null {
   const match = semverPattern.exec(text);
-  return match === null ? null : [Number(match[1]), Number(match[2]), Number(match[3])];
+  return match === null ? null : [Number(match[1]), Number(match[2]), Number(match[3]), match[4] ?? null];
 }
 
 function compare(left: SemVer, right: SemVer): number {
@@ -16,7 +16,16 @@ function compare(left: SemVer, right: SemVer): number {
     return left[0] - right[0];
   }
 
-  return left[1] !== right[1] ? left[1] - right[1] : left[2] - right[2];
+  if (left[1] !== right[1] || left[2] !== right[2]) {
+    return left[1] !== right[1] ? left[1] - right[1] : left[2] - right[2];
+  }
+
+  if (left[3] === right[3]) {
+    return 0;
+  }
+
+  // ponytail: numeric-aware string order, close to but not exactly semver's per-identifier precedence.
+  return left[3] === null ? 1 : right[3] === null ? -1 : left[3].localeCompare(right[3], "en", { numeric: true });
 }
 
 /**
@@ -82,11 +91,6 @@ export interface SkillText {
   readonly name: string;
   readonly description: string;
   readonly body: string;
-}
-
-/** JSON strings are valid YAML double-quoted scalars, so quoting through JSON is always safe. */
-export function buildSkillMd(skill: SkillText): string {
-  return `---\nname: ${JSON.stringify(skill.name)}\ndescription: ${JSON.stringify(skill.description)}\n---\n\n${skill.body.trim()}\n`;
 }
 
 interface Frontmatter {
@@ -162,28 +166,6 @@ export function parseSkillMd(text: string): SkillText | null {
   return { name: field("name"), description: field("description"), body: parts.body.trim() };
 }
 
-/**
- * Replaces the description and body of an existing SKILL.md, keeping every other frontmatter key
- * (and its formatting) exactly as the publisher wrote it.
- */
-export function editSkillMd(original: string, description: string, body: string): string {
-  const parts = splitFrontmatter(original);
-  if (parts === null) {
-    return buildSkillMd({ name: "", description, body });
-  }
-
-  const lines = [...parts.lines];
-  const replacement = `description: ${JSON.stringify(description)}`;
-  const extent = keyExtent(lines, "description");
-  if (extent === null) {
-    lines.push(replacement);
-  } else {
-    lines.splice(extent.start, extent.end - extent.start, replacement);
-  }
-
-  return `---\n${lines.join("\n")}\n---\n\n${body.trim()}\n`;
-}
-
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) {
     return `${String(bytes)} B`;
@@ -227,8 +209,82 @@ export function formatAge(iso: string, now: Date = new Date()): string {
 }
 
 /** Files a browser picks up that never belong in a package. */
+const junkFolders = new Set([".git", "node_modules", "__pycache__", ".venv", ".ruff_cache", ".pytest_cache", ".mypy_cache"]);
+const junkFiles = new Set([".DS_Store", "Thumbs.db", "desktop.ini"]);
+
 export function isJunk(path: string): boolean {
   const parts = path.split("/");
   const name = parts.at(-1) ?? "";
-  return parts.some((part) => part === ".git" || part === "node_modules") || name === ".DS_Store" || name === "Thumbs.db" || name === "desktop.ini";
+  return parts.some((part) => junkFolders.has(part)) || junkFiles.has(name) || name.endsWith(".pyc");
+}
+
+export interface TreeFile<T> {
+  readonly name: string;
+  readonly item: T;
+}
+
+export interface FileTree<T> {
+  readonly name: string;
+  /** The folder's full path with a trailing slash, so it prefixes every file below it. */
+  readonly path: string;
+  readonly files: readonly TreeFile<T>[];
+  readonly folders: readonly FileTree<T>[];
+}
+
+interface Branch<T> {
+  readonly files: TreeFile<T>[];
+  readonly folders: Map<string, Branch<T>>;
+}
+
+/** SKILL.md sorts first, then everything by name. */
+const sortKey = (name: string): string => (name === "SKILL.md" ? "" : name);
+
+/** Nests files under their folders below `root`, at any depth. */
+export function fileTree<T extends { readonly path: string }>(files: readonly T[], root = ""): FileTree<T> {
+  const top: Branch<T> = { files: [], folders: new Map() };
+  for (const item of files) {
+    const parts = item.path.slice(root.length).split("/");
+    const name = parts.pop() ?? "";
+    let branch = top;
+    for (const part of parts) {
+      const next = branch.folders.get(part) ?? { files: [], folders: new Map<string, Branch<T>>() };
+      branch.folders.set(part, next);
+      branch = next;
+    }
+
+    branch.files.push({ name, item });
+  }
+
+  const freeze = (branch: Branch<T>, name: string, path: string): FileTree<T> => ({
+    name,
+    path,
+    files: branch.files.sort((left, right) => sortKey(left.name).localeCompare(sortKey(right.name))),
+    folders: [...branch.folders].sort(([left], [right]) => left.localeCompare(right)).map(([child, next]) => freeze(next, child, `${path}${child}/`))
+  });
+  return freeze(top, "", root);
+}
+
+export interface SkillGroup<T> {
+  /** The skill's folder with a trailing slash ("" for a SKILL.md at the top), or null for files in no skill. */
+  readonly root: string | null;
+  readonly name: string;
+  readonly files: readonly T[];
+  readonly tree: FileTree<T>;
+}
+
+/** Groups files by the folder of the nearest SKILL.md above them, skills by name and other files last. */
+export function groupBySkill<T extends { readonly path: string }>(files: readonly T[]): SkillGroup<T>[] {
+  const roots = files
+    .filter((file) => file.path === "SKILL.md" || file.path.endsWith("/SKILL.md"))
+    .map((file) => file.path.slice(0, -"SKILL.md".length))
+    .sort((left, right) => right.length - left.length);
+  const groups = new Map<string | null, T[]>();
+  for (const file of files) {
+    const root = roots.find((candidate) => file.path.startsWith(candidate)) ?? null;
+    groups.set(root, [...(groups.get(root) ?? []), file]);
+  }
+
+  return [...groups]
+    .map(([root, grouped]) => ({ root, name: root === null ? "Other files" : (root.split("/").at(-2) ?? "skill"), files: grouped, tree: fileTree(grouped, root ?? "") }))
+    .sort((left, right) => ((left.root === null) === (right.root === null) ? left.name.localeCompare(right.name) : left.root === null ? 1 : -1));
 }

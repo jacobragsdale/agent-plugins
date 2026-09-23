@@ -5,14 +5,20 @@ use crate::locator::{self, sha256_hex};
 use crate::sources::{temporary_path, validate_catalog_tree, MAX_SOURCE_BYTES, MAX_SOURCE_FILES};
 use flate2::read::GzDecoder;
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{HeaderMap, HeaderValue, ETAG, LAST_MODIFIED};
+use reqwest::header::{
+    HeaderMap, HeaderValue, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED,
+};
 use reqwest::redirect::{Action, Attempt, Policy};
+use reqwest::StatusCode;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+/// An unreachable host fails in seconds instead of holding the sync for the
+/// whole download timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REDIRECTS: usize = 5;
 const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -29,34 +35,52 @@ pub(crate) struct DownloadedBytes {
     pub(crate) validators: ArtifactValidators,
 }
 
+/// True when the remote artifact is the one the cache holds. An ETag decides
+/// on its own; `Last-Modified` decides only when neither side has an ETag.
 pub(crate) fn validators_match(stored: &ArtifactValidators, remote: &ArtifactValidators) -> bool {
-    match (
-        &stored.etag,
-        &stored.last_modified,
-        &remote.etag,
-        &remote.last_modified,
-    ) {
-        (Some(stored_etag), Some(stored_modified), Some(remote_etag), Some(remote_modified)) => {
-            stored_etag == remote_etag && stored_modified == remote_modified
-        }
+    match (&stored.etag, &remote.etag) {
+        (Some(stored_etag), Some(remote_etag)) => stored_etag == remote_etag,
+        (None, None) => stored
+            .last_modified
+            .as_ref()
+            .is_some_and(|stored_modified| remote.last_modified.as_ref() == Some(stored_modified)),
         _ => false,
     }
 }
 
 pub(crate) fn head_artifact(url: &str) -> Result<ArtifactValidators, String> {
     let target = fetch_url(url)?;
-    let response = crate::marketplace::authorize(client()?.head(&target), &target)?
-        .send()
-        .map_err(fetch_error)?;
+    let client = client()?;
+    let response = crate::marketplace::send(&target, || {
+        crate::marketplace::authorize(client.head(&target), &target)
+    })?;
     let response = require_success(response, "Could not inspect the artifact")?;
     Ok(validators_from_headers(response.headers()))
 }
 
-pub(crate) fn download_artifact(url: &str) -> Result<DownloadedBytes, String> {
+/// Downloads the artifact. With `cached` validators the request is
+/// conditional, and `Ok(None)` means the server answered 304 Not Modified.
+pub(crate) fn download_artifact(
+    url: &str,
+    cached: Option<&ArtifactValidators>,
+) -> Result<Option<DownloadedBytes>, String> {
     let target = fetch_url(url)?;
-    let response = crate::marketplace::authorize(client()?.get(&target), &target)?
-        .send()
-        .map_err(fetch_error)?;
+    let client = client()?;
+    let response = crate::marketplace::send(&target, || {
+        let mut request = client.get(&target);
+        if let Some(cached) = cached {
+            if let Some(etag) = &cached.etag {
+                request = request.header(IF_NONE_MATCH, etag);
+            }
+            if let Some(modified) = &cached.last_modified {
+                request = request.header(IF_MODIFIED_SINCE, modified);
+            }
+        }
+        crate::marketplace::authorize(request, &target)
+    })?;
+    if cached.is_some() && response.status() == StatusCode::NOT_MODIFIED {
+        return Ok(None);
+    }
     let response = require_success(response, "Could not download the artifact")?;
     let validators = validators_from_headers(response.headers());
     if let Some(length) = response.content_length() {
@@ -84,11 +108,11 @@ pub(crate) fn download_artifact(url: &str) -> Result<DownloadedBytes, String> {
         bytes.extend_from_slice(&buffer[..read]);
     }
     let digest = sha256_hex(&bytes);
-    Ok(DownloadedBytes {
+    Ok(Some(DownloadedBytes {
         bytes,
         digest,
         validators,
-    })
+    }))
 }
 
 pub(crate) fn extract_source_archive(bytes: &[u8], destination: &Path) -> Result<(), String> {
@@ -348,6 +372,7 @@ fn unwrap_single_directory(root: &Path) -> Result<(), String> {
 fn client() -> Result<Client, String> {
     Client::builder()
         .timeout(FETCH_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .redirect(Policy::custom(redirect_policy))
         .build()
         .map_err(|error| format!("Could not create the HTTPS client: {error}"))
@@ -401,13 +426,36 @@ pub(crate) fn is_gone(message: &str) -> bool {
     message.contains("HTTP 404") || message.contains("HTTP 410")
 }
 
+/// True when the request never reached the server: the connection was
+/// refused, the name did not resolve, or the connect timed out.
+pub(crate) fn is_connect_failure(message: &str) -> bool {
+    message.contains(crate::marketplace::CONNECT_FAILURE)
+}
+
+/// True when the server was not reached or did not answer in time.
+pub(crate) fn is_unreachable(message: &str) -> bool {
+    is_connect_failure(message) || message.contains(crate::marketplace::TIMED_OUT)
+}
+
+/// True when the failure is worth trying again later: the server was not
+/// reached, was too slow, was overloaded, or asked the client to back off.
+pub(crate) fn is_transient(message: &str) -> bool {
+    is_unreachable(message) || message.contains("(HTTP 5") || message.contains("(HTTP 429")
+}
+
+/// The status code stays in the text (`is_gone` and `is_transient` read it);
+/// the server's problem title or the bare status follows it.
 fn require_success(response: Response, operation: &str) -> Result<Response, String> {
     let status = response.status();
     if status.is_success() {
-        Ok(response)
-    } else {
-        Err(format!("{operation}: HTTP {status}."))
+        return Ok(response);
     }
+    let url = response.url().to_string();
+    Err(format!(
+        "{operation} (HTTP {}): {}",
+        status.as_u16(),
+        crate::marketplace::failure(&url, response)
+    ))
 }
 
 fn validators_from_headers(headers: &HeaderMap) -> ArtifactValidators {
@@ -423,10 +471,6 @@ fn header_text(value: Option<&HeaderValue>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-}
-
-fn fetch_error(error: reqwest::Error) -> String {
-    format!("Could not fetch the artifact: {error}")
 }
 
 #[cfg(test)]
@@ -603,9 +647,15 @@ mod tests {
                     continue;
                 }
                 let mut line = String::new();
+                let mut if_none_match = None;
                 while reader.read_line(&mut line).is_ok() {
                     if line == "\r\n" || line == "\n" {
                         break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("if-none-match") {
+                            if_none_match = Some(value.trim().to_string());
+                        }
                     }
                     line.clear();
                 }
@@ -619,6 +669,12 @@ mod tests {
                     }
                 }
                 let mut stream = reader.into_inner();
+                if etag.is_some() && if_none_match.as_deref() == etag {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 304 Not Modified\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    continue;
+                }
                 let mut headers = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n",
                     body.len()
@@ -651,7 +707,9 @@ mod tests {
         fs::write(tree.path().join("extra.txt"), "changed").expect("change");
         let second = zip_bytes(tree.path(), None);
         let (url, _, _) = serve_fixture(first.clone(), None, None);
-        let downloaded = download_artifact(&url).expect("download");
+        let downloaded = download_artifact(&url, None)
+            .expect("download")
+            .expect("body");
         assert_eq!(downloaded.digest, sha256_hex(&first));
         assert_ne!(downloaded.digest, sha256_hex(&second));
     }
@@ -662,11 +720,74 @@ mod tests {
         let body = zip_bytes(tree.path(), None);
         let (url, counts, _) =
             serve_fixture(body, Some("\"abc\""), Some("Wed, 21 Oct 2015 07:28:00 GMT"));
-        let first = download_artifact(&url).expect("get");
+        let first = download_artifact(&url, None).expect("get").expect("body");
         let head = head_artifact(&url).expect("head");
         assert!(validators_match(&first.validators, &head));
+        assert_eq!(
+            download_artifact(&url, Some(&first.validators)).expect("conditional"),
+            None,
+            "a matching If-None-Match is answered with 304"
+        );
         let recorded = counts.lock().expect("lock");
-        assert_eq!(recorded.gets, 1);
+        assert_eq!(recorded.gets, 2);
         assert_eq!(recorded.heads, 1);
+    }
+
+    #[test]
+    fn an_etag_alone_decides_a_match() {
+        let etag = |value: &str| ArtifactValidators {
+            etag: Some(value.to_string()),
+            last_modified: None,
+        };
+        assert!(validators_match(&etag("\"a\""), &etag("\"a\"")));
+        assert!(!validators_match(&etag("\"a\""), &etag("\"b\"")));
+        assert!(!validators_match(
+            &ArtifactValidators::default(),
+            &ArtifactValidators::default()
+        ));
+    }
+
+    #[test]
+    fn overloaded_servers_are_retried_after_retry_after() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr");
+        thread::spawn(move || {
+            for status in [
+                "503 Service Unavailable\r\nRetry-After: 0",
+                "200 OK\r\nETag: \"v\"",
+            ] {
+                let Ok((stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                    line.clear();
+                }
+                let _ = reader.into_inner().write_all(
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                );
+            }
+        });
+        let head = head_artifact(&format!("http://{address}/source.zip")).expect("retried");
+        assert_eq!(head.etag.as_deref(), Some("\"v\""));
+    }
+
+    #[test]
+    fn failures_keep_the_status_for_classification() {
+        let closed = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let dead = format!("http://{}/gone.zip", closed.local_addr().expect("addr"));
+        drop(closed);
+        let error = head_artifact(&dead).expect_err("refused");
+        assert!(is_connect_failure(&error), "{error}");
+        assert!(is_transient(&error));
+        assert!(is_gone("Could not download the artifact (HTTP 404): x"));
+        assert!(!is_transient(
+            "Could not download the artifact (HTTP 404): x"
+        ));
+        assert!(is_transient(
+            "Could not download the artifact (HTTP 503): x"
+        ));
     }
 }

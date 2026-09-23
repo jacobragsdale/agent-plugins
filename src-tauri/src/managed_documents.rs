@@ -10,6 +10,57 @@ use std::fs;
 use std::path::Path;
 use toml_edit::{DocumentMut, Item};
 
+const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+
+/// Settings files as agents and editors actually leave them: a UTF-8 byte
+/// order mark is dropped, and an empty JSON file reads as `{}`.
+fn normalized(contents: &[u8], format: StructuredFormat) -> &[u8] {
+    let contents = contents.strip_prefix(UTF8_BOM).unwrap_or(contents);
+    let blank = contents.iter().all(u8::is_ascii_whitespace);
+    match format {
+        StructuredFormat::Json | StructuredFormat::Jsonc if blank => b"{}\n",
+        _ => contents,
+    }
+}
+
+/// The display names of the agent apps behind some adapter ids.
+pub(crate) fn app_names<'a>(adapter_ids: impl IntoIterator<Item = &'a str>) -> String {
+    let mut names = Vec::new();
+    for adapter_id in adapter_ids {
+        let name = crate::agent_profiles::TargetId::ALL
+            .into_iter()
+            .find(|target| target.as_str() == adapter_id)
+            .map_or("An agent app", |target| target.display_name());
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        "An agent app".to_string()
+    } else {
+        names.join(" and ")
+    }
+}
+
+/// A settings-file failure that names the app and the file and says what to do.
+pub(crate) fn document_error<'a>(
+    path: &Path,
+    adapter_ids: impl IntoIterator<Item = &'a str>,
+    error: &str,
+) -> String {
+    let error = error.trim_end();
+    let stop = if error.ends_with(['.', '!', '?']) {
+        ""
+    } else {
+        "."
+    };
+    format!(
+        "{} uses a settings file that Agent Plugins could not read: {}. {error}{stop} Fix or remove that file, then try again.",
+        app_names(adapter_ids),
+        path.display()
+    )
+}
+
 pub(crate) fn read_or_empty(path: &Path, format: StructuredFormat) -> Result<Vec<u8>, String> {
     match fs::read(path) {
         Ok(contents) => Ok(contents),
@@ -29,6 +80,7 @@ pub(crate) fn entry_value(
     if key_path.is_empty() {
         return Err("A structured resource must have a non-empty key path.".to_string());
     }
+    let contents = normalized(contents, format);
     let value = match format {
         StructuredFormat::Json => serde_json::from_slice::<Value>(contents)
             .map_err(|error| format!("Could not parse JSON configuration: {error}"))?,
@@ -66,6 +118,7 @@ pub(crate) fn set_entries(
     format: StructuredFormat,
     entries: &[(Vec<String>, Value)],
 ) -> Result<Vec<u8>, String> {
+    let contents = normalized(contents, format);
     match format {
         StructuredFormat::Json => set_json_entries(contents, entries),
         StructuredFormat::Jsonc => set_jsonc_entries(contents, entries),
@@ -78,6 +131,7 @@ pub(crate) fn remove_entries(
     format: StructuredFormat,
     key_paths: &[Vec<String>],
 ) -> Result<Vec<u8>, String> {
+    let contents = normalized(contents, format);
     match format {
         StructuredFormat::Json => remove_json_entries(contents, key_paths),
         StructuredFormat::Jsonc => remove_jsonc_entries(contents, key_paths),
@@ -438,6 +492,44 @@ mod tests {
         assert!(text.contains("model = \"gpt\" # keep"));
         assert!(text.contains("mcp_servers"));
         assert!(text.contains("acme"));
+    }
+
+    #[test]
+    fn byte_order_marks_and_empty_files_read_as_settings() {
+        let key = vec!["mcpServers".to_string(), "acme".to_string()];
+        let bom = b"\xEF\xBB\xBF{\"mcpServers\":{\"acme\":{\"command\":\"node\"}}}";
+        for format in [StructuredFormat::Json, StructuredFormat::Jsonc] {
+            assert_eq!(
+                entry_value(bom, format, &key).expect("bom"),
+                Some(json!({"command":"node"}))
+            );
+            assert_eq!(entry_value(b"  \n", format, &key).expect("empty"), None);
+            let updated = set_entries(b"", format, &[(key.clone(), json!(1))]).expect("set");
+            assert_eq!(
+                entry_value(&updated, format, &key).expect("reread"),
+                Some(json!(1))
+            );
+        }
+        assert_eq!(
+            entry_value(
+                b"\xEF\xBB\xBFmodel = \"gpt\"\n",
+                StructuredFormat::Toml,
+                &key
+            )
+            .expect("toml bom"),
+            None
+        );
+    }
+
+    #[test]
+    fn document_errors_name_the_app_and_the_file() {
+        let message = document_error(
+            Path::new("/home/me/.codex/config.toml"),
+            ["codex", "chatgpt"],
+            "Bad key",
+        );
+        assert!(message.starts_with("Codex and ChatGPT"));
+        assert!(message.contains("/home/me/.codex/config.toml. Bad key. Fix"));
     }
 
     #[test]

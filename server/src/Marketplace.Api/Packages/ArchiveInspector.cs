@@ -4,8 +4,6 @@ using System.Text.Json.Nodes;
 
 namespace Marketplace.Api.Packages;
 
-public sealed class ArchiveRejectedException(string message) : Exception(message);
-
 /// <summary>What a package upload contains, after safety checks and root unwrapping.</summary>
 public sealed record InspectedArchive(
     string SourceId,
@@ -35,37 +33,39 @@ public static class ArchiveInspector
         using var zip = OpenZip(stream);
         var (names, prefix) = Scan(zip, bytes.Length);
         var manifestEntry = zip.GetEntry(prefix + ManifestFile)
-            ?? throw new ArchiveRejectedException($"The archive has no {ManifestFile} at its root.");
+            ?? throw new ProblemException(422, $"The archive has no {ManifestFile} at its root.");
         JsonObject manifest;
-        using (var manifestStream = manifestEntry.Open())
+        try
         {
-            try
-            {
-                manifest = JsonNode.Parse(manifestStream) as JsonObject
-                    ?? throw new ArchiveRejectedException($"{ManifestFile} is not a JSON object.");
-            }
-            catch (JsonException error)
-            {
-                throw new ArchiveRejectedException($"{ManifestFile} is not valid JSON: {error.Message}");
-            }
+            using var manifestStream = manifestEntry.Open();
+            manifest = JsonNode.Parse(manifestStream) as JsonObject
+                ?? throw new ProblemException(422, $"{ManifestFile} is not a JSON object.");
+        }
+        catch (JsonException error)
+        {
+            throw new ProblemException(422, $"{ManifestFile} is not valid JSON: {error.Message}");
+        }
+        catch (InvalidDataException error)
+        {
+            throw new ProblemException(422, $"{ManifestFile} is corrupt in the archive: {error.Message}");
         }
 
-        if (manifest["version"]?.GetValueKind() != JsonValueKind.Number || manifest["version"]!.GetValue<int>() != 2)
+        if (manifest["version"] is not JsonValue version || !version.TryGetValue<int>(out var number) || number != 2)
         {
-            throw new ArchiveRejectedException($"{ManifestFile} must declare version 2.");
+            throw new ProblemException(422, $"{ManifestFile} must declare version 2.");
         }
 
-        var sourceId = manifest["source"]?["id"]?.GetValue<string>()
-            ?? throw new ArchiveRejectedException($"{ManifestFile} has no source.id.");
+        var sourceId = Text((manifest["source"] as JsonObject)?["id"])
+            ?? throw new ProblemException(422, $"{ManifestFile} has no source.id string.");
         if (manifest["packages"] is not JsonArray packages || packages.Count != 1 || packages[0] is not JsonObject package)
         {
-            throw new ArchiveRejectedException("A marketplace upload must contain exactly one package.");
+            throw new ProblemException(422, "A marketplace upload must contain exactly one package.");
         }
 
-        var packageId = package["id"]?.GetValue<string>()
-            ?? throw new ArchiveRejectedException("The package has no id.");
+        var packageId = Text(package["id"])
+            ?? throw new ProblemException(422, "The package has no id string.");
         var kinds = package["components"] is JsonArray components
-            ? components.Select(component => component?["kind"]?.GetValue<string>() ?? "unknown").Distinct().ToArray()
+            ? components.Select(component => Text((component as JsonObject)?["kind"]) ?? "unknown").Distinct().ToArray()
             : [];
         var relative = names
             .Where(name => name.StartsWith(prefix, StringComparison.Ordinal))
@@ -111,7 +111,7 @@ public static class ArchiveInspector
             var target = Path.GetFullPath(Path.Combine(root, relative));
             if (!target.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal))
             {
-                throw new ArchiveRejectedException($"Entry escapes the archive root: {entry.FullName}");
+                throw new ProblemException(422, $"Entry escapes the archive root: {entry.FullName}");
             }
 
             if (relative.EndsWith('/'))
@@ -121,7 +121,15 @@ public static class ArchiveInspector
             }
 
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            entry.ExtractToFile(target, overwrite: false);
+            try
+            {
+                entry.ExtractToFile(target, overwrite: false);
+            }
+            catch (InvalidDataException error)
+            {
+                throw new ProblemException(422, $"{entry.FullName} is corrupt in the archive: {error.Message}");
+            }
+
             if (!OperatingSystem.IsWindows() && ((entry.ExternalAttributes >> 16) & 0x49) != 0)
             {
                 File.SetUnixFileMode(target, File.GetUnixFileMode(target) | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
@@ -137,7 +145,7 @@ public static class ArchiveInspector
         }
         catch (InvalidDataException error)
         {
-            throw new ArchiveRejectedException($"The upload is not a zip archive: {error.Message}");
+            throw new ProblemException(422, $"The upload is not a zip archive: {error.Message}");
         }
     }
 
@@ -153,7 +161,7 @@ public static class ArchiveInspector
         SafePath(name);
         if (((entry.ExternalAttributes >> 16) & 0xF000) == SymlinkMode)
         {
-            throw new ArchiveRejectedException($"Symbolic links are not accepted: {name}");
+            throw new ProblemException(422, $"Symbolic links are not accepted: {name}");
         }
 
         return name;
@@ -164,17 +172,17 @@ public static class ArchiveInspector
     {
         if (name.Contains('\\'))
         {
-            throw new ArchiveRejectedException($"Entry uses backslashes: {name}");
+            throw new ProblemException(422, $"Entry uses backslashes: {name}");
         }
 
         if (name.StartsWith('/') || name.Length > 1 && name[1] == ':')
         {
-            throw new ArchiveRejectedException($"Entry has an absolute path: {name}");
+            throw new ProblemException(422, $"Entry has an absolute path: {name}");
         }
 
         if (name.Split('/').Any(segment => segment is ".." or "."))
         {
-            throw new ArchiveRejectedException($"Entry contains a relative path segment: {name}");
+            throw new ProblemException(422, $"Entry contains a relative path segment: {name}");
         }
     }
 
@@ -182,22 +190,59 @@ public static class ArchiveInspector
     {
         if (archiveBytes > MaxArchiveBytes)
         {
-            throw new ArchiveRejectedException("The archive is larger than the 50 MB limit.");
+            throw new ProblemException(422, "The archive is larger than the 50 MB limit.");
         }
 
         if (zip.Entries.Count > MaxEntries)
         {
-            throw new ArchiveRejectedException($"The archive has more than {MaxEntries} entries.");
+            throw new ProblemException(422, $"The archive has more than {MaxEntries} entries.");
         }
 
         var names = zip.Entries.Select(SafeName).OfType<string>().ToList();
+        CheckUnique(names);
         if (zip.Entries.Sum(entry => entry.Length) > MaxUncompressedBytes)
         {
-            throw new ArchiveRejectedException("The archive expands to more than 200 MB.");
+            throw new ProblemException(422, "The archive expands to more than 200 MB.");
         }
 
         return (names, RootPrefix(names));
     }
+
+    /// <summary>
+    /// Rejects two entries with one name, ignoring case because installs land on Windows, and a file
+    /// that another entry uses as a directory. Either would fail or overwrite on extraction.
+    /// </summary>
+    private static void CheckUnique(List<string> names)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in names)
+        {
+            if (!seen.Add(name))
+            {
+                throw new ProblemException(422, $"The archive holds {name} more than once (names are compared ignoring case).");
+            }
+
+            if (!name.EndsWith('/'))
+            {
+                files.Add(name);
+            }
+        }
+
+        foreach (var name in names)
+        {
+            for (var slash = name.IndexOf('/'); slash > 0; slash = name.IndexOf('/', slash + 1))
+            {
+                if (files.Contains(name[..slash]))
+                {
+                    throw new ProblemException(422, $"The archive holds {name[..slash]} as both a file and a folder.");
+                }
+            }
+        }
+    }
+
+    /// <summary>A JSON string value, or null for anything else.</summary>
+    private static string? Text(JsonNode? node) => node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
     /// <summary>When every entry lives under one top-level directory, that directory is the root.</summary>
     public static string RootPrefix(IReadOnlyList<string> names)

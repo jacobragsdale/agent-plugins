@@ -108,8 +108,8 @@ public static class SamplePackages
         return form;
     }
 
-    public static string Skill(string name, string description, string body = "Follow these steps.") =>
-        $"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n";
+    public static string Skill(string name, string description) =>
+        $"---\nname: {name}\ndescription: {description}\n---\n\nFollow these steps.\n";
 
     public static MultipartFormDataContent PublishForm(byte[] archive, string version, string? tags = null, string? changelog = null)
     {

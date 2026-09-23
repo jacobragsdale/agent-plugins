@@ -11,6 +11,10 @@ use crate::resource::{
 use crate::source::{ConfiguredSource, SourceSnapshot};
 use serde::Serialize;
 use std::collections::BTreeSet;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+const REDETECT_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,8 +48,32 @@ pub(crate) fn plan(
     if let Some(profiles) = profiles {
         return plan_portable(paths, snapshot, item, profiles, component_ids);
     }
-    let profiles = agent_profiles::read(paths)?;
+    let mut profiles = agent_profiles::read(paths)?;
+    // No enabled agent usually means detection missed one; look again once
+    // before telling the user to install an app.
+    if !profiles.iter().any(|profile| profile.enabled) && redetect_due() {
+        agent_profiles::refresh_detection();
+        profiles = agent_profiles::read(paths)?;
+    }
     plan_portable(paths, snapshot, item, &profiles, component_ids)
+}
+
+/// Whether planning may ask for a fresh detection. At most once a minute,
+/// because every package on screen is planned and detection runs processes.
+fn redetect_due() -> bool {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    if cfg!(test) {
+        // Detection writes the real profile file; tests never re-detect.
+        return false;
+    }
+    let Ok(mut last) = LAST.lock() else {
+        return false;
+    };
+    if last.is_some_and(|at| at.elapsed() < REDETECT_INTERVAL) {
+        return false;
+    }
+    *last = Some(Instant::now());
+    true
 }
 
 pub(crate) fn package_component_ids(item: &CatalogItem) -> Vec<String> {

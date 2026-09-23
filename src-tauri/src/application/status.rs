@@ -1,8 +1,12 @@
 use crate::catalog::CatalogItem;
+use crate::executor::ContentState;
 use crate::install::ItemStatus;
 use crate::ledger::{InstallationLedger, InstallationRecord};
 use crate::paths::SystemPaths;
 use crate::source::SourceSnapshot;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 pub(super) fn refined_item_status(
     paths: &SystemPaths,
@@ -65,6 +69,27 @@ pub(super) fn component_status(
     if !selected.iter().any(|id| id == component_id) {
         return ItemStatus::Available;
     }
+    let bindings_exist = record.binding_ids.iter().any(|binding_id| {
+        ledger_state
+            .bindings
+            .get(binding_id)
+            .is_some_and(|binding| binding.component_id == component_id)
+    });
+    if bindings_exist {
+        match crate::executor::installation_state(
+            paths,
+            ledger_state,
+            &item.id,
+            Some(&[component_id.to_string()]),
+        ) {
+            ContentState::Modified => return ItemStatus::Modified,
+            ContentState::Missing if item.digest == record.item_digest => {
+                return ItemStatus::Missing
+            }
+            ContentState::Unknown(_) => return package_status,
+            _ => {}
+        }
+    }
     let plan = crate::planner::plan(
         paths,
         snapshot,
@@ -72,18 +97,15 @@ pub(super) fn component_status(
         None,
         Some(&[component_id.to_string()]),
     );
+    // A plan that cannot be made right now, such as while no agent is
+    // detected, says nothing about what is installed.
     let Ok(plan) = plan else {
-        return ItemStatus::Available;
+        return if bindings_exist {
+            package_status
+        } else {
+            ItemStatus::Available
+        };
     };
-    let bindings_exist = record.binding_ids.iter().any(|binding_id| {
-        ledger_state
-            .bindings
-            .get(binding_id)
-            .is_some_and(|binding| binding.component_id == component_id)
-    });
-    if bindings_exist && !component_resources_match(paths, ledger_state, record, component_id) {
-        return ItemStatus::Modified;
-    }
     if !crate::executor::plan_satisfied(ledger_state, &plan).unwrap_or(false) {
         if item.digest != record.item_digest {
             return ItemStatus::UpdateAvailable;
@@ -95,29 +117,6 @@ pub(super) fn component_status(
         };
     }
     ItemStatus::Installed
-}
-
-pub(super) fn component_resources_match(
-    paths: &SystemPaths,
-    ledger_state: &InstallationLedger,
-    record: &InstallationRecord,
-    component_id: &str,
-) -> bool {
-    record.binding_ids.iter().all(|binding_id| {
-        ledger_state.bindings.get(binding_id).is_none_or(|binding| {
-            if binding.component_id != component_id {
-                return true;
-            }
-            binding.resource_ids.iter().all(|resource_id| {
-                ledger_state
-                    .resources
-                    .get(resource_id)
-                    .is_some_and(|resource| {
-                        crate::executor::resource_matches(paths, resource).unwrap_or(false)
-                    })
-            })
-        })
-    })
 }
 
 pub(crate) fn item_status(
@@ -132,14 +131,37 @@ pub(crate) fn item_status(
     if item.is_some_and(|item| item.source_key != record.source_key) {
         return ItemStatus::SourceConflict;
     }
-    if !crate::executor::installation_matches(paths, ledger, canonical_id) {
-        return ItemStatus::Modified;
-    }
-    match item {
+    let published = match item {
         None => ItemStatus::Removed,
         Some(item) if item.digest != record.item_digest => ItemStatus::UpdateAvailable,
         Some(_) => ItemStatus::Installed,
+    };
+    let key = (paths.app_data(), canonical_id.to_string());
+    let status = match crate::executor::installation_state(paths, ledger, canonical_id, None) {
+        ContentState::Modified => ItemStatus::Modified,
+        // A newer version re-creates everything, so only the same version
+        // reports its files as missing.
+        ContentState::Missing if published == ItemStatus::Installed => ItemStatus::Missing,
+        // A file that cannot be read right now proves nothing either way.
+        ContentState::Unknown(_) => {
+            return last_statuses()
+                .lock()
+                .ok()
+                .and_then(|statuses| statuses.get(&key).copied())
+                .unwrap_or(published);
+        }
+        _ => published,
+    };
+    if let Ok(mut statuses) = last_statuses().lock() {
+        statuses.insert(key, status);
     }
+    status
+}
+
+/// The status each installation last had, for when its files cannot be read.
+fn last_statuses() -> &'static Mutex<BTreeMap<(PathBuf, String), ItemStatus>> {
+    static STATUSES: Mutex<BTreeMap<(PathBuf, String), ItemStatus>> = Mutex::new(BTreeMap::new());
+    &STATUSES
 }
 
 #[cfg(test)]
@@ -324,5 +346,33 @@ mod tests {
             ),
             ItemStatus::SourceConflict
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unreadable_files_keep_the_last_status() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        enable_cursor(&paths);
+        let (source, snapshot) = two_component_snapshot(root.path());
+        let item = snapshot.catalog.items["tools"].clone();
+        install::install_item_components_approved(&paths, &source, &snapshot, &item, false, None)
+            .expect("install");
+        let ledger = crate::executor::read_ledger(&paths).expect("ledger");
+        assert_eq!(
+            item_status(&paths, &ledger, Some(&item), &item.id),
+            ItemStatus::Installed
+        );
+        let skill = paths.home.join(".agents/skills/skillbook-review/SKILL.md");
+        fs::set_permissions(&skill, fs::Permissions::from_mode(0o000)).expect("lock");
+        if fs::read(&skill).is_ok() {
+            return; // Running as root; permissions cannot simulate the failure.
+        }
+        assert_eq!(
+            item_status(&paths, &ledger, Some(&item), &item.id),
+            ItemStatus::Installed
+        );
+        fs::set_permissions(&skill, fs::Permissions::from_mode(0o644)).expect("unlock");
     }
 }

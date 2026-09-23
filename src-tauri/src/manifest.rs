@@ -1,4 +1,9 @@
-//! Strict, locally pinned source manifests for portable packages.
+//! Source manifests for portable packages.
+//!
+//! Publishing is strict: [`SourceManifest::from_slice`] refuses unknown fields
+//! and any invalid package. The app reads fetched manifests with
+//! [`SourceManifest::from_slice_tolerant`], which ignores fields a newer
+//! publisher added and drops only the packages it cannot use.
 
 use schemars::{generate::SchemaSettings, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -15,7 +20,8 @@ pub enum SourceManifest {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
+#[schemars(deny_unknown_fields)]
 pub struct ManifestV2 {
     #[schemars(with = "i64", range(min = 2, max = 2))]
     pub version: u8,
@@ -25,7 +31,8 @@ pub struct ManifestV2 {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
+#[schemars(deny_unknown_fields)]
 pub struct ManifestSource {
     #[schemars(
         length(min = 2, max = 16),
@@ -39,7 +46,8 @@ pub struct ManifestSource {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
+#[schemars(deny_unknown_fields)]
 pub struct ManifestPackage {
     #[schemars(
         length(min = 1, max = 64),
@@ -59,7 +67,8 @@ pub struct ManifestPackage {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", tag = "kind")]
+#[schemars(deny_unknown_fields)]
 pub enum ManifestComponent {
     Skill {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,32 +97,89 @@ impl ManifestComponent {
 }
 
 impl SourceManifest {
+    /// Strict parse for publishing and the validators: unknown fields and any
+    /// invalid package fail the whole manifest.
     pub fn from_slice(contents: &[u8]) -> Result<Self, String> {
+        let (manifest, errors) = Self::parse(contents, true)?;
+        match errors.into_iter().next() {
+            Some(error) => Err(error),
+            None => Ok(manifest),
+        }
+    }
+
+    /// Tolerant parse for a fetched manifest: unknown fields are ignored and
+    /// an invalid package is dropped with one message per package.
+    pub(crate) fn from_slice_tolerant(contents: &[u8]) -> Result<(Self, Vec<String>), String> {
+        Self::parse(contents, false)
+    }
+
+    fn parse(contents: &[u8], strict: bool) -> Result<(Self, Vec<String>), String> {
         if contents.len() > MAX_MANIFEST_BYTES {
             return Err("agent-plugins.json is larger than the 1 MB limit.".to_string());
         }
         let value = serde_json::from_slice::<serde_json::Value>(contents)
             .map_err(|error| format!("Could not parse agent-plugins.json: {error}"))?;
-        let version = value.get("version").and_then(serde_json::Value::as_u64);
-        let manifest = match version {
+        match value.get("version").and_then(serde_json::Value::as_u64) {
             Some(1) => {
                 return Err(
                     "agent-plugins.json version 1 generic file installs are no longer supported. Publish version 2 packages."
                         .to_string(),
                 );
             }
-            Some(2) => serde_json::from_value::<ManifestV2>(value)
-                .map(Self::V2)
-                .map_err(|error| format!("Could not parse agent-plugins.json: {error}"))?,
+            Some(2) => {}
             Some(version) => {
                 return Err(format!(
                     "agent-plugins.json uses unsupported version {version}."
                 ));
             }
             None => return Err("agent-plugins.json has no valid version.".to_string()),
-        };
-        manifest.validate()?;
-        Ok(manifest)
+        }
+        let source = serde_json::from_value::<ManifestSource>(
+            value.get("source").cloned().unwrap_or_default(),
+        )
+        .map_err(|error| format!("Could not parse agent-plugins.json: source: {error}"))?;
+        validate_source_id(&source.id)?;
+        validate_text(&source.name, "source.name", 1, 120)?;
+        validate_text(&source.description, "source.description", 1, 1024)?;
+        let entries = value
+            .get("packages")
+            .and_then(serde_json::Value::as_array)
+            .filter(|entries| !entries.is_empty())
+            .ok_or_else(|| "agent-plugins.json does not publish any packages.".to_string())?;
+        let mut packages = Vec::new();
+        let mut errors = Vec::new();
+        let mut ids = BTreeSet::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let parsed = serde_json::from_value::<ManifestPackage>(entry.clone())
+                .map_err(|error| format!("Package {}: {error}", index + 1))
+                .and_then(|package| {
+                    if strict {
+                        reject_unknown_fields(entry, &package, &format!("packages[{index}]"))
+                            .map_err(|error| {
+                                format!("Could not parse agent-plugins.json: {error}")
+                            })?;
+                    }
+                    validate_package(&package)?;
+                    if !ids.insert(package.id.clone()) {
+                        return Err(format!("Duplicate package id: {}", package.id));
+                    }
+                    Ok(package)
+                });
+            match parsed {
+                Ok(package) => packages.push(package),
+                Err(error) => errors.push(error),
+            }
+        }
+        let manifest = Self::V2(ManifestV2 {
+            version: SOURCE_MANIFEST_VERSION,
+            source,
+            packages,
+        });
+        if strict && errors.is_empty() {
+            reject_unknown_fields(&value, &manifest, "")
+                .map_err(|error| format!("Could not parse agent-plugins.json: {error}"))?;
+        }
+        Ok((manifest, errors))
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -221,6 +287,52 @@ fn validate_package(package: &ManifestPackage) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Fails when `input` has an object key that `parsed` (the typed document
+/// serialized again) does not carry: a field this version does not know.
+/// Explicit nulls and empty arrays count as known, because the typed document
+/// omits them when it serializes.
+pub(crate) fn reject_unknown_fields(
+    input: &serde_json::Value,
+    parsed: &impl Serialize,
+    path: &str,
+) -> Result<(), String> {
+    fn walk(input: &serde_json::Value, known: &serde_json::Value, path: &str) -> Option<String> {
+        use serde_json::Value;
+        match (input, known) {
+            (Value::Object(input), Value::Object(known)) => {
+                input.iter().find_map(|(key, value)| {
+                    let child = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    match known.get(key) {
+                        Some(known) => walk(value, known, &child),
+                        None if value.is_null() || value.as_array().is_some_and(Vec::is_empty) => {
+                            None
+                        }
+                        None => Some(child),
+                    }
+                })
+            }
+            (Value::Array(input), Value::Array(known)) if input.len() == known.len() => input
+                .iter()
+                .zip(known)
+                .enumerate()
+                .find_map(|(index, (input, known))| {
+                    walk(input, known, &format!("{path}[{index}]"))
+                }),
+            _ => None,
+        }
+    }
+    let known = serde_json::to_value(parsed)
+        .map_err(|error| format!("Could not check the document's fields: {error}"))?;
+    match walk(input, &known, path) {
+        Some(field) => Err(format!("unknown field `{field}`")),
+        None => Ok(()),
+    }
 }
 
 fn validate_package_id(value: &str, label: &str) -> Result<(), String> {
@@ -403,6 +515,26 @@ mod tests {
         assert!(SourceManifest::from_slice(empty.as_bytes())
             .expect_err("empty packages")
             .contains("does not publish"));
+    }
+
+    #[test]
+    fn fetched_manifests_skip_unknown_fields_and_bad_packages() {
+        let manifest = br#"{
+          "version": 2,
+          "future": true,
+          "source": {"id":"acme","name":"Acme","description":"Shared configuration.","logo":"x.png"},
+          "packages": [
+            {"id":"review","components":[{"kind":"skill","path":"skills/review","pinned":true}]},
+            {"id":"rules","components":[{"kind":"instructionSet","path":"rules/review.md"}]}
+          ]
+        }"#;
+        let (parsed, errors) = SourceManifest::from_slice_tolerant(manifest).expect("tolerant");
+        assert_eq!(parsed.packages().len(), 1);
+        assert_eq!(parsed.packages()[0].id, "review");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("Package 2"), "{errors:?}");
+        let strict = SourceManifest::from_slice(manifest).expect_err("strict");
+        assert!(strict.contains("unknown field"), "{strict}");
     }
 
     #[test]

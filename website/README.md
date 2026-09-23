@@ -1,6 +1,6 @@
 # Web portal
 
-The Agent Plugins web portal: the download page, browsing, publishing (write in the browser or upload), My skills, admin review, and the technical reference. It is an Angular app that the marketplace server builds into its image and serves at `/` beside `/api` ([ADR 0006](../docs/decisions/0006-web-portal-and-review.md)), so the browser's Windows sign-in covers both.
+The Agent Plugins web portal: the download page, browsing, publishing (upload a skill folder, pack, or zip), My skills, admin review, and the technical reference. It is an Angular app that the marketplace server builds into its image and serves at `/` beside `/api` ([ADR 0006](../docs/decisions/0006-web-portal-and-review.md)), so the browser's Windows sign-in covers both.
 
 ## Develop
 

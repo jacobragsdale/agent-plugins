@@ -18,12 +18,18 @@ pub(crate) enum ItemStatus {
     Conflict,
     SourceConflict,
     PartiallyInstalled,
+    /// Installed files are gone. The next sync puts them back.
+    Missing,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OperationOutcome {
     pub(crate) backup_paths: Vec<String>,
+    /// Agents the package skipped, such as one whose settings file could not
+    /// be read. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -191,20 +197,24 @@ pub(crate) fn source_removal_plan(
                             owned.document_path.clone()
                         }
                     };
-                    if seen.insert(path.clone()) {
+                    // Only changed files need the warning; missing and
+                    // unchanged ones are removed without asking.
+                    if crate::executor::resource_state(paths, resource).is_protected()
+                        && seen.insert(path.clone())
+                    {
                         warnings.push(RemovalPathWarning {
                             path,
-                            modified: !crate::executor::resource_matches(paths, resource)?,
+                            modified: true,
                         });
                     }
                 }
             }
-            Ok(RemovalItemPlan {
+            RemovalItemPlan {
                 id: id.clone(),
                 paths: warnings,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
     items.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(SourceRemovalPlan {
         source_id: source.source_id.clone(),
@@ -381,6 +391,8 @@ mod tests {
             .expect("enable");
         let (source, snapshot, item) = snapshot(root.path());
         install_item(&paths, &source, &snapshot, &item).expect("install");
+        let plan = source_removal_plan(&paths, &source).expect("plan");
+        assert!(plan.items[0].paths.is_empty());
         fs::write(
             paths.home.join(".agents/skills/skillbook-review/local.txt"),
             "edit",

@@ -1,7 +1,10 @@
 import type { JSX, ReactNode } from "react";
-import { Badge, Button, Card, Dialog, Heading, Text } from "@radix-ui/themes";
-import { errorText } from "../ipc/client";
+import { Button, Callout, Card, Dialog, Heading, Text } from "@radix-ui/themes";
+import { toAppError } from "../ipc/client";
+import type { AppError } from "../ipc/client";
 import type { AppState, ListedSource, RepositoryState, SourceState } from "../ipc/schemas";
+import { ErrorMessage } from "./Notice";
+import { FreshnessBadge } from "./SourceGroup";
 
 function ListedSourceCard({ name, description, children }: Readonly<{ name: string; description: string; children: ReactNode }>): JSX.Element {
   return (
@@ -47,12 +50,12 @@ export function ManageSourcesDialog({
   open: boolean;
   state: AppState | null;
   adding: boolean;
-  error: string | null;
+  error: AppError | null;
   removing: ReadonlySet<string>;
   onOpenChange: (open: boolean) => void;
   onAddListed: (repository: RepositoryState, listed: ListedSource) => Promise<void>;
   onRemove: (source: SourceState) => Promise<void>;
-  onError: (message: string) => void;
+  onError: (error: AppError) => void;
 }>): JSX.Element {
   const repository = state?.repositories[0] ?? null;
   const extras = state === null ? [] : orphanSources(state);
@@ -61,11 +64,11 @@ export function ManageSourcesDialog({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Content maxWidth="720px">
         <Dialog.Title>Manage sources</Dialog.Title>
-        <Dialog.Description>Adding a source makes its skills and MCP servers available. Nothing is installed until you choose it.</Dialog.Description>
+        <Dialog.Description>Adding a source makes its packages available. Nothing is installed until you choose it.</Dialog.Description>
         {error === null ? null : (
-          <Text as="p" color="red" size="2">
-            {error}
-          </Text>
+          <Callout.Root className="app-callout" color="red" role="alert">
+            <ErrorMessage summary={error.summary} detail={error.detail} />
+          </Callout.Root>
         )}
         {state?.catalogMessage === null || state?.catalogMessage === undefined ? null : (
           <Text as="p" color="red" size="2">
@@ -82,12 +85,12 @@ export function ManageSourcesDialog({
               <Heading as="h3" size="3">
                 {repository.name}
               </Heading>
-              {repository.refreshFailed ? <Badge color="red">Refresh failed</Badge> : null}
+              <FreshnessBadge status={repository.status} refreshFailed={repository.refreshFailed} lastSuccessAt={repository.lastSuccessAtEpochSeconds} />
             </div>
             <Text as="p" color="gray" size="2">
               {repository.description}
             </Text>
-            {repository.message === null ? null : (
+            {repository.message === null || repository.status === "stale" ? null : (
               <Text as="p" color="red" size="2">
                 {repository.message}
               </Text>
@@ -113,7 +116,7 @@ export function ManageSourcesDialog({
                               disabled={removing.has(added.sourceId)}
                               onClick={() => {
                                 onRemove(added).catch((reason: unknown) => {
-                                  onError(errorText(reason));
+                                  onError(toAppError(reason));
                                 });
                               }}
                             >
@@ -127,7 +130,7 @@ export function ManageSourcesDialog({
                             loading={adding}
                             onClick={() => {
                               onAddListed(repository, listed).catch((reason: unknown) => {
-                                onError(errorText(reason));
+                                onError(toAppError(reason));
                               });
                             }}
                           >
@@ -162,7 +165,7 @@ export function ManageSourcesDialog({
                       disabled={removing.has(source.sourceId)}
                       onClick={() => {
                         onRemove(source).catch((reason: unknown) => {
-                          onError(errorText(reason));
+                          onError(toAppError(reason));
                         });
                       }}
                     >

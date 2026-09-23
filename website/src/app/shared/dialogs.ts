@@ -111,11 +111,11 @@ function lines(text: string): string[] {
             <mat-hint>Windows (Active Directory) group names, one per line</mat-hint>
           </mat-form-field>
         }
-        @if (error(); as message) {
-          <p class="problem" role="alert">{{ message }}</p>
-        }
-      } @else {
+      } @else if (error() === null) {
         <p class="muted">Loading…</p>
+      }
+      @if (error(); as message) {
+        <p class="problem" role="alert">{{ message }}</p>
       }
     </mat-dialog-content>
     <mat-dialog-actions align="end">
@@ -173,10 +173,9 @@ export class VisibilityDialog {
       this.everyone.set(access.users.length + access.groups.length === 0);
       this.users.set(access.users.join("\n"));
       this.groups.set(access.groups.join("\n"));
+      this.loaded.set(true);
     } catch (error) {
       this.error.set(ApiError.from(error).message);
-    } finally {
-      this.loaded.set(true);
     }
   }
 }

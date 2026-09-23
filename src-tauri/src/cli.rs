@@ -59,7 +59,7 @@ usage:\n  \
 agent-plugins whoami\n  \
 agent-plugins validate <path>\n  \
 agent-plugins search [query]\n  \
-agent-plugins publish <path> --version <semver> [--namespace <ns>] [--package-id <id>] [--tags a,b] [--changelog <text>] [--yes]\n  \
+agent-plugins publish <path> --version <major.minor.patch> [--namespace <ns>] [--package-id <id>] [--tags a,b] [--changelog <text>] [--yes]\n  \
 agent-plugins install <namespace>/<package> [--approve-mcp]\n  \
 agent-plugins access <namespace>[/<package>] [--user <account>]... [--group <name>]... [--public]\n\n\
 <path> for publish is a skill directory containing SKILL.md, an MCP document\n\
@@ -413,25 +413,9 @@ fn access(args: &[String]) -> Result<(), String> {
 }
 
 fn describe_problem(status: u16, body: &str) -> String {
-    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
-    let title = parsed
-        .as_ref()
-        .and_then(|value| value.get("title"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("The marketplace rejected the request.");
-    let mut message = format!("HTTP {status}: {title}");
-    if let Some(errors) = parsed
-        .as_ref()
-        .and_then(|value| value.get("errors"))
-        .and_then(|value| value.as_array())
-    {
-        for error in errors {
-            let path = error.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let text = error.get("message").and_then(|v| v.as_str()).unwrap_or("");
-            message.push_str(&format!("\n  {path}: {text}"));
-        }
-    }
-    message
+    let message = marketplace::problem_message(body)
+        .unwrap_or_else(|| "The marketplace rejected the request.".to_string());
+    format!("HTTP {status}: {message}")
 }
 
 fn confirm(prompt: &str) -> Result<bool, String> {

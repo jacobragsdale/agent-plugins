@@ -6,7 +6,7 @@ A **source** is an HTTPS archive with `agent-plugins.json` at its root. That fil
 
 The app plans the files and config each detected agent needs, shows compatibility and trust, then applies the change in one recovery journal and ownership-ledger commit. It never executes source content.
 
-The **web portal**, served by the marketplace, is where people browse skills, download the app, write or upload their own skills and skill packs, and where admins review new ones before they go live.
+The **web portal**, served by the marketplace, is where people browse skills, download the app, upload their own skills and skill packs, and where admins review new ones before they go live.
 
 The `agent-plugins` command line (`validate`, `publish`, `search`, `install`, `whoami`) does the same work from a terminal or from an agent; the official `publish` and `marketplace` skills wrap it.
 
@@ -19,14 +19,14 @@ The `agent-plugins` command line (`validate`, `publish`, `search`, `install`, `w
 
 ## Do
 
-- [Troubleshooting](docs/troubleshoot.md) — a refused install, a skill an agent cannot see, a red status button.
+- [Troubleshooting](docs/troubleshoot.md) — a refused install, a skill an agent cannot see, a red status button, an offline window.
 - [Work on Agent Plugins](docs/development.md) — set up, verify, add an adapter, change a contract, run the server.
 - [Run the marketplace server](server/README.md) — configuration, Kerberos, Artifact Keeper, Docker.
 - [Work on the web portal](website/README.md) — the Angular dev loop against a local server.
 
 ## Look up
 
-- [App reference](docs/app-reference.md) — window and tray controls, package states, destinations, background behavior.
+- [App reference](docs/app-reference.md) — window and tray controls, notices and retries, package states, destinations, background behavior.
 - [CLI reference](docs/cli-reference.md) — `validate`, `publish`, `search`, `install`, `whoami`.
 - [Marketplace API](docs/marketplace-api.md) — endpoints, events, and configuration; [`server/openapi.json`](server/openapi.json) is generated.
 - [Preflight checks](docs/preflight-reference.md) — every startup check, its status rules, and remediation.
@@ -58,7 +58,7 @@ pnpm tauri dev
 Run local verification before pushing:
 
 ```bash
-pnpm typecheck && pnpm lint && pnpm format:check && pnpm build
+pnpm typecheck && pnpm lint && pnpm test && pnpm format:check && pnpm build
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets

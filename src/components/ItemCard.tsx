@@ -1,16 +1,19 @@
 import { useState, type JSX } from "react";
 import { Badge, Button, Card, Heading, Text } from "@radix-ui/themes";
-import { errorText } from "../ipc/client";
+import { toAppError } from "../ipc/client";
+import type { AppError } from "../ipc/client";
 import type { CatalogComponent, CatalogItem } from "../ipc/schemas";
 import { componentLabel, primaryActionColor, primaryActionLabel, statusColor, statusLabel } from "../lib/status";
 
 export function ItemCard({
   item,
   busy,
+  allBusy,
   onChange,
   onError
-}: Readonly<{ item: CatalogItem; busy: boolean; onChange: (item: CatalogItem, componentId?: string) => Promise<void>; onError: (message: string) => void }>): JSX.Element {
-  const protectedItem = item.status === "modified" || item.status === "sourceConflict";
+}: Readonly<{ item: CatalogItem; busy: boolean; allBusy: boolean; onChange: (item: CatalogItem, componentId?: string) => Promise<void>; onError: (error: AppError) => void }>): JSX.Element {
+  // A package another source installed is not this one's to touch.
+  const protectedItem = item.status === "sourceConflict";
   const expandable = item.components.length > 1;
   const [componentsOpen, setComponentsOpen] = useState(true);
   return (
@@ -18,14 +21,14 @@ export function ItemCard({
       <div className="skill-card-main">
         <div className="skill-copy">
           <div className="skill-title-row">
-            <Heading as="h4" size="3">
+            <Heading as="h3" size="3">
               {item.name}
             </Heading>
             {uniqueKinds(item.components).map((kind) => (
               <KindBadge key={kind} kind={kind} />
             ))}
             {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
-            {item.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
+            {item.manualInvocation ? <Badge color="blue">Only when you ask</Badge> : null}
             <MarketplaceBadges meta={item.marketplace} />
           </div>
           <Text as="p" color="gray" size="2">
@@ -49,11 +52,11 @@ export function ItemCard({
           <Button
             className="skill-action skill-action-primary"
             color={primaryActionColor(item.status)}
-            disabled={busy || protectedItem}
+            disabled={busy || allBusy || protectedItem}
             loading={busy}
             onClick={() => {
               onChange(item).catch((reason: unknown) => {
-                onError(errorText(reason));
+                onError(toAppError(reason));
               });
             }}
           >
@@ -70,12 +73,12 @@ export function ItemCard({
           }}
         >
           <summary>
-            {String(item.components.length)} items · {componentSummary(item.components)}
+            {String(item.components.length)} parts · {componentSummary(item.components)}
           </summary>
           <ul>
             {item.components.map((component) => (
               <li key={`${component.kind}:${component.id}`}>
-                <ComponentRow component={component} busy={busy} protectedItem={protectedItem} onChange={() => onChange(item, component.id)} onError={onError} />
+                <ComponentRow component={component} busy={busy} allBusy={allBusy} protectedItem={protectedItem} onChange={() => onChange(item, component.id)} onError={onError} />
               </li>
             ))}
           </ul>
@@ -125,7 +128,7 @@ function componentSummary(components: readonly CatalogComponent[]): string {
     parts.push(`${String(skills)} skill${skills === 1 ? "" : "s"}`);
   }
   if (servers > 0) {
-    parts.push(`${String(servers)} MCP`);
+    parts.push(`${String(servers)} connector${servers === 1 ? "" : "s"}`);
   }
   return parts.join(" · ");
 }
@@ -133,11 +136,12 @@ function componentSummary(components: readonly CatalogComponent[]): string {
 function ComponentRow({
   component,
   busy,
+  allBusy,
   protectedItem,
   onChange,
   onError
-}: Readonly<{ component: CatalogComponent; busy: boolean; protectedItem: boolean; onChange: () => Promise<void>; onError: (message: string) => void }>): JSX.Element {
-  const blocked = protectedItem || component.status === "modified" || component.status === "sourceConflict";
+}: Readonly<{ component: CatalogComponent; busy: boolean; allBusy: boolean; protectedItem: boolean; onChange: () => Promise<void>; onError: (error: AppError) => void }>): JSX.Element {
+  const blocked = protectedItem || component.status === "sourceConflict";
   return (
     <div className="component-row">
       <div className="component-copy">
@@ -145,7 +149,7 @@ function ComponentRow({
           <Text size="2">{component.id}</Text>
           <KindBadge kind={component.kind} />
           {component.status === "available" || component.status === "installed" ? null : <Badge color={statusColor(component.status)}>{statusLabel(component.status)}</Badge>}
-          {component.manualInvocation ? <Badge color="blue">Manual Invocation</Badge> : null}
+          {component.manualInvocation ? <Badge color="blue">Only when you ask</Badge> : null}
         </div>
         <Text as="p" color="gray" size="2">
           {component.description}
@@ -155,11 +159,11 @@ function ComponentRow({
         className="skill-action"
         size="1"
         color={primaryActionColor(component.status)}
-        disabled={busy || blocked}
+        disabled={busy || allBusy || blocked}
         loading={busy}
         onClick={() => {
           onChange().catch((reason: unknown) => {
-            onError(errorText(reason));
+            onError(toAppError(reason));
           });
         }}
       >

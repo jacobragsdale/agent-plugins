@@ -10,7 +10,8 @@ namespace Marketplace.Api.Storage;
 /// <summary>
 /// Artifact Keeper's generic repository. Uploads are <c>PUT /api/v1/repositories/{repo}/artifacts/{path}</c>
 /// and are immutable (a repeat returns 409); downloads are <c>GET …/download/{path}</c>. The store logs in
-/// with the service credential and refreshes the bearer token before it expires.
+/// with the service credential and refreshes the bearer token before it expires. A network error or a
+/// 502/503/504 is retried once; after that the caller gets a 503 saying the store is unavailable.
 /// </summary>
 public sealed class ArtifactKeeperStore(
     HttpClient httpClient,
@@ -19,6 +20,7 @@ public sealed class ArtifactKeeperStore(
     ILogger<ArtifactKeeperStore> logger) : IArtifactStore
 {
     private static readonly TimeSpan TokenMargin = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(1);
 
     private readonly SemaphoreSlim _loginLock = new(1, 1);
     private string? _token;
@@ -43,7 +45,7 @@ public sealed class ArtifactKeeperStore(
 
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException($"Artifact Keeper upload of {full} failed with HTTP {(int)response.StatusCode}.");
+            throw Unavailable($"Artifact Keeper upload of {full} failed with HTTP {(int)response.StatusCode}.");
         }
 
         var expected = Convert.ToHexStringLower(SHA256.HashData(bytes.Span));
@@ -64,9 +66,14 @@ public sealed class ArtifactKeeperStore(
         using var response = await SendAsync(
             () => new HttpRequestMessage(HttpMethod.Get, $"api/v1/repositories/{options.Value.Repository}/download/{full}"),
             cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            throw new InvalidOperationException($"Artifact Keeper has no {full}, though the database lists it.");
+        }
+
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException($"Artifact Keeper download of {full} failed with HTTP {(int)response.StatusCode}.");
+            throw Unavailable($"Artifact Keeper download of {full} failed with HTTP {(int)response.StatusCode}.");
         }
 
         return await response.Content.ReadAsByteArrayAsync(cancellationToken);
@@ -85,21 +92,59 @@ public sealed class ArtifactKeeperStore(
 
     private async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> build, CancellationToken cancellationToken)
     {
-        for (var attempt = 0; ; attempt++)
+        var refresh = false;
+        var reauthenticated = false;
+        var retried = false;
+        while (true)
         {
-            var token = await TokenAsync(forceRefresh: attempt > 0, cancellationToken);
-            var request = build();
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            if (response.StatusCode == HttpStatusCode.Unauthorized && attempt == 0)
+            HttpResponseMessage response;
+            try
+            {
+                var token = await TokenAsync(refresh, cancellationToken);
+                refresh = false;
+                var request = build();
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            }
+            catch (Exception error) when (error is HttpRequestException || (error is TaskCanceledException && !cancellationToken.IsCancellationRequested))
+            {
+                if (retried)
+                {
+                    throw Unavailable($"Artifact Keeper is unreachable: {error.Message}");
+                }
+
+                retried = true;
+                logger.LogWarning(error, "Artifact Keeper request failed; retrying once.");
+                await Task.Delay(RetryDelay, timeProvider, cancellationToken);
+                continue;
+            }
+
+            if (response.StatusCode == HttpStatusCode.Unauthorized && !reauthenticated)
             {
                 logger.LogWarning("Artifact Keeper rejected the bearer token; logging in again.");
                 response.Dispose();
+                reauthenticated = refresh = true;
+                continue;
+            }
+
+            if (!retried && response.StatusCode is HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout)
+            {
+                logger.LogWarning("Artifact Keeper answered HTTP {Status}; retrying once.", (int)response.StatusCode);
+                response.Dispose();
+                retried = true;
+                await Task.Delay(RetryDelay, timeProvider, cancellationToken);
                 continue;
             }
 
             return response;
         }
+    }
+
+    /// <summary>Logs what went wrong and gives the caller a sentence they can act on.</summary>
+    private ProblemException Unavailable(string detail)
+    {
+        logger.LogError("{Detail}", detail);
+        return new ProblemException(503, "The package store is unavailable. Try again in a few minutes; if it keeps failing, tell the marketplace admins.");
     }
 
     private async Task<string> TokenAsync(bool forceRefresh, CancellationToken cancellationToken)
@@ -123,9 +168,15 @@ public sealed class ArtifactKeeperStore(
                 "api/v1/auth/login",
                 new { username = options.Value.Username, password = options.Value.Password },
                 cancellationToken);
+            if (response.StatusCode is HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout)
+            {
+                // Transient: SendAsync retries it once like any other request.
+                throw new HttpRequestException($"Artifact Keeper login answered HTTP {(int)response.StatusCode}.", null, response.StatusCode);
+            }
+
             if (!response.IsSuccessStatusCode)
             {
-                throw new InvalidOperationException($"Artifact Keeper login failed with HTTP {(int)response.StatusCode}.");
+                throw Unavailable($"Artifact Keeper login failed with HTTP {(int)response.StatusCode}.");
             }
 
             await using var body = await response.Content.ReadAsStreamAsync(cancellationToken);

@@ -59,8 +59,8 @@ public sealed class AuthOptions
     public TeamNamespaceOptions[] TeamNamespaces { get; set; } = [];
 
     /// <summary>
-    /// Trust <c>X-Dev-User</c>. Forced on in Development, forced off otherwise; this setting
-    /// exists so a test host can turn it on explicitly.
+    /// Trust <c>X-Dev-User</c>. Always on in Development. Outside Development it lets anyone claim any
+    /// account, so it is only for a server without a domain (the home lab); startup logs a warning.
     /// </summary>
     public bool AllowDevHeader { get; set; }
 }

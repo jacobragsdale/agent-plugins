@@ -58,10 +58,11 @@ export class AdminPage {
   private async markResolved(report: Report): Promise<void> {
     try {
       await this.api.resolveReport(report.id);
-      this.reports.reload();
-      this.summary.reload();
     } catch (error) {
       this.snackBar.open(ApiError.from(error).message, "Dismiss");
+    } finally {
+      this.reports.reload();
+      this.summary.reload();
     }
   }
 
@@ -70,12 +71,12 @@ export class AdminPage {
     try {
       await this.api.review(review.namespace, review.packageId, review.version, decision, note);
       this.snackBar.open(decision === "approve" ? `${review.name} ${review.version} is live.` : `${review.name} ${review.version} was sent back.`, undefined, { duration: 4000 });
-      this.reviews.reload();
-      await this.session.refreshReviews();
     } catch (error) {
       this.snackBar.open(ApiError.from(error).message, "Dismiss");
     } finally {
       this.busy.set(false);
+      this.reviews.reload();
+      await this.session.refreshReviews();
     }
   }
 }

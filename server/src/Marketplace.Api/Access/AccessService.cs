@@ -71,16 +71,25 @@ public sealed class AccessService(MarketplaceDbContext db, TimeProvider timeProv
     public async Task<AccessDocument> SetAsync(MarketplaceIdentity identity, string ns, string? packageId, string[]? users, string[]? groups, CancellationToken cancellationToken)
     {
         var target = Target(identity, ns, packageId);
+
+        // Accounts that derive the same name all own it until one publishes; only the claimant may set its list.
+        if (ns == identity.Namespace
+            && await db.Publishers.AsNoTracking().SingleOrDefaultAsync(publisher => publisher.Namespace == ns, cancellationToken) is var publisher
+            && (publisher is null || !IdentityResolver.IsClaimant(publisher.Account, identity.Account)))
+        {
+            throw new ProblemException(409, $"Publish to {ns} before you set who may see it.");
+        }
+
         if (packageId is not null && !await db.Packages.AnyAsync(package => package.Namespace == ns && package.PackageId == packageId, cancellationToken))
         {
-            throw new PublishRejectedException(404, $"{target} is not published.");
+            throw ProblemException.NotFound(target);
         }
 
         var cleanUsers = Clean(users, "users");
         var cleanGroups = Clean(groups, "groups");
         if (cleanUsers.Length + cleanGroups.Length > MaxEntries)
         {
-            throw new PublishRejectedException(422, $"An access list holds at most {MaxEntries} entries.");
+            throw new ProblemException(422, $"An access list holds at most {MaxEntries} entries.");
         }
 
         var rule = await db.AccessRules.FindAsync([target], cancellationToken);
@@ -116,17 +125,17 @@ public sealed class AccessService(MarketplaceDbContext db, TimeProvider timeProv
     {
         if (!IdentityResolver.SourceIdPattern().IsMatch(ns))
         {
-            throw new PublishRejectedException(422, $"{ns} is not a valid namespace.");
+            throw new ProblemException(422, $"{ns} is not a valid namespace.");
         }
 
         if (packageId is not null && !PublishService.PackageIdPattern().IsMatch(packageId))
         {
-            throw new PublishRejectedException(422, $"{packageId} is not a valid package id.");
+            throw new ProblemException(422, $"{packageId} is not a valid package id.");
         }
 
         if (!identity.Owns(ns))
         {
-            throw new PublishRejectedException(403, $"{identity.Account} does not own the namespace {ns}.");
+            throw ProblemException.NotOwner(identity.Account, ns);
         }
 
         return packageId is null ? ns : $"{ns}/{packageId}";
@@ -141,7 +150,7 @@ public sealed class AccessService(MarketplaceDbContext db, TimeProvider timeProv
             .ToArray();
         if (cleaned.Any(entry => entry.Length > MaxEntryLength))
         {
-            throw new PublishRejectedException(422, $"Each entry in {field} is at most {MaxEntryLength} characters.");
+            throw new ProblemException(422, $"Each entry in {field} is at most {MaxEntryLength} characters.");
         }
 
         return cleaned;

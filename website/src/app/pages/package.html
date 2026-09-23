@@ -6,7 +6,7 @@
     <app-package-header [item]="item" [entry]="entry()" [kinds]="kinds()" />
 
     @if (ownerStatus(); as status) {
-      <app-owner-panel [ns]="ns()" [pkg]="pkg()" [name]="item.name" [status]="status" [editable]="editable()" (changed)="listing.reload()" />
+      <app-owner-panel [ns]="ns()" [pkg]="pkg()" [name]="item.name" [status]="status" (changed)="listing.reload()" />
     }
 
     <div class="columns">
@@ -15,7 +15,7 @@
           <app-version-files [ns]="ns()" [pkg]="pkg()" [versions]="versions()" [owner]="owner()" [(shown)]="shown" />
         </mat-tab>
         <mat-tab label="Versions">
-          <app-version-list [versions]="versions()" [liveVersion]="item.liveVersion" [owner]="owner()" (withdraw)="withdraw($event)" />
+          <app-version-list [ns]="ns()" [pkg]="pkg()" [versions]="versions()" [liveVersion]="item.liveVersion" [owner]="owner()" (withdraw)="withdraw($event)" (restore)="restore($event)" />
         </mat-tab>
         @if (usage(); as stats) {
           <mat-tab label="Usage">
@@ -26,10 +26,10 @@
 
       <app-package-side [item]="item" [entry]="entry()" [version]="shownVersion()" [canReport]="canReport()" (report)="report()" />
     </div>
-  } @else if (detail.error()) {
+  } @else if (loadProblem(); as problem) {
     <div class="card">
-      <h1>Not found</h1>
-      <p class="muted">This skill doesn't exist, was withdrawn, or isn't shared with you.</p>
+      <h1>{{ problem.status === 404 ? "Not found" : "Couldn't load this skill" }}</h1>
+      <p class="muted">{{ problem.status === 404 ? "This skill doesn't exist, was withdrawn, or isn't shared with you." : problem.message }}</p>
       <a mat-stroked-button routerLink="/browse">Browse skills</a>
     </div>
   } @else {

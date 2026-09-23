@@ -39,6 +39,21 @@ fn account_name() -> String {
     }
 }
 
+/// A plain sentence for the SSPI status codes people actually hit when
+/// Windows cannot get a Kerberos ticket for the marketplace.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn sspi_sentence(status: i32) -> Option<&'static str> {
+    // SSPI statuses are HRESULTs; compare their bit patterns.
+    Some(match status as u32 {
+        0x8009_030C => "The domain refused this Windows account's sign-in. Sign out of Windows and back in, then try again.",
+        0x8009_030E => "Windows has no Kerberos sign-in for this account. Lock and unlock the PC, or connect to the corporate network or VPN, then try again.",
+        0x8009_0303 | 0x8009_0322 => "Windows does not recognize the marketplace server's name (HTTP service principal). Ask the marketplace administrator to check its registration.",
+        0x8009_0311 => "Could not reach a domain controller to sign in. Connect to the corporate network or VPN, then try again.",
+        0x8009_0324 => "This PC's clock is too far from the domain's. Turn on \"Set time automatically\" in Windows Settings, then try again.",
+        _ => return None,
+    })
+}
+
 #[cfg(not(windows))]
 fn join_state() -> JoinState {
     JoinState::NotApplicable
@@ -178,8 +193,9 @@ mod windows {
             )
         };
         if acquired != SEC_E_OK {
-            return Err(format!(
-                "AcquireCredentialsHandle(Negotiate) failed with 0x{acquired:08x}."
+            return Err(super::sspi_sentence(acquired).map_or_else(
+                || format!("AcquireCredentialsHandle(Negotiate) failed with 0x{acquired:08x}."),
+                |sentence| format!("{sentence} (Windows code 0x{acquired:08x})"),
             ));
         }
         let mut buffer = SecBuffer {
@@ -229,8 +245,9 @@ mod windows {
                 Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
             }
         } else {
-            Err(format!(
-                "InitializeSecurityContext for HTTP/{host} failed with 0x{status:08x}."
+            Err(super::sspi_sentence(status).map_or_else(
+                || format!("InitializeSecurityContext for HTTP/{host} failed with 0x{status:08x}."),
+                |sentence| format!("{sentence} (Windows code 0x{status:08x} for HTTP/{host})"),
             ))
         };
         // SAFETY: releases what the calls above allocated.
@@ -267,5 +284,17 @@ mod windows {
         unsafe {
             AttachConsole(ATTACH_PARENT_PROCESS);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn common_sspi_failures_read_as_sentences() {
+        let skew = super::sspi_sentence(0x8009_0324_u32 as i32).expect("time skew");
+        assert!(skew.contains("clock"));
+        assert!(super::sspi_sentence(0x8009_0311_u32 as i32)
+            .is_some_and(|sentence| sentence.contains("VPN")));
+        assert_eq!(super::sspi_sentence(0x1234), None);
     }
 }

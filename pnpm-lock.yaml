@@ -72,6 +72,9 @@ importers:
       vite:
         specifier: ^7.0.4
         version: 7.3.6(@types/node@22.20.1)(lightningcss@1.33.0)(sass@1.101.0)
+      vitest:
+        specifier: ^4.0.8
+        version: 4.1.11(@types/node@22.20.1)(jsdom@28.1.0)(vite@7.3.6(@types/node@22.20.1)(lightningcss@1.33.0)(sass@1.101.0))
 
   website:
     dependencies:
@@ -7960,7 +7963,7 @@ snapshots:
 
   magic-string@0.30.21:
     dependencies:
-      '@jridgewell/sourcemap-codec': 1.5.5
+      '@jridgewell/sourcemap-codec': 1.6.0
 
   magic-string@1.0.0:
     dependencies:

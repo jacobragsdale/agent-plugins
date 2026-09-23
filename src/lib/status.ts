@@ -1,8 +1,11 @@
 import { confirm } from "@tauri-apps/plugin-dialog";
-import type { AgentProfile, AppState, BulkAction, BulkPlan, CatalogItem, ItemStatus, SourceRemovalPlan, SourceState } from "../ipc/schemas";
+import type { AppError } from "../ipc/client";
+import type { AgentProfile, AppState, BulkAction, BulkPlan, CatalogItem, ItemStatus, OperationOutcome, SourceRemovalPlan, SourceState } from "../ipc/schemas";
+import type { InfoNotice } from "../components/Notice";
 
 export type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
 
+// The status values come from the backend and stay as they are; these labels are the plain words the window shows.
 export function statusLabel(status: ItemStatus): string {
   switch (status) {
     case "available":
@@ -10,17 +13,19 @@ export function statusLabel(status: ItemStatus): string {
     case "installed":
       return "Installed";
     case "updateAvailable":
-      return "Update Available";
+      return "Update available";
     case "removed":
-      return "Removed Upstream";
+      return "No longer offered";
     case "modified":
-      return "Local Changes";
+      return "Changed on this computer";
     case "conflict":
-      return "Unmanaged Conflict";
+      return "Files already there";
     case "sourceConflict":
-      return "Source Conflict";
+      return "From another source";
     case "partiallyInstalled":
-      return "Partially Installed";
+      return "Partly installed";
+    case "missing":
+      return "Restoring on next check";
   }
 }
 
@@ -31,6 +36,7 @@ export function statusColor(status: ItemStatus): AccentColor {
     case "updateAvailable":
       return "blue";
     case "available":
+    case "missing":
       return "gray";
     case "removed":
     case "conflict":
@@ -52,13 +58,14 @@ export function primaryActionLabel(status: ItemStatus): string {
       return "Update";
     case "installed":
     case "removed":
+    case "missing":
       return "Uninstall";
     case "conflict":
       return "Replace…";
     case "modified":
-      return "Protected";
+      return "Restore original…";
     case "sourceConflict":
-      return "Owned Elsewhere";
+      return "From another source";
   }
 }
 
@@ -70,10 +77,11 @@ export function primaryActionColor(status: ItemStatus): AccentColor {
       return "green";
     case "installed":
     case "removed":
+    case "missing":
       return "red";
     case "conflict":
-      return "amber";
     case "modified":
+      return "amber";
     case "sourceConflict":
       return "gray";
   }
@@ -84,7 +92,7 @@ export function componentLabel(kind: string): string {
     case "skill":
       return "Skill";
     case "mcpServer":
-      return "MCP";
+      return "Connector";
     default:
       return kind;
   }
@@ -94,21 +102,62 @@ export function itemCommandArgs(item: CatalogItem, componentId: string | undefin
   return componentId === undefined ? { sourceId: item.sourceId, localId: item.localId, ...extra } : { sourceId: item.sourceId, localId: item.localId, componentId, ...extra };
 }
 
+/** A changed package ("modified") is restored by replacing it: the changed copy is backed up first. */
 export function commandForStatus(status: ItemStatus): "install_item" | "replace_item" | "uninstall_item" | null {
-  if (status === "modified" || status === "sourceConflict") {
+  if (status === "sourceConflict") {
     return null;
   }
-  if (status === "conflict") {
+  if (status === "conflict" || status === "modified") {
     return "replace_item";
   }
-  if (status === "installed" || status === "removed") {
+  if (status === "installed" || status === "removed" || status === "missing") {
     return "uninstall_item";
   }
   return "install_item";
 }
 
+const COMMAND_VERBS = { install_item: "install", replace_item: "replace", uninstall_item: "uninstall" } as const;
+
+/** What clicking a package (or one of its parts) does: the command, the confirmation first, and the words around it. */
+export type ItemCommand = Readonly<{ command: "install_item" | "replace_item" | "uninstall_item"; verb: string; review: (() => Promise<boolean>) | null; backupLead: string; trustApproved: boolean }>;
+
+export function itemCommand(item: CatalogItem, componentId: string | undefined): ItemCommand | null {
+  const component = componentId === undefined ? item : item.components.find((entry) => entry.id === componentId);
+  const command = component === undefined ? null : commandForStatus(component.status);
+  if (component === undefined || command === null) {
+    return null;
+  }
+  // Restoring a changed package is a replace: the changed copy is backed up first.
+  const restoring = component.status === "modified";
+  let review: ItemCommand["review"] = null;
+  if (command === "replace_item") {
+    review = restoring ? async () => reviewRestore(item.name) : reviewReplace;
+  }
+  return {
+    command,
+    verb: restoring ? "restore" : COMMAND_VERBS[command],
+    review,
+    backupLead: restoring ? "Your changed copy was backed up to" : "The files that were there before were backed up to",
+    trustApproved: command !== "uninstall_item" && component.requiresApproval
+  };
+}
+
+export async function reviewRestore(name: string): Promise<boolean> {
+  return confirm(`Put back the original ${name}? Your changed copy is kept as a backup, and Agent Plugins shows you where after it restores the original.`, {
+    title: "Restore original",
+    kind: "warning",
+    okLabel: "Back up and restore",
+    cancelLabel: "Cancel"
+  });
+}
+
 export async function reviewReplace(): Promise<boolean> {
-  return confirm("Existing unmanaged files will be backed up, then replaced.", { title: "Replace", kind: "warning", okLabel: "Back Up and Replace", cancelLabel: "Cancel" });
+  return confirm("Files that Agent Plugins did not install are already in the way. They will be backed up, then replaced.", {
+    title: "Replace",
+    kind: "warning",
+    okLabel: "Back up and replace",
+    cancelLabel: "Cancel"
+  });
 }
 
 export function bulkLabels(action: BulkAction): Readonly<{ action: string; title: string; button: string; warning: string }> {
@@ -116,24 +165,29 @@ export function bulkLabels(action: BulkAction): Readonly<{ action: string; title
     case "install":
       return { action: "Install or update", title: "Install all", button: "Install", warning: "" };
     case "replace":
-      return { action: "Replace", title: "Replace all", button: "Replace", warning: " Existing destinations will be backed up before replacement." };
+      return { action: "Replace", title: "Replace all", button: "Replace", warning: " The files already there will be backed up first." };
     case "uninstall":
       return { action: "Uninstall", title: "Uninstall all", button: "Uninstall", warning: "" };
   }
 }
 
-// A package that runs an MCP server starts a command on this machine whenever
-// an agent loads it, so the app asks before it installs one.
+// A package with a connector (an MCP server) starts a program on this machine
+// whenever an AI app loads it, so the app asks before it installs one.
 export async function reviewApproval(name: string, riskDetails: readonly string[]): Promise<boolean> {
   const detail = riskDetails.length === 0 ? "" : `\n\n${riskDetails.join("\n")}`;
-  return confirm(`${name} installs an MCP server. Every detected agent will run it.${detail}`, { title: "Approve MCP server", kind: "warning", okLabel: "Approve and Install", cancelLabel: "Cancel" });
+  return confirm(`${name} includes a connector that runs a program on this computer. Every AI app found here will run it.${detail}`, {
+    title: "Allow connector",
+    kind: "warning",
+    okLabel: "Allow and install",
+    cancelLabel: "Cancel"
+  });
 }
 
 export async function reviewBulkApproval(names: readonly string[]): Promise<boolean> {
-  return confirm(`${names.join(", ")} install MCP servers. Every detected agent will run them.`, {
-    title: "Approve MCP servers",
+  return confirm(`${names.join(", ")} include connectors that run programs on this computer. Every AI app found here will run them.`, {
+    title: "Allow connectors",
     kind: "warning",
-    okLabel: "Approve and Install",
+    okLabel: "Allow and install",
     cancelLabel: "Cancel"
   });
 }
@@ -148,7 +202,7 @@ export async function reviewSourceRemoval(source: SourceState, plan: SourceRemov
   return confirm(`Remove ${source.name} and uninstall ${String(count)} package${count === 1 ? "" : "s"} it installed?${warning}`, {
     title: "Remove source",
     kind: "warning",
-    okLabel: modified.length === 0 ? "Remove" : "Remove and Discard Changes",
+    okLabel: modified.length === 0 ? "Remove" : "Remove and discard changes",
     cancelLabel: "Cancel"
   });
 }
@@ -160,7 +214,7 @@ export async function reviewReset(): Promise<boolean> {
 export async function reviewBulk(source: SourceState, action: BulkAction, plan: BulkPlan): Promise<boolean> {
   const eligible = plan.entries.filter((entry) => entry.willRun);
   const labels = bulkLabels(action);
-  return confirm(`${labels.action} ${String(eligible.length)} item${eligible.length === 1 ? "" : "s"} from ${source.name}?${labels.warning}`, {
+  return confirm(`${labels.action} ${String(eligible.length)} package${eligible.length === 1 ? "" : "s"} from ${source.name}?${labels.warning}`, {
     title: labels.title,
     kind: action === "install" ? "info" : "warning",
     okLabel: labels.button,
@@ -175,21 +229,63 @@ export function supportsBulkAction(status: ItemStatus, action: BulkAction): bool
     case "replace":
       return status === "conflict";
     case "uninstall":
-      return status === "installed" || status === "updateAvailable" || status === "partiallyInstalled";
+      return status === "installed" || status === "updateAvailable" || status === "partiallyInstalled" || status === "missing";
   }
 }
 
+/** An enabled agent that was not detected but left a message: detection itself was inconclusive, so it is not "not installed". */
+export function detectionUnsure(profile: AgentProfile): boolean {
+  return !profile.detected && profile.enabled && profile.detectionMessage !== null;
+}
+
+/** Whether an AI app is (or may be) here; an inconclusive check does not count as "none found". */
 export function hasDetectedAgent(profiles: readonly AgentProfile[]): boolean {
-  return profiles.some((profile) => profile.detected);
+  return profiles.some((profile) => profile.detected || detectionUnsure(profile));
 }
 
-export function reportMessage(state: AppState): string | null {
+/** A package's display name, or its id when the window no longer lists it. */
+export function packageName(items: readonly CatalogItem[], id: string): string {
+  return items.find((item) => item.id === id)?.name ?? id;
+}
+
+/** The background-update report as one notice: what updated, and what could not, by name. */
+export type ReportNotice = Readonly<{ text: string; failed: boolean; detail: string | null }>;
+
+export function reportNotice(state: AppState): ReportNotice | null {
+  const { updatedItems, failedItems, repairedItems, extendedItems } = state.autoUpdateReport;
   const parts: string[] = [];
-  if (state.autoUpdateReport.updatedItems.length > 0) {
-    parts.push(`Updated ${state.autoUpdateReport.updatedItems.map((item) => item.id).join(", ")}.`);
+  if (updatedItems.length > 0) {
+    parts.push(`Updated ${updatedItems.map((item) => packageName(state.items, item.id)).join(", ")}.`);
   }
-  if (state.autoUpdateReport.failedItems.length > 0) {
-    parts.push(`Background updates failed: ${state.autoUpdateReport.failedItems.map((item) => `${item.id}: ${item.message}`).join("; ")}.`);
+  if (repairedItems.length > 0) {
+    parts.push(`Restored: ${repairedItems.join(", ")}.`);
   }
-  return parts.length === 0 ? null : parts.join(" ");
+  if (extendedItems.length > 0) {
+    parts.push(`Added to newly found apps: ${extendedItems.join(", ")}.`);
+  }
+  if (failedItems.length > 0) {
+    parts.push(`Couldn't update ${failedItems.map((item) => packageName(state.items, item.id)).join(", ")}. Agent Plugins will try again later.`);
+  }
+  if (parts.length === 0) {
+    return null;
+  }
+  const detail = failedItems.length === 0 ? null : failedItems.map((item) => `${item.id}: ${item.message}`).join("\n");
+  return { text: parts.join(" "), failed: failedItems.length > 0, detail };
+}
+
+/** A batch that partly failed, summarized by package name with each raw reason behind "Details". */
+export function failuresError(verb: string, failures: readonly Readonly<{ id: string; message: string }>[], items: readonly CatalogItem[], sourceName?: string): AppError {
+  const names = failures.map((failure) => packageName(items, failure.id));
+  const count = `${String(failures.length)} package${failures.length === 1 ? "" : "s"}`;
+  const from = sourceName === undefined ? "" : ` from ${sourceName}`;
+  return { kind: null, summary: `Couldn't ${verb} ${count}${from}: ${names.join(", ")}.`, detail: failures.map((failure) => `${failure.id}: ${failure.message}`).join("\n") };
+}
+
+/** What a finished action leaves to read: AI apps it skipped (amber), then where backups went. */
+export function outcomeNotice(backupLead: string, outcome: OperationOutcome): InfoNotice | null {
+  const parts = [...outcome.warnings];
+  if (outcome.backupPaths.length > 0) {
+    parts.push(`${backupLead} ${outcome.backupPaths.join(", ")}.`);
+  }
+  return parts.length === 0 ? null : { text: parts.join(" "), folder: outcome.backupPaths[0] ?? null, caution: outcome.warnings.length > 0 };
 }

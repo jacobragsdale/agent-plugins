@@ -33,6 +33,8 @@ The full namespace archive stays the one stored artifact. A caller who may see a
 
 `Auth:TeamNamespaces` lists `{ namespace, group, displayName }`. Members of the group own the namespace for publish, yank, and access management, and the index reports lane `team`. Who may read a team namespace is an ordinary access rule, because publisher and reader groups usually differ. The `team-` prefix is a convention, not enforced.
 
+**Amended 2026-09-22:** a person whose name derives to `official` or a configured team namespace now gets `u-<name>` as their personal namespace, so a team namespace without the prefix no longer collides with a person ([ADR 0004](0004-internal-marketplace.md)).
+
 ## Consequences
 
 The catalog and archive are per caller, so `Cache-Control` is `private`. The catalog, index, and archive each cost one extra query for live packages plus one small rules table read; at the expected few hundred users this is negligible. An `X-Dev-Groups` header, sent by the client from `AGENT_PLUGINS_DEV_GROUPS`, lets the home lab exercise team rules without a domain; the production server ignores it. Kerberos and LDAP group resolution can only be verified against the corporate domain; an empty `groups:` line in `agent-plugins whoami` is the signal that LDAP claims are not arriving.

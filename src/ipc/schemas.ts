@@ -1,11 +1,32 @@
 import { z } from "zod";
 
-export const itemStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "conflict", "sourceConflict", "partiallyInstalled"]);
-export const sourceStatusSchema = z.enum(["fresh", "cached", "error"]);
-export const catalogErrorSchema = z.strictObject({ path: z.string().min(1), message: z.string().min(1) }).readonly();
+/**
+ * One malformed element must not hide the whole window, so these arrays keep
+ * every element that parses and log the rest. Everything else at the IPC
+ * boundary uses `z.object`, which ignores fields a newer backend adds.
+ */
+function tolerantArray<T extends z.ZodType>(element: T, label: string): z.ZodType<readonly z.output<T>[]> {
+  return z.array(z.unknown()).transform((values) =>
+    values.flatMap((value) => {
+      const parsed = element.safeParse(value);
+      if (parsed.success) {
+        return [parsed.data];
+      }
+      console.warn(`Agent Plugins skipped a ${label} it could not read.`, z.prettifyError(parsed.error), value);
+      return [];
+    })
+  );
+}
+
+export const itemStatusSchema = z.enum(["available", "installed", "updateAvailable", "removed", "modified", "conflict", "sourceConflict", "partiallyInstalled", "missing"]);
+export const sourceStatusSchema = z.enum(["fresh", "cached", "stale", "error"]);
+export const connectivitySchema = z.enum(["online", "offline", "degraded"]);
+/** When a fetch last succeeded; null when it never has. */
+const lastSuccessSchema = z.number().int().nonnegative().nullable().default(null);
+export const catalogErrorSchema = z.object({ path: z.string().min(1), message: z.string().min(1) }).readonly();
 export const targetIdSchema = z.enum(["cursor", "claude-code", "codex", "opencode", "grok-build", "github-copilot", "claude-desktop", "chatgpt", "m365-copilot"]);
 export const agentProfileSchema = z
-  .strictObject({
+  .object({
     targetId: targetIdSchema,
     displayName: z.string().min(1),
     enabled: z.boolean(),
@@ -21,7 +42,7 @@ export const agentProfileSchema = z
   })
   .readonly();
 export const componentSchema = z
-  .strictObject({
+  .object({
     id: z.string().min(1),
     kind: z.string().min(1),
     description: z.string().min(1),
@@ -31,15 +52,15 @@ export const componentSchema = z
   })
   .readonly();
 export const capabilitySchema = z.discriminatedUnion("level", [
-  z.strictObject({ level: z.literal("native") }).readonly(),
-  z.strictObject({ level: z.literal("losslessTranslation") }).readonly(),
-  z.strictObject({ level: z.literal("lossyTranslation"), losses: z.array(z.string().min(1)).readonly() }).readonly(),
-  z.strictObject({ level: z.literal("unsupported"), reason: z.string().min(1) }).readonly(),
-  z.strictObject({ level: z.literal("blocked"), reason: z.string().min(1), requiredAction: z.string().min(1) }).readonly()
+  z.object({ level: z.literal("native") }).readonly(),
+  z.object({ level: z.literal("losslessTranslation") }).readonly(),
+  z.object({ level: z.literal("lossyTranslation"), losses: z.array(z.string().min(1)).readonly() }).readonly(),
+  z.object({ level: z.literal("unsupported"), reason: z.string().min(1) }).readonly(),
+  z.object({ level: z.literal("blocked"), reason: z.string().min(1), requiredAction: z.string().min(1) }).readonly()
 ]);
-export const compatibilitySchema = z.strictObject({ componentId: z.string().min(1), targetId: z.string().min(1), capability: capabilitySchema }).readonly();
+export const compatibilitySchema = z.object({ componentId: z.string().min(1), targetId: z.string().min(1), capability: capabilitySchema }).readonly();
 export const marketplaceMetaSchema = z
-  .strictObject({
+  .object({
     publisher: z.string().min(1),
     publisherAccount: z.string().min(1),
     version: z.string().min(1),
@@ -52,7 +73,7 @@ export const marketplaceMetaSchema = z
   })
   .readonly();
 export const itemSchema = z
-  .strictObject({
+  .object({
     id: z.string().min(3),
     localId: z.string().min(1),
     sourceId: z.string().min(2),
@@ -86,7 +107,7 @@ export const itemSchema = z
   }))
   .readonly();
 export const sourceSchema = z
-  .strictObject({
+  .object({
     sourceId: z.string().min(2),
     sourceKey: z.string().min(1),
     name: z.string().min(1),
@@ -98,14 +119,15 @@ export const sourceSchema = z
     message: z.string().min(1).nullable(),
     commit: z.string().min(1).nullable(),
     checkedAtEpochSeconds: z.number().int().nonnegative(),
+    lastSuccessAtEpochSeconds: lastSuccessSchema,
     catalogErrors: z.array(catalogErrorSchema).readonly()
   })
   .readonly();
 export const listedSourceSchema = z
-  .strictObject({ name: z.string().min(1), description: z.string().min(1), url: z.string().min(1), sourceId: z.string().min(2).nullable(), alreadyAdded: z.boolean() })
+  .object({ name: z.string().min(1), description: z.string().min(1), url: z.string().min(1), sourceId: z.string().min(2).nullable(), alreadyAdded: z.boolean() })
   .readonly();
 export const repositorySchema = z
-  .strictObject({
+  .object({
     repositoryId: z.string().min(2),
     repositoryKey: z.string().min(1),
     name: z.string().min(1),
@@ -116,23 +138,33 @@ export const repositorySchema = z
     message: z.string().min(1).nullable(),
     revision: z.string().min(1).nullable(),
     checkedAtEpochSeconds: z.number().int().nonnegative(),
+    lastSuccessAtEpochSeconds: lastSuccessSchema,
     sources: z.array(listedSourceSchema).readonly()
   })
   .readonly();
-export const itemReferenceSchema = z.strictObject({ id: z.string().min(1), sourceId: z.string().min(2), localId: z.string().min(1) }).readonly();
-export const itemFailureSchema = z.strictObject({ id: z.string().min(1), message: z.string().min(1) }).readonly();
-export const autoUpdateReportSchema = z.strictObject({ updatedItems: z.array(itemReferenceSchema).readonly(), failedItems: z.array(itemFailureSchema).readonly() }).readonly();
-export const identitySchema = z.strictObject({ account: z.string().min(1), namespace: z.string().min(1), displayName: z.string().min(1), admin: z.boolean(), authMode: z.string().min(1) }).readonly();
+export const itemReferenceSchema = z.object({ id: z.string().min(1), sourceId: z.string().min(2), localId: z.string().min(1) }).readonly();
+export const itemFailureSchema = z.object({ id: z.string().min(1), message: z.string().min(1) }).readonly();
+export const autoUpdateReportSchema = z
+  .object({
+    updatedItems: z.array(itemReferenceSchema).readonly(),
+    failedItems: z.array(itemFailureSchema).readonly(),
+    /** Display names of installed packages whose missing files the sync put back. */
+    repairedItems: z.array(z.string().min(1)).readonly().default([]),
+    /** Display names of installed packages the sync added to newly found AI apps. */
+    extendedItems: z.array(z.string().min(1)).readonly().default([])
+  })
+  .readonly();
+export const identitySchema = z.object({ account: z.string().min(1), namespace: z.string().min(1), displayName: z.string().min(1), admin: z.boolean(), authMode: z.string().min(1) }).readonly();
 export const checkStatusSchema = z.enum(["ok", "warn", "fail", "skipped"]);
 export const remediationSchema = z
   .discriminatedUnion("kind", [
-    z.strictObject({ kind: z.literal("autoFixed") }),
-    z.strictObject({ kind: z.literal("action"), action: z.string().min(1) }),
-    z.strictObject({ kind: z.literal("manual"), text: z.string().min(1) })
+    z.object({ kind: z.literal("autoFixed") }),
+    z.object({ kind: z.literal("action"), action: z.string().min(1) }),
+    z.object({ kind: z.literal("manual"), text: z.string().min(1) })
   ])
   .nullable();
 export const preflightCheckSchema = z
-  .strictObject({
+  .object({
     id: z.string().min(1),
     group: z.string().min(1),
     title: z.string().min(1),
@@ -144,7 +176,7 @@ export const preflightCheckSchema = z
   })
   .readonly();
 export const preflightReportSchema = z
-  .strictObject({
+  .object({
     startedAtEpochSeconds: z.number().int().nonnegative(),
     durationMillis: z.number().int().nonnegative(),
     blocked: z.boolean(),
@@ -153,13 +185,16 @@ export const preflightReportSchema = z
   })
   .readonly();
 export const appStateSchema = z
-  .strictObject({
+  .object({
+    /** The last sync that reached the servers; 0 when none has yet. */
     checkedAtEpochSeconds: z.number().int().nonnegative(),
+    connectivity: connectivitySchema.default("online"),
+    syncInProgress: z.boolean().default(false),
     autoUpdateReport: autoUpdateReportSchema,
     catalogMessage: z.string().min(1).nullable().default(null),
     repositories: z.array(repositorySchema).readonly().default([]),
-    sources: z.array(sourceSchema).readonly(),
-    items: z.array(itemSchema).readonly(),
+    sources: tolerantArray(sourceSchema, "source"),
+    items: tolerantArray(itemSchema, "package"),
     agentProfiles: z.array(agentProfileSchema).readonly(),
     marketplaceUrl: z.string().min(1).nullable().default(null),
     downloadUrl: z.string().min(1).nullable().default(null),
@@ -168,7 +203,7 @@ export const appStateSchema = z
   })
   .readonly();
 export const preparedSourceSchema = z
-  .strictObject({
+  .object({
     token: z.string().min(1),
     sourceId: z.string().min(2),
     sourceKey: z.string().min(1),
@@ -179,20 +214,32 @@ export const preparedSourceSchema = z
     itemCount: z.number().int().nonnegative()
   })
   .readonly();
-export const operationOutcomeSchema = z.strictObject({ backupPaths: z.array(z.string().min(1)).readonly() }).readonly();
+/** `warnings` names AI apps a package skipped, such as one whose settings file could not be read. */
+export const operationOutcomeSchema = z.object({ backupPaths: z.array(z.string().min(1)).readonly(), warnings: z.array(z.string().min(1)).readonly().default([]) }).readonly();
 export const bulkActionSchema = z.enum(["install", "replace", "uninstall"]);
-export const bulkPlanEntrySchema = z.strictObject({ id: z.string().min(1), localId: z.string().min(1), status: itemStatusSchema, willRun: z.boolean() }).readonly();
-export const bulkPlanSchema = z.strictObject({ sourceId: z.string().min(2), action: bulkActionSchema, entries: z.array(bulkPlanEntrySchema).readonly() }).readonly();
-export const bulkFailureSchema = z.strictObject({ id: z.string().min(1), message: z.string().min(1) }).readonly();
+export const bulkPlanEntrySchema = z.object({ id: z.string().min(1), localId: z.string().min(1), status: itemStatusSchema, willRun: z.boolean() }).readonly();
+export const bulkPlanSchema = z.object({ sourceId: z.string().min(2), action: bulkActionSchema, entries: z.array(bulkPlanEntrySchema).readonly() }).readonly();
+export const bulkFailureSchema = z.object({ id: z.string().min(1), message: z.string().min(1) }).readonly();
 export const bulkResultSchema = z
-  .strictObject({ completed: z.array(z.string().min(1)).readonly(), failures: z.array(bulkFailureSchema).readonly(), backupPaths: z.array(z.string().min(1)).readonly() })
+  .object({ completed: z.array(z.string().min(1)).readonly(), failures: z.array(bulkFailureSchema).readonly(), backupPaths: z.array(z.string().min(1)).readonly() })
   .readonly();
-export const removalPathSchema = z.strictObject({ path: z.string().min(1), modified: z.boolean() }).readonly();
-export const removalItemSchema = z.strictObject({ id: z.string().min(1), paths: z.array(removalPathSchema).readonly() }).readonly();
-export const sourceRemovalPlanSchema = z.strictObject({ sourceId: z.string().min(2), items: z.array(removalItemSchema).readonly() }).readonly();
-export const scheduledSyncSchema = z.discriminatedUnion("kind", [
-  z.strictObject({ kind: z.literal("updated"), state: appStateSchema }).readonly(),
-  z.strictObject({ kind: z.literal("failed"), message: z.string().min(1) }).readonly()
+export const removalPathSchema = z.object({ path: z.string().min(1), modified: z.boolean() }).readonly();
+export const removalItemSchema = z.object({ id: z.string().min(1), paths: z.array(removalPathSchema).readonly() }).readonly();
+export const sourceRemovalPlanSchema = z.object({ sourceId: z.string().min(2), items: z.array(removalItemSchema).readonly() }).readonly();
+/**
+ * A command rejects with either a plain string (older backends) or a typed
+ * error the backend classifies. The kind says what the app can do about it on its own.
+ */
+export const ipcErrorKindSchema = z.enum(["offline", "locked", "retryable", "needsUser", "bug"]);
+export const ipcErrorSchema = z.object({ kind: ipcErrorKindSchema, message: z.string().min(1), detail: z.string().min(1).optional() }).readonly();
+const syncFailureSchema = z.union([z.string().min(1), ipcErrorSchema]);
+// A failed pass carries its reason as `message` (a string, from older backends) or as a typed `error`.
+export const scheduledSyncSchema = z.union([
+  z.object({ kind: z.literal("updated"), state: appStateSchema }).readonly(),
+  z
+    .object({ kind: z.literal("failed"), error: ipcErrorSchema })
+    .or(z.object({ kind: z.literal("failed"), message: syncFailureSchema }).transform(({ kind, message }) => ({ kind, error: message })))
+    .readonly()
 ]);
 export const cachedStateSchema = appStateSchema.nullable();
 export const unitSchema = z.null();
@@ -201,6 +248,10 @@ export type AppState = z.infer<typeof appStateSchema>;
 export type CatalogItem = z.infer<typeof itemSchema>;
 export type CatalogComponent = CatalogItem["components"][number];
 export type ItemStatus = z.infer<typeof itemStatusSchema>;
+export type IpcErrorKind = z.infer<typeof ipcErrorKindSchema>;
+export type SourceStatus = z.infer<typeof sourceStatusSchema>;
+export type Connectivity = z.infer<typeof connectivitySchema>;
+export type OperationOutcome = z.infer<typeof operationOutcomeSchema>;
 export type SourceState = z.infer<typeof sourceSchema>;
 export type RepositoryState = z.infer<typeof repositorySchema>;
 export type ListedSource = z.infer<typeof listedSourceSchema>;
