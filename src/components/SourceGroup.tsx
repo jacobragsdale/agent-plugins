@@ -4,6 +4,7 @@ import { toAppError } from "../ipc/client";
 import type { AppError } from "../ipc/client";
 import type { BulkAction, CatalogItem, SourceState, SourceStatus } from "../ipc/schemas";
 import { savedCopyLabel } from "../lib/connectivity";
+import { cardDomId } from "../lib/marketplace";
 import { supportsBulkAction } from "../lib/status";
 import { ItemCard } from "./ItemCard";
 
@@ -42,6 +43,7 @@ export function SourceGroup({
   onItemChange,
   onManualChange,
   onBulk,
+  onShare,
   onError
 }: Readonly<{
   source: SourceState;
@@ -54,6 +56,8 @@ export function SourceGroup({
   onItemChange: (item: CatalogItem, componentId?: string) => Promise<void>;
   onManualChange: (item: CatalogItem, manual: boolean, componentId?: string) => Promise<void>;
   onBulk: (source: SourceState, action: BulkAction) => Promise<void>;
+  /** Set when this person owns the space, so they may change who sees it and its packages. */
+  onShare?: ((target: string, label: string) => void) | undefined;
   onError: (error: AppError) => void;
 }>): JSX.Element {
   // Bulk actions cover the whole source, so they stay out of sight while a
@@ -62,7 +66,7 @@ export function SourceGroup({
   const canReplace = !filtering && items.some((item) => supportsBulkAction(item.status, "replace"));
   const canUninstall = !filtering && items.some((item) => supportsBulkAction(item.status, "uninstall"));
   return (
-    <section className="source-group">
+    <section className="source-group" id={cardDomId(source.sourceId)}>
       <div className="source-heading">
         <div>
           <div className="source-title-row">
@@ -77,6 +81,18 @@ export function SourceGroup({
           </Text>
         </div>
         <div className="source-group-actions">
+          {onShare === undefined ? null : (
+            <Button
+              size="1"
+              variant="soft"
+              color="gray"
+              onClick={() => {
+                onShare(source.sourceId, source.name);
+              }}
+            >
+              Share…
+            </Button>
+          )}
           {canInstall ? (
             <Button
               size="1"
@@ -129,7 +145,23 @@ export function SourceGroup({
       </div>
       <div className="skills-list">
         {items.map((item) => (
-          <ItemCard key={item.id} item={item} busy={busyIds.has(item.id)} allBusy={allBusy} onChange={onItemChange} onManualChange={onManualChange} onError={onError} />
+          <ItemCard
+            key={item.id}
+            item={item}
+            busy={busyIds.has(item.id)}
+            allBusy={allBusy}
+            onChange={onItemChange}
+            onManualChange={onManualChange}
+            anchor
+            onShare={
+              onShare === undefined || item.marketplace === null
+                ? undefined
+                : (shared) => {
+                    onShare(shared.id, shared.name);
+                  }
+            }
+            onError={onError}
+          />
         ))}
         {items.length === 0 ? <Text color="gray">This source has no packages right now.</Text> : null}
       </div>

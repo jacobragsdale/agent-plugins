@@ -6,7 +6,8 @@
     "updatedItems": [{ "id": "official/publish", "sourceId": "official", "localId": "publish" }],
     "failedItems": [{ "id": "team-data/sql-helper", "message": "Could not replace C:\\Users\\sam\\.claude\\skills\\sql-helper: another app is using it. Close that app, then try again." }],
     "repairedItems": ["Meeting notes"],
-    "extendedItems": ["Publish"]
+    "extendedItems": ["Publish"],
+    "removedItems": []
   },
   "catalogMessage": null,
   "repositories": [
@@ -99,7 +100,8 @@
         "publishedAt": "2026-09-01T12:00:00Z",
         "installs": 120,
         "installedBase": 87,
-        "restricted": false
+        "restricted": false,
+        "sharedWithYou": false
       }
     },
     {
@@ -274,6 +276,21 @@
       "marketplace": null
     }
   ],
+  "bundles": [
+    {
+      "id": "team-data/starter",
+      "namespace": "team-data",
+      "bundleId": "starter",
+      "name": "Data starter kit",
+      "description": "Everything a new analyst needs.",
+      "publisher": "Data team",
+      "lane": "team",
+      "members": ["team-data/sql-helper", "team-data/chart-style"],
+      "updatedAt": "2026-09-20T12:00:00Z",
+      "restricted": false,
+      "sharedWithYou": false
+    }
+  ],
   "agentProfiles": [
     {
       "targetId": "claude-desktop",
@@ -307,7 +324,16 @@
   "tutorial": "cursor",
   "marketplaceUrl": "https://marketplace.ragsdale.dev",
   "downloadUrl": null,
-  "identity": { "account": "CORP\\sam", "namespace": "sam", "displayName": "Sam Lee", "admin": false, "authMode": "Windows sign-in (Kerberos)" },
+  "identity": {
+    "account": "CORP\\sam",
+    "namespace": "sam",
+    "displayName": "Sam Lee",
+    "admin": false,
+    "authMode": "Windows sign-in (Kerberos)",
+    "namespaces": ["sam", "team-data"],
+    "teams": [{ "namespace": "team-data", "displayName": "Data team", "owner": true }],
+    "suggestionsWaiting": 0
+  },
   "preflight": {
     "startedAtEpochSeconds": 1789999000,
     "durationMillis": 1840,

@@ -69,7 +69,9 @@ export const marketplaceMetaSchema = z
     publishedAt: z.string().min(1),
     installs: z.number().int().nonnegative(),
     installedBase: z.number().int().nonnegative(),
-    restricted: z.boolean()
+    restricted: z.boolean(),
+    /** Visible only because someone shared it with this person. */
+    sharedWithYou: z.boolean().default(false)
   })
   .readonly();
 export const itemSchema = z
@@ -151,10 +153,42 @@ export const autoUpdateReportSchema = z
     /** Display names of installed packages whose missing files the sync put back. */
     repairedItems: z.array(z.string().min(1)).readonly().default([]),
     /** Display names of installed packages the sync added to newly found AI apps. */
-    extendedItems: z.array(z.string().min(1)).readonly().default([])
+    extendedItems: z.array(z.string().min(1)).readonly().default([]),
+    /** Display names of packages the sync uninstalled because their publisher or an admin pulled them. */
+    removedItems: z.array(z.string().min(1)).readonly().default([])
   })
   .readonly();
-export const identitySchema = z.object({ account: z.string().min(1), namespace: z.string().min(1), displayName: z.string().min(1), admin: z.boolean(), authMode: z.string().min(1) }).readonly();
+export const teamRefSchema = z.object({ namespace: z.string().min(1), displayName: z.string().min(1), owner: z.boolean() }).readonly();
+export const identitySchema = z
+  .object({
+    account: z.string().min(1),
+    namespace: z.string().min(1),
+    displayName: z.string().min(1),
+    admin: z.boolean(),
+    authMode: z.string().min(1),
+    /** Every space this person may publish to: their own, teams, and `official` when allowed. */
+    namespaces: z.array(z.string().min(1)).readonly().default([]),
+    teams: z.array(teamRefSchema).readonly().default([]),
+    /** Suggested changes to their packages that wait for them in the portal. */
+    suggestionsWaiting: z.number().int().nonnegative().default(0)
+  })
+  .readonly();
+/** A group of existing packages people install together; `members` are canonical ids. */
+export const bundleStateSchema = z
+  .object({
+    id: z.string().min(3),
+    namespace: z.string().min(2),
+    bundleId: z.string().min(1),
+    name: z.string().min(1),
+    description: z.string(),
+    publisher: z.string().min(1),
+    lane: z.string().min(1),
+    members: z.array(z.string().min(3)).readonly(),
+    updatedAt: z.string().min(1),
+    restricted: z.boolean().default(false),
+    sharedWithYou: z.boolean().default(false)
+  })
+  .readonly();
 export const checkStatusSchema = z.enum(["ok", "warn", "fail", "skipped"]);
 export const remediationSchema = z
   .discriminatedUnion("kind", [
@@ -195,6 +229,7 @@ export const appStateSchema = z
     repositories: z.array(repositorySchema).readonly().default([]),
     sources: tolerantArray(sourceSchema, "source"),
     items: tolerantArray(itemSchema, "package"),
+    bundles: tolerantArray(bundleStateSchema, "bundle").default([]),
     agentProfiles: z.array(agentProfileSchema).readonly(),
     /** The detected app the skill tutorial can demonstrate, until it has run. */
     tutorial: targetIdSchema.nullable().default(null),
@@ -221,6 +256,7 @@ export const operationOutcomeSchema = z.object({ backupPaths: z.array(z.string()
 export const bulkActionSchema = z.enum(["install", "replace", "uninstall"]);
 export const bulkPlanEntrySchema = z.object({ id: z.string().min(1), localId: z.string().min(1), status: itemStatusSchema, willRun: z.boolean() }).readonly();
 export const bulkPlanSchema = z.object({ sourceId: z.string().min(2), action: bulkActionSchema, entries: z.array(bulkPlanEntrySchema).readonly() }).readonly();
+export const itemsPlanSchema = z.object({ action: bulkActionSchema, entries: z.array(bulkPlanEntrySchema).readonly() }).readonly();
 export const bulkFailureSchema = z.object({ id: z.string().min(1), message: z.string().min(1) }).readonly();
 export const bulkResultSchema = z
   .object({ completed: z.array(z.string().min(1)).readonly(), failures: z.array(bulkFailureSchema).readonly(), backupPaths: z.array(z.string().min(1)).readonly() })
@@ -237,6 +273,47 @@ export const ipcErrorSchema = z.object({ kind: ipcErrorKindSchema, message: z.st
 export const scheduledSyncSchema = z.union([z.object({ kind: z.literal("updated"), state: appStateSchema }).readonly(), z.object({ kind: z.literal("failed"), error: ipcErrorSchema }).readonly()]);
 export const cachedStateSchema = appStateSchema.nullable();
 export const unitSchema = z.null();
+export const textSchema = z.string().min(1);
+
+/** An `agent-plugins://` link the app was opened with. */
+export const deepLinkSchema = z.object({ kind: z.enum(["install", "open"]), namespace: z.string().min(2), id: z.string().min(1), component: z.string().min(1).nullable() }).readonly();
+export const pendingLinkSchema = deepLinkSchema.nullable();
+const visibilitySchema = z.enum(["public", "private"]);
+const personSchema = z.object({ account: z.string().min(1), displayName: z.string().min(1) }).readonly();
+const teamNameSchema = z.object({ namespace: z.string().min(1), displayName: z.string().min(1) }).readonly();
+export const teamSummarySchema = z
+  .object({ namespace: z.string().min(1), displayName: z.string().min(1), visibility: visibilitySchema, role: z.enum(["owner", "member", "admin"]), memberCount: z.number().int().nonnegative() })
+  .readonly();
+export const teamSummariesSchema = z.array(teamSummarySchema).readonly();
+export const teamSchema = z
+  .object({
+    namespace: z.string().min(1),
+    displayName: z.string().min(1),
+    visibility: visibilitySchema,
+    role: z.enum(["owner", "member", "admin"]),
+    members: z.array(z.object({ account: z.string().min(1), displayName: z.string().min(1), owner: z.boolean(), joinedAt: z.string().min(1) }).readonly()).readonly(),
+    invite: z.string().min(1).nullable()
+  })
+  .readonly();
+export const directorySchema = z.object({ people: z.array(personSchema).readonly(), teams: z.array(teamNameSchema).readonly() }).readonly();
+export const linkPreviewSchema = z
+  .object({ kind: z.enum(["invite", "share"]), targetKind: z.enum(["team", "space", "package", "bundle"]), target: z.string().min(1), name: z.string().min(1), by: z.string().min(1) })
+  .readonly();
+export const linkResultSchema = z
+  .object({ kind: z.enum(["invite", "share"]), targetKind: z.enum(["team", "space", "package", "bundle"]), target: z.string().min(1), name: z.string().min(1), changed: z.boolean() })
+  .readonly();
+export const shareSchema = z
+  .object({
+    target: z.string().min(1),
+    visibility: z.enum(["inherit", "public", "private"]),
+    effective: visibilitySchema,
+    users: z.array(personSchema).readonly(),
+    teams: z.array(teamNameSchema).readonly(),
+    groups: z.array(z.string().min(1)).readonly(),
+    link: z.string().min(1).nullable()
+  })
+  .readonly();
+export const savedBundleSchema = z.object({ id: z.string().min(3), name: z.string().min(1) }).readonly();
 
 export type AppState = z.infer<typeof appStateSchema>;
 export type CatalogItem = z.infer<typeof itemSchema>;
@@ -251,9 +328,19 @@ export type RepositoryState = z.infer<typeof repositorySchema>;
 export type ListedSource = z.infer<typeof listedSourceSchema>;
 export type BulkAction = z.infer<typeof bulkActionSchema>;
 export type BulkPlan = z.infer<typeof bulkPlanSchema>;
+export type BulkPlanEntry = z.infer<typeof bulkPlanEntrySchema>;
+export type BulkResult = z.infer<typeof bulkResultSchema>;
 export type AgentProfile = z.infer<typeof agentProfileSchema>;
 export type TargetId = z.infer<typeof targetIdSchema>;
 export type AppIdentity = z.infer<typeof identitySchema>;
+export type BundleState = z.infer<typeof bundleStateSchema>;
+export type DeepLink = z.infer<typeof deepLinkSchema>;
+export type TeamSummary = z.infer<typeof teamSummarySchema>;
+export type Team = z.infer<typeof teamSchema>;
+export type Directory = z.infer<typeof directorySchema>;
+export type LinkPreview = z.infer<typeof linkPreviewSchema>;
+export type LinkResult = z.infer<typeof linkResultSchema>;
+export type Share = z.infer<typeof shareSchema>;
 export type SourceRemovalPlan = z.infer<typeof sourceRemovalPlanSchema>;
 export type CheckStatus = z.infer<typeof checkStatusSchema>;
 export type PreflightCheck = z.infer<typeof preflightCheckSchema>;

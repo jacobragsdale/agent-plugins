@@ -1,4 +1,4 @@
-import type { JSX } from "react";
+import type { JSX, ReactNode } from "react";
 import { Button, Spinner, Text, TextField, VisuallyHidden } from "@radix-ui/themes";
 import type { AgentProfile, AppIdentity, PreflightCheck } from "../ipc/schemas";
 
@@ -51,8 +51,9 @@ export function CatalogToolbar({
   matches,
   driftOnly,
   onQueryChange,
-  onClearDrift
-}: Readonly<{ query: string; matches: number; driftOnly: boolean; onQueryChange: (query: string) => void; onClearDrift: () => void }>): JSX.Element {
+  onClearDrift,
+  children
+}: Readonly<{ query: string; matches: number; driftOnly: boolean; onQueryChange: (query: string) => void; onClearDrift: () => void; children?: ReactNode }>): JSX.Element {
   const searching = query.trim().length > 0;
   return (
     <div className="catalog-toolbar">
@@ -84,6 +85,7 @@ export function CatalogToolbar({
           </Button>
         </>
       ) : null}
+      <div className="toolbar-actions">{children}</div>
     </div>
   );
 }

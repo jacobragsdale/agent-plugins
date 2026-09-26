@@ -220,6 +220,19 @@ export async function reviewSourceRemoval(source: SourceState, plan: SourceRemov
   return confirm(`${question}${warning}${returns}`, { title: "Remove source", kind: "warning", okLabel: modified.length === 0 ? "Remove" : "Remove and discard changes", cancelLabel: "Cancel" });
 }
 
+export async function reviewBundleUninstall(bundle: string, names: readonly string[]): Promise<boolean> {
+  return confirm(`Uninstall everything in ${bundle}: ${names.join(", ")}? Skills you also installed on their own go too.`, {
+    title: "Uninstall all",
+    kind: "warning",
+    okLabel: "Uninstall",
+    cancelLabel: "Cancel"
+  });
+}
+
+export async function reviewBundleDelete(bundle: string): Promise<boolean> {
+  return confirm(`Delete the bundle ${bundle}? Its skills stay installed and listed. Only the bundle goes.`, { title: "Delete bundle", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" });
+}
+
 export async function reviewReset(): Promise<boolean> {
   return confirm("Uninstall every package and delete all Agent Plugins data? Sources from the catalog are added back automatically.", {
     title: "Reset",
@@ -277,15 +290,24 @@ export function packageName(items: readonly CatalogItem[], id: string): string {
 }
 
 /**
- * What a background sync did that is worth a line: the packages it updated.
+ * What a background sync did that is worth a line: the packages it updated,
+ * and the ones it uninstalled because their publisher or an admin pulled them.
  * Files it put back, apps it added packages to, and updates it will retry
  * happen quietly; a person has nothing to do about them.
  */
 export type ReportNotice = Readonly<{ text: string }>;
 
 export function reportNotice(state: AppState): ReportNotice | null {
-  const { updatedItems } = state.autoUpdateReport;
-  return updatedItems.length === 0 ? null : { text: `Updated ${updatedItems.map((item) => packageName(state.items, item.id)).join(", ")}.` };
+  const { updatedItems, removedItems } = state.autoUpdateReport;
+  const lines: string[] = [];
+  if (updatedItems.length > 0) {
+    lines.push(`Updated ${updatedItems.map((item) => packageName(state.items, item.id)).join(", ")}.`);
+  }
+  if (removedItems.length > 0) {
+    const who = removedItems.length === 1 ? "its publisher or an admin pulled it" : "their publishers or an admin pulled them";
+    lines.push(`Removed ${removedItems.join(", ")}: ${who} from every PC.`);
+  }
+  return lines.length === 0 ? null : { text: lines.join(" ") };
 }
 
 /** A batch that partly failed, summarized by package name with each raw reason behind "Details". */

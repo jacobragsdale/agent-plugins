@@ -100,14 +100,22 @@ describe("names instead of ids", () => {
       updatedItems: [{ id: "official/publish", sourceId: "official", localId: "publish" }],
       failedItems: [{ id: "team-data/sql-helper", message: "The process cannot access the file because it is being used by another process. (os error 32)" }],
       repairedItems: [],
-      extendedItems: []
+      extendedItems: [],
+      removedItems: []
     };
     expect(reportNotice({ ...state, autoUpdateReport })).toEqual({ text: "Updated Publish." });
   });
 
+  it("says why a package was removed from this PC", () => {
+    const report = { updatedItems: [], failedItems: [], repairedItems: [], extendedItems: [], removedItems: ["Old helper"] };
+    expect(reportNotice({ ...state, autoUpdateReport: report })).toEqual({ text: "Removed Old helper: its publisher or an admin pulled it from every PC." });
+    const both = { ...report, updatedItems: [{ id: "official/publish", sourceId: "official", localId: "publish" }], removedItems: ["A", "B"] };
+    expect(reportNotice({ ...state, autoUpdateReport: both })?.text).toBe("Updated Publish. Removed A, B: their publishers or an admin pulled them from every PC.");
+  });
+
   it("stays quiet about repairs and updates the next sync retries", () => {
-    expect(reportNotice({ ...state, autoUpdateReport: { updatedItems: [], failedItems: [], repairedItems: [], extendedItems: [] } })).toBeNull();
-    const quiet = { updatedItems: [], failedItems: [{ id: "team-data/sql-helper", message: "locked" }], repairedItems: ["Publish"], extendedItems: ["SQL helper"] };
+    expect(reportNotice({ ...state, autoUpdateReport: { updatedItems: [], failedItems: [], repairedItems: [], extendedItems: [], removedItems: [] } })).toBeNull();
+    const quiet = { updatedItems: [], failedItems: [{ id: "team-data/sql-helper", message: "locked" }], repairedItems: ["Publish"], extendedItems: ["SQL helper"], removedItems: [] };
     expect(reportNotice({ ...state, autoUpdateReport: quiet })).toBeNull();
   });
 

@@ -1,9 +1,16 @@
-import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { JSX } from "react";
-import { Button, Callout, Heading, Spinner, Text } from "@radix-ui/themes";
+import { Badge, Button, Callout, Heading, Spinner, Text } from "@radix-ui/themes";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentSetupNotice, TutorialNotice } from "./components/AgentSetupNotice";
+import { BundleDialog, BundleGroup } from "./components/Bundles";
+import type { BundleEdit } from "./components/Bundles";
+import { LinkInstallDialog, OpenLinkDialog } from "./components/LinkDialogs";
+import type { LinkRequest } from "./components/LinkDialogs";
+import { ShareDialog } from "./components/ShareDialog";
+import type { ShareTarget } from "./components/ShareDialog";
+import { TeamsDialog } from "./components/TeamsDialog";
 import { ManageSourcesDialog } from "./components/ManageSourcesDialog";
 import { ErrorMessage, Notices, OfflineBanner } from "./components/Notice";
 import type { InfoNotice } from "./components/Notice";
@@ -11,14 +18,16 @@ import { SourceGroup } from "./components/SourceGroup";
 import type { SourceAction } from "./components/SourceGroup";
 import { CatalogToolbar, CreateSkillButton, StatusButton, SyncMeta } from "./components/CatalogToolbar";
 import { diagnosticsFailure, diagnosticsResult, seriousProblems, SystemStatusDialog } from "./components/SystemStatusDialog";
-import { errorResponse, explainAfterRetry, invokeParsed, SCHEDULED_SYNC_EVENT, toAppError, withRetry } from "./ipc/client";
+import { DEEP_LINK_EVENT, errorResponse, explainAfterRetry, invokeParsed, SCHEDULED_SYNC_EVENT, toAppError, withRetry } from "./ipc/client";
 import type { AppError } from "./ipc/client";
 import {
   appStateSchema,
   bulkPlanSchema,
   bulkResultSchema,
   cachedStateSchema,
+  itemsPlanSchema,
   operationOutcomeSchema,
+  pendingLinkSchema,
   preflightReportSchema,
   preparedSourceSchema,
   scheduledSyncSchema,
@@ -26,8 +35,26 @@ import {
   unitSchema
 } from "./ipc/schemas";
 import type { DiagnosticsResult } from "./components/SystemStatusDialog";
-import type { AgentProfile, AppIdentity, AppState, BulkAction, CatalogItem, ListedSource, PreflightCheck, PreflightReport, RepositoryState, SourceState } from "./ipc/schemas";
+import type {
+  AgentProfile,
+  AppIdentity,
+  AppState,
+  BulkAction,
+  BulkPlanEntry,
+  BulkResult,
+  BundleState,
+  CatalogItem,
+  DeepLink,
+  LinkResult,
+  ListedSource,
+  PreflightCheck,
+  PreflightReport,
+  RepositoryState,
+  SourceState
+} from "./ipc/schemas";
 import { catalogBody, headerProblems, isChecking, isOffline, lastCheckedLabel, noMatchesText, offlineBanner } from "./lib/connectivity";
+import { bundleMembers, cardDomId, ownsSpace, resolveLink } from "./lib/marketplace";
+import type { LinkTarget } from "./lib/marketplace";
 import {
   bulkLabels,
   failuresError,
@@ -35,10 +62,13 @@ import {
   itemCommand,
   itemCommandArgs,
   outcomeNotice,
+  packageName,
   reportNotice,
   reviewApproval,
   reviewBulk,
   reviewBulkApproval,
+  reviewBundleDelete,
+  reviewBundleUninstall,
   reviewReset,
   reviewSourceRemoval,
   reviewTutorial
@@ -117,6 +147,18 @@ export default function App(): JSX.Element {
   const [driftOnly, setDriftOnly] = useState(false);
   // An action or sync that failed for lack of a connection shows the offline banner until the next sync answers.
   const [offlineHint, setOfflineHint] = useState(false);
+  const [teamsOpen, setTeamsOpen] = useState(false);
+  const [openLinkOpen, setOpenLinkOpen] = useState(false);
+  const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
+  const [bundleEdit, setBundleEdit] = useState<BundleEdit | null>(null);
+  const [linkRequest, setLinkRequest] = useState<LinkRequest | null>(null);
+  const [busyBundles, setBusyBundles] = useState<ReadonlyMap<string, SourceAction>>(new Map());
+  // Links resolve against the newest state, which an async handler can't read from its closure.
+  const stateRef = useRef<AppState | null>(null);
+  const linkSeq = useRef(0);
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const applyState = useCallback((next: AppState): void => {
     startTransition(() => {
@@ -161,6 +203,94 @@ export default function App(): JSX.Element {
       setSyncing(false);
     }
   }, [applySynced, showSyncError]);
+
+  /** Clears any filter hiding `id`'s card, then scrolls to it and highlights it for a moment. */
+  const reveal = useCallback((id: string): void => {
+    setQuery("");
+    setDriftOnly(false);
+    setLinkRequest(null);
+    window.setTimeout(() => {
+      const card = document.getElementById(cardDomId(id));
+      if (card === null) {
+        return;
+      }
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      card.classList.add("card-highlight");
+      window.setTimeout(() => {
+        card.classList.remove("card-highlight");
+      }, 2400);
+      // Long enough for the cleared filter (and a just-synced catalog) to render the card.
+    }, 150);
+  }, []);
+
+  /**
+   * An `agent-plugins://` link. Something just published or shared may not be
+   * in this window's catalog until the next check, so a miss checks first. The
+   * newest link wins: a later one replaces a confirmation still waiting.
+   */
+  const openLink = useCallback(
+    async (link: DeepLink): Promise<void> => {
+      linkSeq.current += 1;
+      const seq = linkSeq.current;
+      const current = stateRef.current;
+      let target: LinkTarget | null = current === null ? null : resolveLink(link, current);
+      if (target === null) {
+        const next = await invokeParsed("sync_manifest_state", appStateSchema);
+        applySynced(next);
+        target = resolveLink(link, next);
+      }
+      if (seq !== linkSeq.current) {
+        return;
+      }
+      if (target === null) {
+        setInfo(infoText("That isn't available to you. Ask whoever sent it to check that it's shared with you."));
+      } else if (link.kind === "open") {
+        reveal(`${link.namespace}/${link.id}`);
+      } else {
+        setLinkRequest({ target });
+      }
+    },
+    [applySynced, reveal]
+  );
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    // The backend keeps the newest link until it is taken, and the event only says one is
+    // waiting. Taking it on every event and on mount handles a link that started the app
+    // (it arrived before this window could listen) and never handles the same link twice.
+    const take = (): void => {
+      invokeParsed("take_pending_link", pendingLinkSchema)
+        .then(async (link) => {
+          if (link !== null && !disposed) {
+            await openLink(link);
+          }
+        })
+        .catch((reason: unknown) => {
+          if (!disposed) {
+            setError(fromAction(toAppError(reason, "Couldn't open the link.")));
+          }
+        });
+    };
+    listen<unknown>(DEEP_LINK_EVENT, take)
+      .then((stop) => {
+        if (disposed) {
+          stop();
+        } else {
+          unlisten = stop;
+        }
+      })
+      .catch((reason: unknown) => {
+        if (!disposed) {
+          setError(fromAction(toAppError(reason, "Couldn't start listening for links.")));
+        }
+      });
+    take();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [openLink]);
 
   useEffect(() => {
     let disposed = false;
@@ -233,6 +363,14 @@ export default function App(): JSX.Element {
   }, [driftOnly, query, state]);
 
   const filtering = query.trim().length > 0 || driftOnly;
+
+  const visibleBundles = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (driftOnly) {
+      return [];
+    }
+    return (state?.bundles ?? []).filter((bundle) => needle.length === 0 || `${bundle.id} ${bundle.name} ${bundle.description} ${bundle.publisher}`.toLowerCase().includes(needle));
+  }, [driftOnly, query, state]);
 
   const visibleSources = useMemo(() => {
     const sources = state?.sources ?? [];
@@ -379,6 +517,31 @@ export default function App(): JSX.Element {
     }
   }
 
+  /**
+   * Asks before a batch installs any connector among `eligible`. Null means
+   * the person said no; otherwise whether the batch carries that approval.
+   */
+  async function connectorApproval(action: BulkAction, eligible: readonly BulkPlanEntry[]): Promise<boolean | null> {
+    const needApproval = action === "uninstall" ? [] : (state?.items ?? []).filter((item) => item.requiresApproval && eligible.some((entry) => entry.id === item.id));
+    if (needApproval.length === 0) {
+      return false;
+    }
+    const approved = await reviewBulkApproval(
+      needApproval.map((item) => item.name),
+      needApproval.flatMap((item) => item.riskDetails)
+    );
+    return approved ? true : null;
+  }
+
+  function showBatchResult(verb: string, result: BulkResult, from?: string): void {
+    if (result.failures.length > 0) {
+      showActionError(failuresError(verb, result.failures, state?.items ?? [], from));
+    }
+    if (result.backupPaths.length > 0) {
+      setInfo(backupNotice("The files that were there before were backed up to", result.backupPaths));
+    }
+  }
+
   async function runBulk(source: SourceState, action: BulkAction): Promise<void> {
     const verb = bulkLabels(action).action.toLowerCase();
     setError(null);
@@ -394,31 +557,101 @@ export default function App(): JSX.Element {
       if (action !== "install" && !(await reviewBulk(source, action, plan))) {
         return;
       }
-      const items = state?.items ?? [];
-      const needApproval = action === "uninstall" ? [] : items.filter((item) => item.requiresApproval && eligible.some((entry) => entry.id === item.id));
-      const approvals = needApproval.map((item) => item.name);
-      if (
-        approvals.length > 0 &&
-        !(await reviewBulkApproval(
-          approvals,
-          needApproval.flatMap((item) => item.riskDetails)
-        ))
-      ) {
+      const trustApproved = await connectorApproval(action, eligible);
+      if (trustApproved === null) {
         return;
       }
-      const result = await retrying(() => invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action, trustApproved: approvals.length > 0 }));
-      if (result.failures.length > 0) {
-        showActionError(failuresError(verb, result.failures, items, source.name));
-      }
-      if (result.backupPaths.length > 0) {
-        setInfo(backupNotice("The files that were there before were backed up to", result.backupPaths));
-      }
+      showBatchResult(verb, await retrying(() => invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action, trustApproved })), source.name);
     } catch (reason) {
       showActionError(toAppError(reason, `Couldn't ${verb} packages from ${source.name}.`));
     } finally {
       setBusySources((current) => marked(current, source.sourceId, null));
       await refreshAfterOperation();
     }
+  }
+
+  /** Installs or uninstalls a bundle's members that this window lists, as one batch. */
+  async function runBundle(bundle: BundleState, action: BulkAction): Promise<void> {
+    const verb = bulkLabels(action).action.toLowerCase();
+    const ids = bundleMembers(bundle, state?.items ?? []).map((item) => item.id);
+    setError(null);
+    setInfo(null);
+    setBusyBundles((current) => marked(current, bundle.id, action));
+    try {
+      const plan = await retrying(() => invokeParsed("plan_items", itemsPlanSchema, { ids, action }));
+      const eligible = plan.entries.filter((entry) => entry.willRun);
+      if (eligible.length === 0) {
+        setInfo(infoText(`Nothing to ${verb} in ${bundle.name} right now.`));
+        return;
+      }
+      if (
+        action === "uninstall" &&
+        !(await reviewBundleUninstall(
+          bundle.name,
+          eligible.map((entry) => packageName(state?.items ?? [], entry.id))
+        ))
+      ) {
+        return;
+      }
+      const trustApproved = await connectorApproval(action, eligible);
+      if (trustApproved === null) {
+        return;
+      }
+      showBatchResult(verb, await retrying(() => invokeParsed("run_items", bulkResultSchema, { ids, action, trustApproved })));
+    } catch (reason) {
+      showActionError(toAppError(reason, `Couldn't ${verb} ${bundle.name}.`));
+    } finally {
+      setBusyBundles((current) => marked(current, bundle.id, null));
+      await refreshAfterOperation();
+    }
+  }
+
+  async function deleteBundle(bundle: BundleState): Promise<void> {
+    if (!(await reviewBundleDelete(bundle.name))) {
+      return;
+    }
+    setBusyBundles((current) => marked(current, bundle.id, "remove"));
+    try {
+      await invokeParsed("delete_bundle", unitSchema, { namespace: bundle.namespace, bundleId: bundle.bundleId });
+      await synchronize();
+    } catch (reason) {
+      showActionError(toAppError(reason, `Couldn't delete ${bundle.name}.`));
+    } finally {
+      setBusyBundles((current) => marked(current, bundle.id, null));
+    }
+  }
+
+  /** The person confirmed a link: install through the same path a click on the card takes. */
+  function installFromLink(target: LinkTarget): void {
+    setLinkRequest(null);
+    if (target.kind === "item") {
+      settle(changeItem(target.item, target.componentId ?? undefined));
+    } else {
+      settle(runBundle(target.bundle, "install"));
+    }
+  }
+
+  /** After a pasted link: a team invite just needs a refresh; a share opens what was shared. */
+  function linkRedeemed(result: LinkResult): void {
+    const slash = result.target.indexOf("/");
+    if (result.kind === "invite") {
+      setInfo(infoText(`You joined ${result.name}. You can publish skills to it now.`));
+      settle(synchronize());
+    } else if (slash < 0) {
+      setInfo(infoText(`${result.name} is in your list now.`));
+      settle(
+        synchronize().then(() => {
+          reveal(result.target);
+        })
+      );
+    } else {
+      settle(openLink({ kind: "install", namespace: result.target.slice(0, slash), id: result.target.slice(slash + 1), component: null }));
+    }
+  }
+
+  function openShare(target: string, label: string): void {
+    setTeamsOpen(false);
+    setShareTarget({ target, label });
   }
 
   async function resetApp(): Promise<void> {
@@ -560,6 +793,7 @@ export default function App(): JSX.Element {
   // With nothing loaded yet, a failure replaces the spinner instead of sitting above it forever.
   const loadFailed = state === null && error !== null && !syncing;
   const report = visibleReport(state, dismissedReport);
+  const { items, profiles } = catalogLists(state);
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -575,6 +809,15 @@ export default function App(): JSX.Element {
             onClick={(profile) => {
               settle(createSkill(profile));
             }}
+          />
+          <MarketplaceButtons
+            identity={view.identity}
+            marketplaceUrl={view.marketplaceUrl}
+            disabled={resetting}
+            onTeams={() => {
+              setTeamsOpen(true);
+            }}
+            onError={showActionError}
           />
           <StatusButton
             problems={view.problems}
@@ -618,7 +861,17 @@ export default function App(): JSX.Element {
         onClearDrift={() => {
           setDriftOnly(false);
         }}
-      />
+      >
+        <CatalogActions
+          canCreate={view.identity !== null}
+          onOpenLink={() => {
+            setOpenLinkOpen(true);
+          }}
+          onNewBundle={() => {
+            setBundleEdit({ bundle: null });
+          }}
+        />
+      </CatalogToolbar>
       <div className="notices">
         <OfflineBanner text={offlineBanner(state, offlineHint)} checking={syncing} onTryNow={tryNow} />
         <AgentSetupNotice
@@ -676,6 +929,23 @@ export default function App(): JSX.Element {
         </div>
       ) : (
         <div className="sources-list">
+          <BundleGroup
+            bundles={visibleBundles}
+            items={items}
+            identity={view.identity}
+            busyBundles={busyBundles}
+            busyIds={busyItems}
+            allBusy={resetting}
+            onRun={runBundle}
+            onEdit={(bundle) => {
+              setBundleEdit({ bundle });
+            }}
+            onDelete={deleteBundle}
+            onShare={openShare}
+            onItemChange={changeItem}
+            onManualChange={changeManualInvocation}
+            onError={showActionError}
+          />
           {visibleSources.map((source) => (
             <SourceGroup
               key={source.sourceKey}
@@ -688,6 +958,7 @@ export default function App(): JSX.Element {
               onItemChange={changeItem}
               onManualChange={changeManualInvocation}
               onBulk={runBulk}
+              onShare={ownsSpace(view.identity, source.sourceId) ? openShare : undefined}
               onError={showActionError}
             />
           ))}
@@ -704,12 +975,55 @@ export default function App(): JSX.Element {
         onRemove={removeSource}
         onError={showActionError}
       />
+      <TeamsDialog
+        open={teamsOpen}
+        identity={view.identity}
+        onOpenChange={setTeamsOpen}
+        onChanged={() => {
+          settle(synchronize());
+        }}
+        onShare={openShare}
+        onOpenLink={() => {
+          setTeamsOpen(false);
+          setOpenLinkOpen(true);
+        }}
+      />
+      <OpenLinkDialog open={openLinkOpen} onOpenChange={setOpenLinkOpen} onRedeemed={linkRedeemed} />
+      <ShareDialog
+        request={shareTarget}
+        onClose={() => {
+          setShareTarget(null);
+        }}
+        onSaved={() => {
+          settle(synchronize());
+        }}
+      />
+      <BundleDialog
+        request={bundleEdit}
+        identity={view.identity}
+        items={items}
+        onClose={() => {
+          setBundleEdit(null);
+        }}
+        onSaved={() => {
+          settle(synchronize());
+        }}
+      />
+      <LinkInstallDialog
+        request={linkRequest}
+        profiles={profiles}
+        onCancel={() => {
+          setLinkRequest(null);
+        }}
+        onInstall={installFromLink}
+        onShow={reveal}
+      />
       <SystemStatusDialog
         open={statusDialogOpen}
         report={view.preflight}
         identity={view.identity}
         marketplaceUrl={view.marketplaceUrl}
-        profiles={state?.agentProfiles ?? []}
+        profiles={profiles}
         running={preflightRunning}
         diagnostics={diagnostics}
         onOpenChange={(open) => {
@@ -724,6 +1038,66 @@ export default function App(): JSX.Element {
         onAction={handleStatusAction}
       />
     </main>
+  );
+}
+
+/**
+ * Header buttons that need a marketplace account: Teams, and a nudge when
+ * suggested changes wait for this person in the portal.
+ */
+function MarketplaceButtons({
+  identity,
+  marketplaceUrl,
+  disabled,
+  onTeams,
+  onError
+}: Readonly<{ identity: AppIdentity | null; marketplaceUrl: string | null; disabled: boolean; onTeams: () => void; onError: (error: AppError) => void }>): JSX.Element | null {
+  if (identity === null) {
+    return null;
+  }
+  const waiting = identity.suggestionsWaiting;
+  return (
+    <>
+      {waiting === 0 || marketplaceUrl === null ? null : (
+        <Button
+          variant="soft"
+          color="amber"
+          onClick={() => {
+            openUrl(`${marketplaceUrl.replace(/\/+$/, "")}/mine`).catch((reason: unknown) => {
+              onError(toAppError(reason, "Couldn't open the marketplace."));
+            });
+          }}
+        >
+          <Badge color="amber" variant="solid">
+            {String(waiting)}
+          </Badge>
+          suggestion{waiting === 1 ? "" : "s"} waiting
+        </Button>
+      )}
+      <Button variant="soft" disabled={disabled} onClick={onTeams}>
+        Teams
+      </Button>
+    </>
+  );
+}
+
+function catalogLists(state: AppState | null): Readonly<{ items: readonly CatalogItem[]; profiles: readonly AgentProfile[] }> {
+  return { items: state?.items ?? [], profiles: state?.agentProfiles ?? [] };
+}
+
+/** Beside the search box: open a link someone sent, and start a bundle when signed in to the marketplace. */
+function CatalogActions({ canCreate, onOpenLink, onNewBundle }: Readonly<{ canCreate: boolean; onOpenLink: () => void; onNewBundle: () => void }>): JSX.Element {
+  return (
+    <>
+      <Button size="1" variant="soft" onClick={onOpenLink}>
+        Open a link
+      </Button>
+      {canCreate ? (
+        <Button size="1" variant="soft" onClick={onNewBundle}>
+          New bundle
+        </Button>
+      ) : null}
+    </>
   );
 }
 

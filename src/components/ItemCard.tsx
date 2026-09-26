@@ -3,6 +3,7 @@ import { Badge, Button, Card, Heading, Text } from "@radix-ui/themes";
 import { toAppError } from "../ipc/client";
 import type { AppError } from "../ipc/client";
 import type { CatalogComponent, CatalogItem } from "../ipc/schemas";
+import { cardDomId, partCounts } from "../lib/marketplace";
 import { componentLabel, primaryActionColor, primaryActionLabel, statusColor, statusLabel } from "../lib/status";
 
 export function ItemCard({
@@ -11,6 +12,8 @@ export function ItemCard({
   allBusy,
   onChange,
   onManualChange,
+  onShare,
+  anchor,
   onError
 }: Readonly<{
   item: CatalogItem;
@@ -18,6 +21,10 @@ export function ItemCard({
   allBusy: boolean;
   onChange: (item: CatalogItem, componentId?: string) => Promise<void>;
   onManualChange: (item: CatalogItem, manual: boolean, componentId?: string) => Promise<void>;
+  /** Set when this person may change who sees the package. */
+  onShare?: ((item: CatalogItem) => void) | undefined;
+  /** The one copy of a card a link scrolls to; a bundle's copy of it has none. */
+  anchor: boolean;
   onError: (error: AppError) => void;
 }>): JSX.Element {
   // A package another source installed is not this one's to touch.
@@ -32,7 +39,7 @@ export function ItemCard({
   const expandable = item.components.length > 1;
   const [componentsOpen, setComponentsOpen] = useState(true);
   return (
-    <Card className="skill-card">
+    <Card className="skill-card" id={anchor ? cardDomId(item.id) : undefined}>
       <div className="skill-card-main">
         <div className="skill-copy">
           <div className="skill-title-row">
@@ -72,6 +79,17 @@ export function ItemCard({
           )}
         </div>
         <div className="item-actions">
+          {onShare === undefined ? null : (
+            <Button
+              variant="soft"
+              color="gray"
+              onClick={() => {
+                onShare(item);
+              }}
+            >
+              Share…
+            </Button>
+          )}
           <Button
             className="skill-action skill-action-primary"
             color={primaryActionColor(item.status)}
@@ -134,7 +152,7 @@ function MarketplaceBadges({ meta }: Readonly<{ meta: CatalogItem["marketplace"]
     <>
       {meta.lane === "official" ? <Badge color="violet">Official</Badge> : null}
       {meta.lane === "team" ? <Badge color="teal">Team</Badge> : null}
-      {meta.restricted ? <Badge color="orange">Restricted</Badge> : null}
+      {meta.sharedWithYou ? <Badge color="blue">Shared with you</Badge> : meta.restricted ? <Badge color="orange">Private</Badge> : null}
     </>
   );
 }
@@ -174,16 +192,7 @@ function packageActionLabel(item: CatalogItem): string {
 }
 
 function componentSummary(components: readonly CatalogComponent[]): string {
-  const skills = components.filter((component) => component.kind === "skill").length;
-  const servers = components.filter((component) => component.kind === "mcpServer").length;
-  const parts: string[] = [];
-  if (skills > 0) {
-    parts.push(`${String(skills)} skill${skills === 1 ? "" : "s"}`);
-  }
-  if (servers > 0) {
-    parts.push(`${String(servers)} connector${servers === 1 ? "" : "s"}`);
-  }
-  return parts.join(" · ");
+  return partCounts(components).join(" · ");
 }
 
 function ComponentRow({

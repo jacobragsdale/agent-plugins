@@ -565,3 +565,95 @@ button {
   cursor: default;
   opacity: 0.6;
 }
+
+.toolbar-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+/* A card a link pointed at: a brief ring so the eye finds it after the scroll. */
+.card-highlight {
+  outline: 2px solid var(--accent-9);
+  outline-offset: 2px;
+  transition: outline-color 0.4s ease;
+}
+
+.form-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.form-field {
+  display: grid;
+  gap: 6px;
+}
+
+.entry-list,
+.directory-results,
+.bundle-choices {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.entry-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.entry-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.directory-search {
+  margin-top: 10px;
+}
+
+.directory-results:empty {
+  display: none;
+}
+
+.link-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.link-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.share-options {
+  margin-top: 8px;
+}
+
+.bundle-members {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.bundle-choices {
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
+.bundle-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

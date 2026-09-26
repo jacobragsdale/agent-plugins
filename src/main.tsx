@@ -6,7 +6,7 @@ import { Theme } from "@radix-ui/themes";
   `@radix-ui/themes/styles.css` carries all thirty-one Radix colour scales.
   Agent Plugins renders eight of them — the blue accent, the slate gray,
   amber, green, and red for status, and violet, teal, and orange for the
-  Official, Team, and Restricted badges — so the rest is a hundred kilobytes of
+  Official, Team, and Private badges — so the rest is a hundred kilobytes of
   custom properties the webview parses on every launch and never reads. The
   token files are imported individually instead. `tokens/base.css` maps
   `--accent-*` and `--gray-*` onto whichever scale a `color` prop names, so a

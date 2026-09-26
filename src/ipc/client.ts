@@ -4,6 +4,8 @@ import { ipcErrorSchema } from "./schemas";
 import type { IpcErrorKind } from "./schemas";
 
 export const SCHEDULED_SYNC_EVENT = "scheduled-sync";
+/** Carries an `agent-plugins://` link the running app was opened with. */
+export const DEEP_LINK_EVENT = "deep-link";
 
 /** The commands `lib.rs` registers with `generate_handler!`; keep the two lists the same. */
 export type IpcCommand =
@@ -24,7 +26,26 @@ export type IpcCommand =
   | "reset_app"
   | "run_tutorial"
   | "dismiss_tutorial"
-  | "create_skill";
+  | "create_skill"
+  | "take_pending_link"
+  | "list_teams"
+  | "get_team"
+  | "create_team"
+  | "rename_team"
+  | "add_team_member"
+  | "remove_team_member"
+  | "team_invite"
+  | "delete_team"
+  | "search_directory"
+  | "preview_link"
+  | "redeem_link"
+  | "get_share"
+  | "set_share"
+  | "share_link"
+  | "save_bundle"
+  | "delete_bundle"
+  | "plan_items"
+  | "run_items";
 
 export async function invokeParsed<T>(command: IpcCommand, schema: z.ZodType<T>, args?: Record<string, unknown>): Promise<T> {
   const payload = args === undefined ? await invoke<unknown>(command) : await invoke<unknown>(command, args);
