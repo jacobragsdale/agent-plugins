@@ -121,9 +121,11 @@ A source retired as not found disappears on its own once nothing from it is inst
 
 ## A package or source you expected is missing
 
-The marketplace shows each person only what they may see. A namespace or package with an access list is absent from the catalog, from `agent-plugins search`, and from the app for anyone not on it, and nothing says so.
+The marketplace shows each person only what they may see. A private space, package, or bundle is absent from the catalog, from `agent-plugins search`, and from the app for anyone it is not shared with, and nothing says so.
 
-Ask the package's owner to run `agent-plugins access <namespace>/<package>` and add you or your team. If a team rule should already cover you, run `agent-plugins whoami`: an empty `groups:` line means the server resolved no group membership for your account, which is a server-side LDAP problem to raise with the marketplace administrator.
+Ask the owner to share it with you: from its **Share** button in the portal, they can add you, add a team you are in, or send you a share link. On the command line it is `agent-plugins share <namespace>/<package> --add <your account>`. If the owner shared it with a team, run `agent-plugins whoami` and check that the team is on its `teams` line.
+
+A package with an MCP server that is shared with everyone stays hidden from people outside its space until an admin approves it. Its page tells the owner when it is waiting.
 
 If you had installed the package, its card now says **No longer offered** with an **Uninstall** button, and the source stays in **Manage sources** until nothing from it is installed.
 

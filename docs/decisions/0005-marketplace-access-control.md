@@ -4,6 +4,7 @@
 - Date: 2026-09-05
 - Extends: [ADR 0004](0004-internal-marketplace.md), which left team namespaces keyed to AD groups as a follow-up
 - Amended by: [ADR 0006](0006-web-portal-and-review.md), which adds skill packs (several components per package), the portal's visibility editor, and review of MCP servers
+- Amended by: [ADR 0007](0007-self-service-marketplace.md), which replaces configured team namespaces with teams anyone creates, and "no list means public" with explicit Public and Private settings and share lists
 
 ## Context
 

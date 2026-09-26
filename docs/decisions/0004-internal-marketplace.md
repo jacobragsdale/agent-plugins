@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-28
+- Amended by: [ADR 0007](0007-self-service-marketplace.md), which makes teams a database record anyone creates instead of AD groups
 - Supersedes: the anonymous build-time catalog fetch and the "no server" stance in [ADR 0003](0003-artifact-only-catalog.md). Artifact-only acquisition, `sourceKey` identity, and the manifest v2 package contract from ADR 0001–0003 remain.
 
 ## Context

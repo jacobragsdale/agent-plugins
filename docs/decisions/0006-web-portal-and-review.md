@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-09-22
 - Extends: [ADR 0004](0004-internal-marketplace.md) and [ADR 0005](0005-marketplace-access-control.md)
+- Amended by: [ADR 0007](0007-self-service-marketplace.md), which removes admin review of versions: owners review suggestions, and admins approve only MCP servers going public
 
 ## Context
 

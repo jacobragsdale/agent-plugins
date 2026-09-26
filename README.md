@@ -6,9 +6,9 @@ A **source** is an HTTPS archive with `agent-plugins.json` at its root. That fil
 
 The app plans the files and config each detected agent needs, shows compatibility and trust, then applies the change in one recovery journal and ownership-ledger commit. It never executes source content.
 
-The **web portal**, served by the marketplace, is where people browse skills, download the app, upload their own skills and skill packs, and where admins review new ones before they go live.
+The **web portal**, served by the marketplace, is where people browse skills and install them into the app with one click, download the app, upload their own skills, skill packs, and bundles, create teams, share with people, and review changes others suggest.
 
-The `agent-plugins` command line (`validate`, `publish`, `search`, `install`, `whoami`) does the same work from a terminal or from an agent; the official `publish` and `marketplace` skills wrap it.
+The `agent-plugins` command line (`validate`, `publish`, `search`, `install`, `share`, `team`, `bundle`, `review`, `revoke`, `whoami`) does the same work from a terminal or from an agent; the official `publish` and `marketplace` skills wrap it.
 
 ## Learn
 
@@ -27,7 +27,7 @@ The `agent-plugins` command line (`validate`, `publish`, `search`, `install`, `w
 ## Look up
 
 - [App reference](docs/app-reference.md) — window and tray controls, notices and retries, package states, destinations, background behavior.
-- [CLI reference](docs/cli-reference.md) — `validate`, `publish`, `search`, `install`, `whoami`.
+- [CLI reference](docs/cli-reference.md) — `validate`, `publish`, `search`, `install`, `share`, `team`, `bundle`, `review`, `revoke`, `whoami`.
 - [Marketplace API](docs/marketplace-api.md) — endpoints, events, and configuration; [`server/openapi.json`](server/openapi.json) is generated.
 - [Preflight checks](docs/preflight-reference.md) — every startup check, its status rules, and remediation.
 - [Source manifest](docs/manifest-reference.md) — `agent-plugins.json`, `SKILL.md`, and MCP document fields.
@@ -45,6 +45,7 @@ The `agent-plugins` command line (`validate`, `publish`, `search`, `install`, `w
 - [ADR 0004](docs/decisions/0004-internal-marketplace.md) — the marketplace server, Windows identity, metrics, and publishing.
 - [ADR 0005](docs/decisions/0005-marketplace-access-control.md) — per-user and per-team access.
 - [ADR 0006](docs/decisions/0006-web-portal-and-review.md) — the web portal and review before publishing.
+- [ADR 0007](docs/decisions/0007-self-service-marketplace.md) — self-service teams, sharing, owner review, bundles, and installing from the website.
 
 ## Develop
 
