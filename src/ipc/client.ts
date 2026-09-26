@@ -23,7 +23,8 @@ export type IpcCommand =
   | "remove_manifest_source"
   | "reset_app"
   | "run_tutorial"
-  | "dismiss_tutorial";
+  | "dismiss_tutorial"
+  | "create_skill";
 
 export async function invokeParsed<T>(command: IpcCommand, schema: z.ZodType<T>, args?: Record<string, unknown>): Promise<T> {
   const payload = args === undefined ? await invoke<unknown>(command) : await invoke<unknown>(command, args);

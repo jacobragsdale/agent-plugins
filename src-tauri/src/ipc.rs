@@ -199,6 +199,13 @@ pub(crate) async fn run_tutorial(target_id: TargetId) -> Result<(), IpcError> {
 }
 
 #[tauri::command]
+pub(crate) async fn create_skill(target_id: TargetId) -> Result<(), IpcError> {
+    application::create_skill(target_id)
+        .await
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
 pub(crate) async fn dismiss_tutorial() -> Result<(), IpcError> {
     application::dismiss_tutorial()
         .await

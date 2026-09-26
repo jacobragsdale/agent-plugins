@@ -1,6 +1,7 @@
 //! The skill tutorial: with the person's permission, close an AI app, give it a
-//! sample skill, and reopen it with a prompt that uses the skill. Supporting
-//! another app is one more row in `APPS`.
+//! sample skill, and reopen it with a prompt that uses the skill. Also **Create
+//! a skill**, which opens the app with a prompt that writes and publishes one.
+//! Supporting another app is one more row in `APPS`.
 
 use crate::agent_profiles::{AgentProfileState, TargetId};
 use crate::fs_retry;
@@ -12,9 +13,13 @@ use std::time::{Duration, Instant};
 /// Present once the tutorial has run, so it is offered only until then.
 const SEEN_FILE: &str = "tutorial-seen";
 const SKILL_NAME: &str = "agent-plugins-tutorial";
+/// The description names only its own command: a broader one answered any
+/// prompt that mentions Agent Plugins, **Create a skill**'s included. Marking
+/// it manual does not work either, since Cursor then ignores the command when
+/// it arrives as text from a link.
 const SKILL: &str = "---
 name: agent-plugins-tutorial
-description: Shows how an Agent Plugins skill works. Use when the Agent Plugins tutorial asks for it.
+description: Answers the /agent-plugins-tutorial command. Use only when the message starts with /agent-plugins-tutorial; it is not a guide to Agent Plugins.
 ---
 
 # Agent Plugins tutorial
@@ -24,6 +29,25 @@ Agent Plugins installed this skill a moment ago and that skills teach the AI app
 to do a particular job.
 ";
 const PROMPT: &str = "/agent-plugins-tutorial Show me what this skill does.";
+/// Everything the agent needs to interview the person, write a skill, and
+/// publish it; `create_prompt` fills in `{skills}` and `{cli}`. Cursor refuses
+/// a deeplink over 10,000 characters, and this is percent-encoded into one.
+const CREATE_PROMPT: &str = r#"Help me make a new skill for my AI apps and share it on the company marketplace. I'm not a developer: use plain words and ask one question at a time.
+
+A skill is a folder with a SKILL.md file: frontmatter with a name and a description, then the instructions an AI follows when it uses the skill. The Agent Plugins command line is "{cli}" (in PowerShell, call it with &).
+
+1. Interview me until you could write the skill yourself. Ask what job it does; for a real example of what I would give it and what a great result looks like; when it should be used, in the words I would say; and any steps, rules, tone, or format it must follow or avoid.
+2. Run the command line with `whoami` and note the namespace it prints.
+3. Pick a short lowercase hyphenated name, such as meeting-notes, or use mine. Write {skills}\<namespace>-<name>\SKILL.md:
+   - The folder and the frontmatter name are both <namespace>-<name>, even when I chose the name: the namespace from step 2 always comes first, as in <namespace>-meeting-notes.
+   - The description says what the skill does and when to use it, in one or two sentences with the words I would use. Other people's AI apps read only this to decide when to use the skill.
+   - The body has short numbered steps, my rules, and one worked example. Keep it under 150 lines, written for an assistant that is smart but new to my job.
+   - Never include passwords, keys, tokens, customer data, or personal details.
+4. Show me the skill and revise it until I'm happy. Suggest I try it in a new chat; if it doesn't show up, restarting Cursor loads it.
+5. When I say it's ready, propose up to five lowercase tags people would search for and a one-line changelog, and ask me to confirm. Only after I say yes, run the command line with: publish "<the skill folder>" --version 1.0.0 --tags <a,b> --changelog "<text>" --yes
+6. Give me the link it prints and say what it printed: "submitted ... for review" means others see it once an admin approves it; "published" means it is live now. Either way I can keep using my copy.
+
+If the version is taken, use the one it suggests. If it refuses because something looks like a secret or breaks a rule, explain why in plain words and fix the skill; never work around the check."#;
 /// How long the app gets to close its windows before the tutorial gives up.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -85,12 +109,7 @@ pub(crate) fn run(paths: &SystemPaths, target: TargetId) -> Result<(), String> {
     let root = crate::adapters::skill_root(target, paths)
         .ok_or_else(|| format!("{name} doesn't read skills from this computer."))?;
     let running = processes(app.executable)?;
-    // The copy the person already runs is the one to reopen.
-    let executable = running
-        .iter()
-        .find_map(|(_, path)| path.clone())
-        .or_else(|| installed_executable(app))
-        .ok_or_else(|| format!("Could not find {} on this computer.", app.executable))?;
+    let executable = executable(app, &running)?;
     if !running.is_empty() {
         close(app, &running)?;
     }
@@ -121,11 +140,73 @@ pub(crate) fn dismiss(paths: &SystemPaths) -> Result<(), String> {
         .map_err(|error| format!("Could not record that the tutorial was seen: {error}"))
 }
 
-fn installed_executable(app: &App) -> Option<PathBuf> {
-    (app.install_roots)()
-        .into_iter()
-        .map(|root| root.join(app.executable))
-        .find(|path| path.is_file())
+/// Removes the sample skill from every app the tutorial can give it to, so
+/// **Reset** leaves nothing of Agent Plugins behind.
+pub(crate) fn remove_skill(paths: &SystemPaths) -> Result<(), String> {
+    for app in &APPS {
+        let Some(root) = crate::adapters::skill_root(app.target, paths) else {
+            continue;
+        };
+        let skill = root.join(SKILL_NAME);
+        match fs_retry::remove_dir_all(&skill) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Could not remove the tutorial skill at {}: {}",
+                    skill.display(),
+                    fs_retry::plain(&error)
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Opens the app with a prompt that has its agent interview the person, write
+/// a skill where the app reads skills, and publish it. Nothing is closed or
+/// installed first, so a running app just gets the prompt.
+pub(crate) fn create_skill(paths: &SystemPaths, target: TargetId) -> Result<(), String> {
+    let name = target.display_name();
+    let app =
+        app(target).ok_or_else(|| format!("Creating a skill in {name} isn't supported yet."))?;
+    let skills = crate::adapters::skill_root(target, paths)
+        .ok_or_else(|| format!("{name} doesn't read skills from this computer."))?;
+    let executable = executable(app, &processes(app.executable)?)?;
+    // The installer puts the console twin beside the app; the app itself prints nothing to a shell.
+    let cli = std::env::current_exe()
+        .map_err(|error| format!("Could not find Agent Plugins itself: {error}"))?
+        .with_file_name("agent-plugins.com");
+    launch(
+        &executable,
+        &(app.prompt_args)(&create_prompt(&skills, &cli)),
+    )
+    .map_err(|error| {
+        format!(
+            "Could not open {name} from {}: {error}",
+            executable.display()
+        )
+    })
+}
+
+fn create_prompt(skills: &Path, cli: &Path) -> String {
+    CREATE_PROMPT
+        .replace("{skills}", &skills.display().to_string())
+        .replace("{cli}", &cli.display().to_string())
+}
+
+/// The copy the person already runs, or else the first one installed.
+fn executable(app: &App, running: &[(u32, Option<PathBuf>)]) -> Result<PathBuf, String> {
+    running
+        .iter()
+        .find_map(|(_, path)| path.clone())
+        .or_else(|| {
+            (app.install_roots)()
+                .into_iter()
+                .map(|root| root.join(app.executable))
+                .find(|path| path.is_file())
+        })
+        .ok_or_else(|| format!("Could not find {} on this computer.", app.executable))
 }
 
 /// Asks the app to close its windows, the same as clicking X, so it can save
@@ -135,8 +216,9 @@ fn close(app: &App, running: &[(u32, Option<PathBuf>)]) -> Result<(), String> {
     let started = Instant::now();
     while !processes(app.executable)?.is_empty() {
         if started.elapsed() > CLOSE_TIMEOUT {
+            // One sentence: the window shows only the first one until Details is opened.
             return Err(format!(
-                "{} is still open. Save your work, close it, and try again.",
+                "{} is still open, so save your work there, close it, and try again.",
                 app.target.display_name()
             ));
         }
@@ -261,7 +343,7 @@ fn close_windows(processes: &[u32]) {
 
 #[cfg(not(windows))]
 fn processes(_executable: &str) -> Result<Vec<(u32, Option<PathBuf>)>, String> {
-    Err("The tutorial only runs on Windows so far.".to_string())
+    Err("Opening an AI app only works on Windows so far.".to_string())
 }
 
 #[cfg(not(windows))]
@@ -281,6 +363,39 @@ mod tests {
                 "cursor://anysphere.cursor-deeplink/prompt?text=%2Fskill%20a%2Bb%20%26%20c"
             ]
         );
+    }
+
+    #[test]
+    fn create_prompt_fills_in_paths_and_fits_a_cursor_deeplink() {
+        let home = r"C:\Users\christopher.johnston";
+        let prompt = create_prompt(
+            &Path::new(home).join(r".agents\skills"),
+            &Path::new(home).join(r"AppData\Local\Agent Plugins\agent-plugins.com"),
+        );
+        assert!(!prompt.contains("{skills}") && !prompt.contains("{cli}"));
+        let url = &cursor_prompt_args(&prompt)[2];
+        assert!(url.len() < 10_000, "{} characters", url.len());
+    }
+
+    #[test]
+    fn remove_skill_deletes_the_sample_skill_and_tolerates_its_absence() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = SystemPaths {
+            home: root.path().join("home"),
+            config: root.path().join("config"),
+            data: root.path().join("data"),
+            local_data: root.path().join("local-data"),
+            cache: root.path().join("cache"),
+            onedrive_commercial: None,
+        };
+        let skill = crate::adapters::skill_root(TargetId::Cursor, &paths)
+            .expect("skill root")
+            .join(SKILL_NAME);
+        std::fs::create_dir_all(&skill).expect("skill dir");
+        std::fs::write(skill.join("SKILL.md"), SKILL).expect("skill");
+        remove_skill(&paths).expect("remove");
+        assert!(!skill.exists());
+        remove_skill(&paths).expect("already gone");
     }
 
     #[cfg(windows)]

@@ -132,7 +132,8 @@ pub fn run() {
             ipc::remove_manifest_source,
             ipc::reset_app,
             ipc::run_tutorial,
-            ipc::dismiss_tutorial
+            ipc::dismiss_tutorial,
+            ipc::create_skill
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

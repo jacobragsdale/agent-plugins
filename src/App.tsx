@@ -9,7 +9,7 @@ import { ErrorMessage, Notices, OfflineBanner } from "./components/Notice";
 import type { InfoNotice } from "./components/Notice";
 import { SourceGroup } from "./components/SourceGroup";
 import type { SourceAction } from "./components/SourceGroup";
-import { CatalogToolbar, StatusButton, SyncMeta } from "./components/CatalogToolbar";
+import { CatalogToolbar, CreateSkillButton, StatusButton, SyncMeta } from "./components/CatalogToolbar";
 import { diagnosticsFailure, diagnosticsResult, seriousProblems, SystemStatusDialog } from "./components/SystemStatusDialog";
 import { errorResponse, explainAfterRetry, invokeParsed, SCHEDULED_SYNC_EVENT, toAppError, withRetry } from "./ipc/client";
 import type { AppError } from "./ipc/client";
@@ -109,6 +109,7 @@ export default function App(): JSX.Element {
   const [busySources, setBusySources] = useState<ReadonlyMap<string, SourceAction>>(new Map());
   const [resetting, setResetting] = useState(false);
   const [tutorialRunning, setTutorialRunning] = useState(false);
+  const [creatingSkill, setCreatingSkill] = useState(false);
   const [statusDialogOpen, setStatusDialogOpen] = useState(false);
   const [preflightRunning, setPreflightRunning] = useState(false);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
@@ -455,11 +456,26 @@ export default function App(): JSX.Element {
       setError(null);
       setInfo(null);
       await invokeParsed("run_tutorial", unitSchema, { targetId });
+      setInfo(infoText(`Reopening ${app}. Choose Create Chat, then send the message to see the skill work.`));
     } catch (reason) {
       showActionError(toAppError(reason, `Couldn't start the ${app} tutorial.`));
     } finally {
       setTutorialRunning(false);
       await refreshAfterOperation();
+    }
+  }
+
+  async function createSkill({ targetId, displayName: app }: AgentProfile): Promise<void> {
+    setCreatingSkill(true);
+    setError(null);
+    setInfo(null);
+    try {
+      await invokeParsed("create_skill", unitSchema, { targetId });
+      setInfo(infoText(`Opening ${app}. Choose Create Chat, then send the message to start making your skill. If ${app} asks you to log in, do that first, then choose Create a skill again.`));
+    } catch (reason) {
+      showActionError(toAppError(reason, `Couldn't open ${app}.`));
+    } finally {
+      setCreatingSkill(false);
     }
   }
 
@@ -553,6 +569,13 @@ export default function App(): JSX.Element {
           </Heading>
         </div>
         <div className="catalog-actions">
+          <CreateSkillButton
+            profile={skillCreatorProfile(state)}
+            running={creatingSkill}
+            onClick={(profile) => {
+              settle(createSkill(profile));
+            }}
+          />
           <StatusButton
             problems={view.problems}
             identity={view.identity}
@@ -707,6 +730,11 @@ export default function App(): JSX.Element {
 /** The app the skill tutorial is offered for, until it has run once. */
 function tutorialProfile(state: AppState | null): AgentProfile | null {
   return state?.agentProfiles.find((profile) => profile.targetId === state.tutorial) ?? null;
+}
+
+/** The detected app **Create a skill** opens: Cursor, the one `tutorial.rs` knows how to launch with a prompt. */
+function skillCreatorProfile(state: AppState | null): AgentProfile | null {
+  return state?.agentProfiles.find((profile) => profile.detected && profile.targetId === "cursor") ?? null;
 }
 
 /** The background-update report, unless the person already dismissed this exact one. */

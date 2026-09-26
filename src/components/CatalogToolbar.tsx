@@ -1,6 +1,25 @@
 import type { JSX } from "react";
 import { Button, Spinner, Text, TextField, VisuallyHidden } from "@radix-ui/themes";
-import type { AppIdentity, PreflightCheck } from "../ipc/schemas";
+import type { AgentProfile, AppIdentity, PreflightCheck } from "../ipc/schemas";
+
+/** Opens `profile`'s app with the create-a-skill prompt; hidden while no such app is detected. */
+export function CreateSkillButton({ profile, running, onClick }: Readonly<{ profile: AgentProfile | null; running: boolean; onClick: (profile: AgentProfile) => void }>): JSX.Element | null {
+  if (profile === null) {
+    return null;
+  }
+  return (
+    <Button
+      variant="soft"
+      loading={running}
+      disabled={running}
+      onClick={() => {
+        onClick(profile);
+      }}
+    >
+      Create a skill
+    </Button>
+  );
+}
 
 export function StatusButton({
   problems,

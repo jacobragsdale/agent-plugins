@@ -2,6 +2,10 @@
 
 This tutorial publishes a skill you already have on your machine to the company marketplace. It takes a minute. Authentication is your Windows logon; there is nothing to sign in to.
 
+## From scratch, in Cursor
+
+No skill yet? Choose **Create a skill** in Agent Plugins. Cursor opens and offers to create a chat with a prompt; choose **Create Chat**, then send it. The agent asks what the skill should do, writes it where Cursor reads skills so you can try it, and publishes it once you say it's ready.
+
 ## From the web portal
 
 Open the marketplace in your browser and choose **Share a skill**. Pick who it is for (just you, or one of your teams), then drag in what you already have: a skill folder, a folder of skill folders (a skill pack), a `SKILL.md`, a zip, or an MCP server's `.json`. Skills you use in Claude Code live in `%USERPROFILE%\.claude\skills`. To change a published skill, edit it on your machine and choose **Upload a new version** on its page. The rest of this page is the command-line route.

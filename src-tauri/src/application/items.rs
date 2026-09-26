@@ -519,6 +519,7 @@ async fn discard_pending(runtime: &RuntimeState) {
 
 fn wipe_app_state(paths: &SystemPaths) -> Result<(), String> {
     crate::ledger::remove_files(&paths.app_data())?;
+    crate::tutorial::remove_skill(paths)?;
     for root in paths.state_roots() {
         match crate::fs_retry::remove_dir_all(&root) {
             Ok(()) => {}

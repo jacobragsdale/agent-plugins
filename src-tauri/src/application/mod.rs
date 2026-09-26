@@ -94,6 +94,15 @@ pub(crate) async fn run_tutorial(target: crate::agent_profiles::TargetId) -> Res
     .await
 }
 
+/// Opens the app with a prompt that writes a skill with the person and publishes it.
+#[cfg(feature = "app")]
+pub(crate) async fn create_skill(target: crate::agent_profiles::TargetId) -> Result<(), String> {
+    run_blocking("Create a skill", move || {
+        crate::tutorial::create_skill(&crate::paths::SystemPaths::from_system()?, target)
+    })
+    .await
+}
+
 /// Stops offering the skill tutorial.
 #[cfg(feature = "app")]
 pub(crate) async fn dismiss_tutorial() -> Result<(), String> {
