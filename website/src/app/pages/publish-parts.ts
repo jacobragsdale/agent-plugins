@@ -4,7 +4,6 @@ import { MatButtonModule } from "@angular/material/button";
 import { MatButtonToggleModule } from "@angular/material/button-toggle";
 import { MatFormFieldModule } from "@angular/material/form-field";
 import { MatInputModule } from "@angular/material/input";
-import { RouterLink } from "@angular/router";
 import type { ApiError } from "../api";
 import type { Bump } from "../format";
 import type { SkillGroup } from "../format";
@@ -193,14 +192,13 @@ export class UploadPicker {
 /** Version, notes, tags, and the technical details a publisher may want to see. */
 @Component({
   selector: "app-version-fields",
-  imports: [RouterLink, MatButtonToggleModule, MatFormFieldModule, MatInputModule],
+  imports: [MatButtonToggleModule, MatFormFieldModule, MatInputModule],
   templateUrl: "./version-fields.html",
   styleUrl: "./version-fields.scss",
   host: { class: "card stack" }
 })
 export class VersionFields {
   public readonly isNew = input.required<boolean>();
-  public readonly reviewed = input.required<boolean>();
   public readonly version = input.required<string>();
   public readonly space = input.required<string>();
   public readonly packageId = input.required<string>();
@@ -211,7 +209,7 @@ export class VersionFields {
   public readonly idOverride = model.required<string | null>();
 
   protected readonly text = text;
-  protected readonly noteLabel = computed(() => (this.isNew() ? "Note for the reviewer (optional)" : "What changed? (optional)"));
+  protected readonly noteLabel = computed(() => (this.isNew() ? "Notes for this version (optional)" : "What changed? (optional)"));
 
   protected setBump(value: unknown): void {
     if (value === "patch" || value === "minor" || value === "major") {

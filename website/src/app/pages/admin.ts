@@ -3,7 +3,7 @@ import { MatDialog } from "@angular/material/dialog";
 import { MatProgressBarModule } from "@angular/material/progress-bar";
 import { MatSnackBar } from "@angular/material/snack-bar";
 import { MatTabsModule } from "@angular/material/tabs";
-import type { PendingReview, Report } from "../api";
+import type { PublicReview, Report } from "../api";
 import { Api, ApiError } from "../api";
 import { Session } from "../session";
 import { prompt } from "../shared/dialogs";
@@ -23,35 +23,35 @@ export class AdminPage {
   protected readonly summary = resource({ loader: () => this.api.summary() });
   protected readonly busy = signal(false);
 
-  protected readonly reviewsLabel = computed(() => `Waiting for review (${String(this.reviews.hasValue() ? this.reviews.value().length : 0)})`);
+  protected readonly reviewsLabel = computed(() => `MCP servers for everyone (${String(this.reviews.hasValue() ? this.reviews.value().length : 0)})`);
   protected readonly reportsLabel = computed(() => `Reports (${String(this.reports.hasValue() ? this.reports.value().filter((report) => report.resolvedAt === null).length : 0)})`);
 
   protected message(error: unknown): string {
     return ApiError.from(error).message;
   }
 
-  protected approve(review: PendingReview): void {
+  protected approve(review: PublicReview): void {
     runTask(this.decide(review, "approve", ""));
   }
 
-  protected reject(review: PendingReview): void {
-    runTask(this.askForChanges(review));
+  protected decline(review: PublicReview): void {
+    runTask(this.askWhy(review));
   }
 
   protected resolve(report: Report): void {
     runTask(this.markResolved(report));
   }
 
-  private async askForChanges(review: PendingReview): Promise<void> {
+  private async askWhy(review: PublicReview): Promise<void> {
     const note = await prompt(this.dialog, {
-      title: `Ask for changes to ${review.name}`,
-      message: "The publisher sees your note on My skills and can publish a fixed version.",
-      confirm: "Send back",
+      title: `Keep ${review.name} from everyone?`,
+      message: "The people who can use it now keep it. The publisher sees your note, and their next version asks again.",
+      confirm: "Decline",
       field: { label: "What needs to change?", hint: "Be specific and kind.", required: true },
       danger: true
     });
     if (note !== undefined) {
-      await this.decide(review, "reject", note);
+      await this.decide(review, "decline", note);
     }
   }
 
@@ -66,11 +66,11 @@ export class AdminPage {
     }
   }
 
-  private async decide(review: PendingReview, decision: "approve" | "reject", note: string): Promise<void> {
+  private async decide(review: PublicReview, decision: "approve" | "decline", note: string): Promise<void> {
     this.busy.set(true);
     try {
-      await this.api.review(review.namespace, review.packageId, review.version, decision, note);
-      this.snackBar.open(decision === "approve" ? `${review.name} ${review.version} is live.` : `${review.name} ${review.version} was sent back.`, undefined, { duration: 4000 });
+      await this.api.review(review.namespace, review.packageId, decision, note);
+      this.snackBar.open(decision === "approve" ? `Everyone can see ${review.name} now.` : `${review.name} stays with the people who have it.`, undefined, { duration: 4000 });
     } catch (error) {
       this.snackBar.open(ApiError.from(error).message, "Dismiss");
     } finally {

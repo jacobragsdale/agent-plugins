@@ -1,24 +1,4 @@
-<section class="card">
-  <h2>Get it</h2>
-  @if (item().liveVersion === null) {
-    <p class="muted">Not available to install. Its status above says why.</p>
-  } @else {
-    <ol class="get">
-      <li>Open <strong>Agent Plugins</strong> on your PC.</li>
-      <li>
-        Find <strong>{{ item().name }}</strong
-        >. Search helps.
-      </li>
-      <li>Click <strong>Install</strong>. It's added to every AI assistant the app found.</li>
-    </ol>
-    <a mat-button routerLink="/" fragment="download"><app-icon name="download" />Don't have the app?</a>
-  }
-  @if (hasServer()) {
-    <p class="notice">
-      This includes an <strong>MCP server</strong>, a small program that runs on your PC so the assistant can use a tool. The app shows exactly what it runs and asks you before installing.
-    </p>
-  }
-</section>
+<app-get-it class="card" [item]="item()" [skills]="skills()" [hasServer]="hasServer()" />
 
 @if (entry(); as listed) {
   <section class="card facts">
@@ -35,8 +15,13 @@
 
 @if (version(); as shown) {
   <details class="technical">
-    <summary>Technical details</summary>
+    <summary>Other ways to install</summary>
     <dl>
+      <dt>Command line</dt>
+      <dd>
+        <code>{{ installCommand() }}</code>
+        <button mat-button type="button" (click)="copy()">Copy</button>
+      </dd>
       <dt>ID</dt>
       <dd>
         <code>{{ item().id }}</code>
@@ -49,15 +34,15 @@
       <dd>
         <code>{{ shown.archiveDigest }}</code>
       </dd>
-      <dt>Command line</dt>
-      <dd>
-        <code>{{ installCommand() }}</code>
-        <button mat-button type="button" (click)="copy()">Copy</button>
-      </dd>
     </dl>
   </details>
 }
 
-@if (canReport()) {
-  <button mat-button type="button" class="report" (click)="report.emit()"><app-icon name="flag" />Report a problem</button>
-}
+<div class="row actions">
+  @if (canSuggest()) {
+    <a mat-button [routerLink]="['/p', item().namespace, item().packageId, 'suggest']"><app-icon name="edit" />Suggest a change</a>
+  }
+  @if (canReport()) {
+    <button mat-button type="button" class="report" (click)="report.emit()"><app-icon name="flag" />Report a problem</button>
+  }
+</div>

@@ -1,36 +1,30 @@
 import { Component, computed, input, output, signal } from "@angular/core";
 import { MatButtonModule } from "@angular/material/button";
 import { RouterLink } from "@angular/router";
-import type { PendingReview, Report, Summary } from "../api";
-import { archiveUrl } from "../api";
+import type { PublicReview, Report, Summary } from "../api";
+import { archiveUrl, versionFiles } from "../api";
 import { formatAge } from "../format";
 import { FileViewer } from "../shared/file-viewer";
 import { Icon } from "../shared/icon";
 import { describeKinds } from "../shared/package-card";
 
-/** One version waiting for an admin, with its files a click away. */
+/** A package with an MCP server that everyone could see, waiting for an admin, with its files a click away. */
 @Component({
   selector: "app-review-card",
-  imports: [MatButtonModule, FileViewer, Icon],
+  imports: [RouterLink, MatButtonModule, FileViewer, Icon],
   template: `
     <div class="row">
       <div class="grow">
         <h2>
-          {{ review().name }} <span class="muted">{{ review().version }}</span>
+          <a [routerLink]="['/p', review().namespace, review().packageId]">{{ review().name }}</a> <span class="muted">{{ review().version }}</span>
         </h2>
         <p class="muted">
           <code>{{ review().id }}</code> · {{ kinds() }} · by {{ review().publishedBy }} · {{ age() }}
         </p>
       </div>
-      @if (review().firstVersion) {
-        <span class="badge pending">New</span>
-      } @else {
-        <span class="badge">{{ review().liveVersion === null ? "Nothing live now" : "Replaces " + review().liveVersion }}</span>
-      }
-      @if (hasServer()) {
-        <span class="badge rejected" title="Runs a program on people's PCs"><app-icon name="shield" />MCP server</span>
-      }
+      <span class="badge rejected" title="Runs a program on people's PCs"><app-icon name="shield" />MCP server</span>
     </div>
+    <p class="muted">Its owners, their team, and people they shared it with can already use it. Approving lets everyone see it, including later versions.</p>
     @if (review().changelog; as changelog) {
       <p class="note"><strong>Publisher's note:</strong> {{ changelog }}</p>
     }
@@ -38,11 +32,11 @@ import { describeKinds } from "../shared/package-card";
       <button mat-stroked-button type="button" [attr.aria-expanded]="open()" (click)="open.set(!open())"><app-icon name="description" />{{ open() ? "Hide files" : "Read the files" }}</button>
       <a mat-button [href]="archive()" download><app-icon name="download" />Download zip</a>
       <span class="spacer"></span>
-      <button mat-button type="button" [disabled]="busy()" (click)="reject.emit(review())"><app-icon name="close" />Ask for changes</button>
-      <button mat-flat-button type="button" [disabled]="busy()" (click)="approve.emit(review())"><app-icon name="check" />Approve</button>
+      <button mat-button type="button" [disabled]="busy()" (click)="decline.emit(review())"><app-icon name="close" />Decline</button>
+      <button mat-flat-button type="button" [disabled]="busy()" (click)="approve.emit(review())"><app-icon name="check" />Approve for everyone</button>
     </div>
     @if (open()) {
-      <app-file-viewer [ns]="review().namespace" [packageId]="review().packageId" [version]="review().version" />
+      <app-file-viewer [source]="files()" />
     }
   `,
   styles: `
@@ -60,23 +54,23 @@ import { describeKinds } from "../shared/package-card";
         margin: 0.25rem 0 0;
       }
     }
-    .note {
+    p {
       margin: 0;
     }
   `,
   host: { class: "card" }
 })
 export class ReviewCard {
-  public readonly review = input.required<PendingReview>();
+  public readonly review = input.required<PublicReview>();
   public readonly busy = input.required<boolean>();
-  public readonly approve = output<PendingReview>();
-  public readonly reject = output<PendingReview>();
+  public readonly approve = output<PublicReview>();
+  public readonly decline = output<PublicReview>();
 
   protected readonly open = signal(false);
   protected readonly kinds = computed(() => describeKinds(this.review().componentKinds));
-  protected readonly hasServer = computed(() => this.review().componentKinds.includes("mcpServer"));
   protected readonly age = computed(() => formatAge(this.review().publishedAt));
   protected readonly archive = computed(() => archiveUrl(this.review().namespace, this.review().packageId, this.review().version));
+  protected readonly files = computed(() => versionFiles(this.review().namespace, this.review().packageId, this.review().version));
 }
 
 interface ReportRow {
@@ -108,7 +102,7 @@ interface ReportRow {
     } @empty {
       <p class="muted">No reports.</p>
     }
-    <p class="muted">To take something down, open it and withdraw its version.</p>
+    <p class="muted">To take something down, open it and choose Remove from every PC.</p>
   `,
   styles: `
     :host {

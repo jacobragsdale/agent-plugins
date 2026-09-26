@@ -1,4 +1,4 @@
-import { Component, computed, inject, resource, signal } from "@angular/core";
+import { Component, computed, inject, input, resource, signal } from "@angular/core";
 import { MatButtonModule } from "@angular/material/button";
 import { MatButtonToggleModule } from "@angular/material/button-toggle";
 import { MatFormFieldModule } from "@angular/material/form-field";
@@ -6,26 +6,57 @@ import { MatInputModule } from "@angular/material/input";
 import { MatProgressBarModule } from "@angular/material/progress-bar";
 import { MatSelectModule } from "@angular/material/select";
 import { RouterLink } from "@angular/router";
-import type { IndexPackage, Lane } from "../api";
+import type { IndexBundle, IndexPackage, Lane } from "../api";
 import { Api, ApiError } from "../api";
 import { formatAge } from "../format";
 import { Session } from "../session";
+import { BundleGrid } from "../shared/bundle-card";
 import { Icon } from "../shared/icon";
 import { PackageCard } from "../shared/package-card";
+import { SharedBanner } from "../shared/shared-banner";
 
 type LaneFilter = Lane | "all";
 
+/** What narrowed the list: someone shared a space, or a team page asked for its skills. */
+@Component({
+  selector: "app-browse-scope",
+  imports: [RouterLink, MatButtonModule, SharedBanner],
+  template: `
+    <app-shared-banner [by]="shared()" what="these skills" />
+    @if (space() !== undefined) {
+      <div class="row">
+        <span class="badge team">Showing {{ spaceName() }} only</span>
+        <a mat-button routerLink="/browse">Show everything</a>
+      </div>
+    }
+  `,
+  styles: `
+    :host {
+      display: grid;
+      gap: 1rem;
+    }
+  `
+})
+export class BrowseScope {
+  public readonly shared = input.required<string | undefined>();
+  public readonly space = input.required<string | undefined>();
+  public readonly spaceName = input.required<string | undefined>();
+}
+
 @Component({
   selector: "app-browse",
-  imports: [RouterLink, MatButtonModule, MatButtonToggleModule, MatFormFieldModule, MatInputModule, MatProgressBarModule, MatSelectModule, Icon, PackageCard],
+  imports: [RouterLink, MatButtonModule, MatButtonToggleModule, MatFormFieldModule, MatInputModule, MatProgressBarModule, MatSelectModule, Icon, PackageCard, BundleGrid, BrowseScope],
   template: `
     <div class="page stack">
       <header class="row">
-        <div>
+        <div class="grow">
           <h1>Browse skills</h1>
           <p class="lead">Everything here also appears in the Agent Plugins app on your PC, ready to install.</p>
         </div>
+        <a mat-stroked-button routerLink="/bundles/new"><app-icon name="layers" />New bundle</a>
       </header>
+
+      <app-browse-scope [shared]="shared()" [space]="space()" [spaceName]="spaceName()" />
 
       <div class="filters row">
         <mat-form-field appearance="outline" subscriptSizing="dynamic" class="search">
@@ -50,6 +81,7 @@ type LaneFilter = Lane | "all";
       </div>
 
       @if (index.hasValue()) {
+        <app-bundle-grid [bundles]="bundles()" />
         <p class="muted" aria-live="polite">{{ summary() }}</p>
         @if (results().length > 0) {
           <div class="grid">
@@ -96,9 +128,17 @@ type LaneFilter = Lane | "all";
     .empty {
       text-align: center;
     }
+    .grow {
+      flex: 1 1 24rem;
+    }
   `
 })
 export class BrowsePage {
+  /** One space's skills, when a link or a team page asked for them. */
+  public readonly space = input<string>();
+  /** Who shared the space, when the page was opened from a share link. */
+  public readonly shared = input<string>();
+
   protected readonly session = inject(Session);
   protected readonly query = signal("");
   protected readonly lane = signal<LaneFilter>("all");
@@ -111,7 +151,7 @@ export class BrowsePage {
   /** Every team with a visible skill, for the picker. */
   protected readonly teams = computed(() => {
     const teams = new Map<string, { namespace: string; displayName: string; count: number }>();
-    for (const item of this.index.hasValue() ? this.index.value() : []) {
+    for (const item of this.index.hasValue() ? this.index.value().packages : []) {
       if (item.lane === "team") {
         const team = teams.get(item.namespace) ?? { namespace: item.namespace, displayName: item.publisher.displayName, count: 0 };
         team.count += 1;
@@ -121,25 +161,41 @@ export class BrowsePage {
     return [...teams.values()].toSorted((left, right) => left.displayName.localeCompare(right.displayName));
   });
 
+  private readonly words = computed(() =>
+    this.query()
+      .toLowerCase()
+      .split(/\s+/u)
+      .filter((word) => word.length > 0)
+  );
+
+  /** Whether an item passes the lane, team, space, and search filters. */
+  private matches(item: IndexPackage | IndexBundle, text: readonly string[]): boolean {
+    const lane = this.lane();
+    const teams = this.selectedTeams();
+    const space = this.space();
+    const haystack = [item.name, item.description, item.id, item.publisher.displayName, ...text].join(" ").toLowerCase();
+    return (
+      (lane === "all" || item.lane === lane) &&
+      (teams.length === 0 || teams.includes(item.namespace)) &&
+      (space === undefined || item.namespace === space) &&
+      this.words().every((word) => haystack.includes(word))
+    );
+  }
+
+  protected readonly spaceName = computed(
+    () => (this.index.hasValue() ? this.index.value().packages.find((item) => item.namespace === this.space())?.publisher.displayName : undefined) ?? this.space()
+  );
+
+  protected readonly bundles = computed<readonly IndexBundle[]>(() => (this.index.hasValue() ? this.index.value().bundles.filter((bundle) => this.matches(bundle, [])) : []));
+
   protected readonly results = computed<readonly IndexPackage[]>(() => {
     if (!this.index.hasValue()) {
       return [];
     }
 
-    const words = this.query()
-      .toLowerCase()
-      .split(/\s+/u)
-      .filter((word) => word.length > 0);
-    const lane = this.lane();
-    const teams = this.selectedTeams();
     return this.index
       .value()
-      .filter((item) => lane === "all" || item.lane === lane)
-      .filter((item) => teams.length === 0 || teams.includes(item.namespace))
-      .filter((item) => {
-        const haystack = [item.name, item.description, item.id, item.publisher.displayName, ...item.tags].join(" ").toLowerCase();
-        return words.every((word) => haystack.includes(word));
-      })
+      .packages.filter((item) => this.matches(item, item.tags))
       .toSorted((left, right) => (right.installedBase !== left.installedBase ? right.installedBase - left.installedBase : left.name.localeCompare(right.name)));
   });
 

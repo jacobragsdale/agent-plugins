@@ -1,4 +1,4 @@
-import { fileTree, groupBySkill, isJunk, nextVersion, newestFirst, parseSkillMd, slugify } from "./format";
+import { appLink, fileTree, groupBySkill, installState, isJunk, nextVersion, newestFirst, parseSkillMd, slugify, suggestNamespace, versionAtLeast } from "./format";
 
 describe("nextVersion", () => {
   it("starts at 1.0.0", () => {
@@ -78,5 +78,50 @@ describe("fileTree", () => {
     expect([a?.name, a?.path, a?.files.map((file) => file.name)]).toEqual(["a", "s/a/", ["top.md"]]);
     const c = a?.folders[0]?.folders[0];
     expect([c?.path, c?.files.map((file) => file.item.path)]).toEqual(["s/a/b/c/", ["s/a/b/c/deep.md"]]);
+  });
+});
+
+describe("installState", () => {
+  const app = { version: "0.2.0", installed: ["jacob/review", "data/sql"] };
+
+  it("offers the app first when it's missing or too old to open links", () => {
+    expect(installState(null, ["jacob/review"])).toBe("get");
+    expect(installState({ ...app, version: "0.1.9" }, ["jacob/review"])).toBe("update");
+    expect(installState({ ...app, version: "banana" }, ["jacob/review"])).toBe("update");
+  });
+
+  it("says installed only when every covered package is", () => {
+    expect(installState(app, ["jacob/review"])).toBe("installed");
+    expect(installState(app, ["jacob/review", "data/sql"])).toBe("installed");
+    expect(installState(app, ["jacob/review", "data/other"])).toBe("install");
+    expect(installState({ ...app, version: "1.0.0" }, [])).toBe("install");
+  });
+
+  it("offers Install while the caller isn't known yet", () => {
+    expect(installState(undefined, ["jacob/review"])).toBe("install");
+  });
+});
+
+describe("versionAtLeast", () => {
+  it("compares numerically", () => {
+    expect(versionAtLeast("0.10.0", "0.2.0")).toBe(true);
+    expect(versionAtLeast("0.2.0", "0.2.0")).toBe(true);
+    expect(versionAtLeast("0.2.0-beta.1", "0.2.0")).toBe(false);
+  });
+});
+
+describe("appLink", () => {
+  it("builds the desktop app's links", () => {
+    expect(appLink("install", "jacob/review")).toBe("agent-plugins://install/jacob/review");
+    expect(appLink("open", "data/pack/one")).toBe("agent-plugins://open/data/pack/one");
+  });
+});
+
+describe("suggestNamespace", () => {
+  it("makes a valid short name from a team's name", () => {
+    expect(suggestNamespace("Data Engineering")).toBe("data-engineering");
+    expect(suggestNamespace("Platform & Infrastructure Team")).toBe("platform-infrast");
+    expect(suggestNamespace("42 Club")).toBe("t-42-club");
+    expect(suggestNamespace("X")).toBe("");
   });
 });

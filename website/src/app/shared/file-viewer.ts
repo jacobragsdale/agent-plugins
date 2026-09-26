@@ -9,6 +9,14 @@ import { Markdown, withoutFrontmatter } from "./markdown";
 
 const previewLimit = 1024 * 1024;
 
+/** How a suggested file differs from the live version; unchanged files carry no badge. */
+const changes: Readonly<Record<NonNullable<PackageFile["status"]>, { readonly label: string; readonly badge: string } | null>> = {
+  added: { label: "New", badge: "badge live" },
+  changed: { label: "Changed", badge: "badge pending" },
+  removed: { label: "Removed", badge: "badge rejected" },
+  unchanged: null
+};
+
 /** One folder level of a file list: its files, then each subfolder, which renders this component again. */
 @Component({
   selector: "app-file-branch",
@@ -20,6 +28,9 @@ const previewLimit = 1024 * 1024;
           <button type="button" [class.selected]="file.item.path === selected()" [attr.aria-current]="file.item.path === selected()" (click)="picked.emit(file.item)">
             <app-icon [name]="file.name.endsWith('.md') ? 'description' : 'code'" />
             <span class="path">{{ file.name }}</span>
+            @if (changes[file.item.status ?? "unchanged"]; as change) {
+              <span [class]="change.badge">{{ change.label }}</span>
+            }
             <span class="size">{{ size(file.item) }}</span>
           </button>
         </li>
@@ -81,6 +92,7 @@ const previewLimit = 1024 * 1024;
   `
 })
 export class FileBranch {
+  protected readonly changes = changes;
   public readonly node = input.required<FileTree<PackageFile>>();
   public readonly selected = input<string>();
   public readonly picked = output<PackageFile>();
@@ -90,7 +102,7 @@ export class FileBranch {
   }
 }
 
-/** Lists a version's files and previews the selected one: Markdown rendered, anything else as text. */
+/** Lists a version's (or a suggestion's) files and previews the selected one: Markdown rendered, anything else as text. */
 @Component({
   selector: "app-file-viewer",
   imports: [MatProgressBarModule, Icon, Markdown, FileBranch],
@@ -109,7 +121,9 @@ export class FileBranch {
         </ul>
         <section class="preview" aria-live="polite">
           @if (selected(); as file) {
-            @if (file.size > previewLimit) {
+            @if (file.status === "removed") {
+              <p class="muted">This file is removed in this suggestion.</p>
+            } @else if (file.size > previewLimit) {
               <p class="muted">This file is too large to preview. <a [href]="download(file)" download>Download it</a>.</p>
             } @else if (content.isLoading()) {
               <mat-progress-bar mode="indeterminate" aria-label="Loading file" />
@@ -171,17 +185,13 @@ export class FileBranch {
   `
 })
 export class FileViewer {
-  public readonly ns = input.required<string>();
-  public readonly packageId = input.required<string>();
-  public readonly version = input.required<string>();
+  /** `versionFiles(…)` or `suggestionFiles(…)`. */
+  public readonly source = input.required<string>();
 
   protected readonly previewLimit = previewLimit;
   private readonly api = inject(Api);
 
-  protected readonly files = resource({
-    params: () => ({ ns: this.ns(), packageId: this.packageId(), version: this.version() }),
-    loader: ({ params }) => this.api.files(params.ns, params.packageId, params.version)
-  });
+  protected readonly files = resource({ params: () => ({ source: this.source() }), loader: ({ params }) => this.api.files(params.source) });
 
   protected readonly groups = computed(() => (this.files.hasValue() ? groupBySkill(this.files.value()) : []));
 
@@ -194,9 +204,9 @@ export class FileViewer {
   protected readonly content = resource({
     params: () => {
       const file = this.selected();
-      return file === undefined || file.size > previewLimit ? undefined : { ns: this.ns(), packageId: this.packageId(), version: this.version(), path: file.path };
+      return file === undefined || file.size > previewLimit || file.status === "removed" ? undefined : { source: this.source(), path: file.path };
     },
-    loader: ({ params }) => this.api.fileText(params.ns, params.packageId, params.version, params.path)
+    loader: ({ params }) => this.api.fileText(params.source, params.path)
   });
 
   protected readonly rendered = computed(() => {
@@ -212,7 +222,7 @@ export class FileViewer {
   }
 
   protected download(file: PackageFile): string {
-    return fileUrl(this.ns(), this.packageId(), this.version(), file.path);
+    return fileUrl(this.source(), file.path);
   }
 
   protected message(error: unknown): string {

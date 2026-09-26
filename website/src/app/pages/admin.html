@@ -1,19 +1,19 @@
 <div class="page stack">
   <header>
     <h1>Admin</h1>
-    <p class="lead">Check new skills before they go live, handle reports, and see how the marketplace is used.</p>
+    <p class="lead">Check MCP servers before everyone can see them, handle reports, and see how the marketplace is used.</p>
   </header>
 
   <mat-tab-group mat-stretch-tabs="false" animationDuration="0ms">
     <mat-tab [label]="reviewsLabel()">
       <div class="tab stack">
         @if (reviews.hasValue()) {
-          @for (review of reviews.value(); track review.id + "@" + review.version) {
-            <app-review-card [review]="review" [busy]="busy()" (approve)="approve($event)" (reject)="reject($event)" />
+          @for (review of reviews.value(); track review.id) {
+            <app-review-card [review]="review" [busy]="busy()" (approve)="approve($event)" (decline)="decline($event)" />
           } @empty {
             <div class="card empty">
               <app-icon name="check" />
-              <p>Nothing is waiting. New skills and MCP servers appear here.</p>
+              <p>Nothing is waiting. An MCP server shows up here when its publisher makes it available to everyone.</p>
             </div>
           }
         } @else if (reviews.error(); as error) {

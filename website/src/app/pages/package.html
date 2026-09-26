@@ -1,12 +1,23 @@
 <div class="page stack">
   <a class="back" routerLink="/browse"><app-icon name="arrowBack" />All skills</a>
 
+  <app-shared-banner [by]="shared()" what="this" />
+
   @if (detail.hasValue()) {
     @let item = detail.value();
     <app-package-header [item]="item" [entry]="entry()" [kinds]="kinds()" />
 
     @if (ownerStatus(); as status) {
-      <app-owner-panel [ns]="ns()" [pkg]="pkg()" [name]="item.name" [status]="status" (changed)="listing.reload()" />
+      <app-owner-panel
+        [ns]="ns()"
+        [pkg]="pkg()"
+        [name]="item.name"
+        [spaceName]="space().spaceName"
+        [owners]="space().owners"
+        [revoked]="item.revoked"
+        [status]="status"
+        (changed)="detail.reload(); listing.reload()"
+      />
     }
 
     <div class="columns">
@@ -17,6 +28,16 @@
         <mat-tab label="Versions">
           <app-version-list [ns]="ns()" [pkg]="pkg()" [versions]="versions()" [liveVersion]="item.liveVersion" [owner]="owner()" (withdraw)="withdraw($event)" (restore)="restore($event)" />
         </mat-tab>
+        @if (owner() || suggestionRows().length > 0) {
+          <mat-tab [label]="waiting() > 0 ? 'Suggestions (' + waiting() + ')' : 'Suggestions'">
+            <div class="tab">
+              <p class="muted">
+                {{ owner() ? "Changes other people suggested. Open one to read it, then publish it or say why not." : "Changes you suggested, and what the owners decided." }}
+              </p>
+              <app-suggestion-list [suggestions]="suggestionRows()" empty="Nobody has suggested a change yet." />
+            </div>
+          </mat-tab>
+        }
         @if (usage(); as stats) {
           <mat-tab label="Usage">
             <app-package-usage [stats]="stats" />
@@ -24,12 +45,12 @@
         }
       </mat-tab-group>
 
-      <app-package-side [item]="item" [entry]="entry()" [version]="shownVersion()" [canReport]="canReport()" (report)="report()" />
+      <app-package-side [item]="item" [entry]="entry()" [version]="shownVersion()" [skills]="packSkills()" [canReport]="canReport()" [canSuggest]="canSuggest()" (report)="report()" />
     </div>
   } @else if (loadProblem(); as problem) {
     <div class="card">
       <h1>{{ problem.status === 404 ? "Not found" : "Couldn't load this skill" }}</h1>
-      <p class="muted">{{ problem.status === 404 ? "This skill doesn't exist, was withdrawn, or isn't shared with you." : problem.message }}</p>
+      <p class="muted">{{ problem.status === 404 ? "This skill doesn't exist, was removed, or isn't shared with you." : problem.message }}</p>
       <a mat-stroked-button routerLink="/browse">Browse skills</a>
     </div>
   } @else {

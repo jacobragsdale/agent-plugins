@@ -5,26 +5,35 @@ import { MatProgressBarModule } from "@angular/material/progress-bar";
 import { MatSnackBar } from "@angular/material/snack-bar";
 import { MatTabsModule } from "@angular/material/tabs";
 import { RouterLink } from "@angular/router";
+import { z } from "zod";
 import type { PackageVersion } from "../api";
-import { Api, ApiError } from "../api";
+import { Api, ApiError, versionFiles } from "../api";
 import { newestFirst } from "../format";
 import { Session } from "../session";
 import { prompt } from "../shared/dialogs";
 import { Icon } from "../shared/icon";
 import { describeKinds } from "../shared/package-card";
+import { spaceWords } from "../shared/share-dialog";
+import { SharedBanner } from "../shared/shared-banner";
 import { packageStatus } from "../shared/status";
+import { SuggestionList } from "../shared/suggestion-list";
 import { runTask } from "../shared/tasks";
 import { OwnerPanel, PackageHeader, PackageSide, PackageUsage, VersionFiles, VersionList } from "./package-parts";
 
+/** Just enough of agent-plugins.json to list a pack's skills. */
+const manifestSchema = z.object({ packages: z.array(z.object({ components: z.array(z.object({ kind: z.string(), id: z.string().optional() })) })) });
+
 @Component({
   selector: "app-package",
-  imports: [RouterLink, MatButtonModule, MatProgressBarModule, MatTabsModule, Icon, PackageHeader, OwnerPanel, VersionFiles, VersionList, PackageUsage, PackageSide],
+  imports: [RouterLink, MatButtonModule, MatProgressBarModule, MatTabsModule, Icon, PackageHeader, OwnerPanel, VersionFiles, VersionList, PackageUsage, PackageSide, SuggestionList, SharedBanner],
   templateUrl: "./package.html",
   styleUrl: "./package.scss"
 })
 export class PackagePage {
   public readonly ns = input.required<string>();
   public readonly pkg = input.required<string>();
+  /** Who shared it, when the page was opened from a share link. */
+  public readonly shared = input<string>();
 
   private readonly session = inject(Session);
   private readonly api = inject(Api);
@@ -34,17 +43,48 @@ export class PackagePage {
   protected readonly detail = resource({ params: () => ({ ns: this.ns(), pkg: this.pkg() }), loader: ({ params }) => this.api.package(params.ns, params.pkg) });
 
   /** Publisher, lane, and install counts come from the index, which lists live packages only. */
-  protected readonly listing = resource({ params: () => ({ id: `${this.ns()}/${this.pkg()}` }), loader: async ({ params }) => (await this.api.index()).find((item) => item.id === params.id) ?? null });
+  protected readonly listing = resource({
+    params: () => ({ id: `${this.ns()}/${this.pkg()}` }),
+    loader: async ({ params }) => (await this.api.index()).packages.find((item) => item.id === params.id) ?? null
+  });
 
   protected readonly loadProblem = computed(() => (this.detail.error() === undefined ? null : ApiError.from(this.detail.error())));
   protected readonly entry = computed(() => (this.listing.hasValue() ? this.listing.value() : null));
 
   protected readonly owner = computed(() => {
+    if (this.detail.hasValue()) {
+      return this.detail.value().owned;
+    }
+
     const me = this.session.me();
     return me !== null && (me.admin || me.namespaces.includes(this.ns()));
   });
 
+  protected readonly live = computed(() => this.detail.hasValue() && this.detail.value().liveVersion !== null && !this.detail.value().revoked);
   protected readonly canReport = computed(() => this.session.me() !== null && !this.owner());
+  protected readonly canSuggest = computed(() => this.canReport() && this.live());
+  protected readonly space = computed(() => spaceWords(this.session.me(), this.ns(), this.entry()?.publisher.displayName ?? this.ns()));
+
+  /** Owners see every suggestion; anyone else sees their own, so the tab shows only when there is something. */
+  protected readonly suggestions = resource({
+    params: () => (this.session.me() !== null && this.detail.hasValue() ? { ns: this.ns(), pkg: this.pkg() } : undefined),
+    loader: ({ params }) => this.api.suggestions(params.ns, params.pkg)
+  });
+
+  protected readonly suggestionRows = computed(() => (this.suggestions.hasValue() ? this.suggestions.value() : []));
+  protected readonly waiting = computed(() => this.suggestionRows().filter((suggestion) => suggestion.state === "pending").length);
+
+  /** A pack's skills, read from the live version's manifest, so each can be installed on its own. */
+  protected readonly skills = resource({
+    params: () => (this.live() ? { files: versionFiles(this.ns(), this.pkg(), this.detail.value()?.liveVersion ?? "") } : undefined),
+    loader: async ({ params }) => {
+      const manifest = manifestSchema.safeParse(JSON.parse(await this.api.fileText(params.files, "agent-plugins.json")));
+      const skills = manifest.success ? (manifest.data.packages[0]?.components ?? []).filter((component) => component.kind === "skill").flatMap((component) => component.id ?? []) : [];
+      return skills.length > 1 ? skills : [];
+    }
+  });
+
+  protected readonly packSkills = computed(() => (this.skills.hasValue() ? this.skills.value() : []));
 
   protected readonly stats = resource({
     params: () => (this.owner() && this.detail.hasValue() && this.detail.value().liveVersion !== null ? { ns: this.ns(), pkg: this.pkg() } : undefined),
@@ -62,7 +102,7 @@ export class PackagePage {
     return newestFirst(detail.versions.map((version) => version.version)).flatMap((number) => detail.versions.filter((version) => version.version === number));
   });
 
-  /** Readers see the live version; owners start on the newest one, pending or not. */
+  /** Readers see the live version; owners start on the newest one that isn't withdrawn. */
   protected readonly shown = linkedSignal<string | null>(() => {
     if (!this.detail.hasValue()) {
       return null;
@@ -93,7 +133,7 @@ export class PackagePage {
     const confirmed = await prompt(this.dialog, {
       title: `Withdraw version ${version.version}?`,
       message: live
-        ? "People who don't have it yet won't be able to install it. The previous approved version, if any, becomes the live one again."
+        ? "People who don't have it yet won't be able to install it. The previous version, if any, becomes the live one again."
         : "It will no longer be offered to anyone. You can restore it later.",
       confirm: "Withdraw",
       danger: true
@@ -115,10 +155,7 @@ export class PackagePage {
   private async confirmRestore(version: PackageVersion): Promise<void> {
     const confirmed = await prompt(this.dialog, {
       title: `Restore version ${version.version}?`,
-      message:
-        version.reviewState === "approved"
-          ? "It will be offered again. If it's the newest approved version, it becomes the live one."
-          : "It comes back in its review state and goes live only if an admin approves it.",
+      message: "It will be offered again. If it's the newest version, it becomes the live one.",
       confirm: "Restore"
     });
     if (confirmed === undefined) {

@@ -4,6 +4,7 @@ import type { CanMatchFn } from "@angular/router";
 import { Router } from "@angular/router";
 import type { Health, Me } from "./api";
 import { Api, ApiError } from "./api";
+import { runTask } from "./shared/tasks";
 
 const devUserKey = "agent-plugins.dev-user";
 
@@ -63,12 +64,34 @@ export class Session {
   });
   public readonly isAdmin = computed(() => this.me()?.admin === true);
   public readonly devSignedIn = computed(() => this.devUser.account() !== null);
-  /** Versions waiting for an admin; shown as a badge on the Admin link. */
+  /** MCP servers waiting for an admin before everyone can see them; a badge on the Admin link. */
   public readonly pendingReviews = signal(0);
 
   private readonly api = inject(Api);
   private readonly devUser = inject(DevUser);
   private loading: Promise<SessionState> | null = null;
+
+  constructor() {
+    // Installing from the page happens in the desktop app; coming back shows what it installed.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        runTask(this.refreshMe());
+      }
+    });
+  }
+
+  /** Re-reads who the caller is and what their app reports installed, without reloading the page. */
+  public async refreshMe(): Promise<void> {
+    if (this.state().kind !== "signed-in") {
+      return;
+    }
+
+    try {
+      this.state.set({ kind: "signed-in", me: await this.api.me() });
+    } catch {
+      // The next navigation or retry reports a real outage; a stale install state is harmless.
+    }
+  }
 
   /** Resolves once the caller's identity is known. */
   public ready(): Promise<SessionState> {

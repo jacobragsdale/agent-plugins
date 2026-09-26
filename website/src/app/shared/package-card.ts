@@ -1,19 +1,20 @@
 import { Component, computed, input } from "@angular/core";
 import { RouterLink } from "@angular/router";
 import type { IndexPackage } from "../api";
-import { Icon } from "./icon";
+import { AccessBadge } from "./access-badge";
+import { InstallButton } from "./install-button";
 import { LaneBadge } from "./lane-badge";
 
 @Component({
   selector: "app-package-card",
-  imports: [RouterLink, Icon, LaneBadge],
+  imports: [RouterLink, AccessBadge, InstallButton, LaneBadge],
   template: `
-    <a class="card item" [routerLink]="link()">
+    <article class="card item">
       <div class="row head">
-        <h3>{{ item().name }}</h3>
-        @if (item().restricted) {
-          <span class="badge" title="Only some people can see this"><app-icon name="lock" />Limited</span>
-        }
+        <h3>
+          <a class="name" [routerLink]="link()">{{ item().name }}</a>
+        </h3>
+        <app-access-badge [restricted]="item().restricted" [sharedWithYou]="item().sharedWithYou" />
       </div>
       <p class="description">{{ item().description }}</p>
       <div class="row meta">
@@ -29,21 +30,26 @@ import { LaneBadge } from "./lane-badge";
           <span>{{ item().installedBase }} using it</span>
         }
       </div>
-    </a>
+      @if (install()) {
+        <app-install-button class="install" [target]="item().id" label="Install" [compact]="true" />
+      }
+    </article>
   `,
   styles: `
+    :host {
+      display: block;
+    }
     .item {
+      position: relative;
       display: grid;
       gap: 0.6rem;
       height: 100%;
-      color: inherit;
-      text-decoration: none;
       transition:
         border-color 120ms,
         box-shadow 120ms,
         transform 120ms;
       &:hover,
-      &:focus-visible {
+      &:focus-within {
         border-color: var(--mat-sys-primary);
         box-shadow: 0 8px 24px color-mix(in srgb, var(--mat-sys-shadow) 12%, transparent);
         transform: translateY(-1px);
@@ -55,6 +61,24 @@ import { LaneBadge } from "./lane-badge";
       h3 {
         margin: 0;
       }
+    }
+    /* The name's link covers the card, so the whole card opens the skill; the install button sits above it. */
+    .name {
+      color: inherit;
+      text-decoration: none;
+      &::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+      }
+      &:focus-visible {
+        outline: none;
+      }
+    }
+    .install {
+      position: relative;
+      z-index: 1;
     }
     .description {
       margin: 0;
@@ -80,6 +104,7 @@ import { LaneBadge } from "./lane-badge";
 export class PackageCard {
   public readonly item = input.required<IndexPackage>();
   public readonly age = input.required<string>();
+  public readonly install = input(true);
 
   protected readonly link = computed(() => ["/p", this.item().namespace, this.item().packageId]);
   protected readonly kind = computed(() => describeKinds(this.item().componentKinds));

@@ -52,6 +52,54 @@ export function nextVersion(existing: readonly string[], bump: Bump): string {
   }
 }
 
+/** Whether `version` is at least `minimum`; anything that is not semver is too old. */
+export function versionAtLeast(version: string, minimum: string): boolean {
+  const have = parseSemVer(version);
+  const need = parseSemVer(minimum);
+  return have !== null && need !== null && compare(have, need) >= 0;
+}
+
+/** The first desktop app that opens `agent-plugins://` links from this site. */
+export const linkMinimumVersion = "0.2.0";
+
+export type InstallState = "install" | "installed" | "get" | "update";
+
+/**
+ * What an install button offers, from the caller's desktop app as its last check-in reported it.
+ * `app` is undefined while unknown (not signed in yet); `covers` are the packages that must all be
+ * installed for it to count as installed (empty for one skill of a pack, which the app cannot report).
+ */
+export function installState(app: { readonly version: string; readonly installed: readonly string[] } | null | undefined, covers: readonly string[]): InstallState {
+  if (app === undefined) {
+    return "install";
+  }
+
+  if (app === null) {
+    return "get";
+  }
+
+  if (!versionAtLeast(app.version, linkMinimumVersion)) {
+    return "update";
+  }
+
+  return covers.length > 0 && covers.every((id) => app.installed.includes(id)) ? "installed" : "install";
+}
+
+/** The desktop app's link: `install` a package, bundle, or one pack skill (`ns/pkg/skill`), or `open` one. */
+export function appLink(verb: "install" | "open", target: string): string {
+  return `agent-plugins://${verb}/${target}`;
+}
+
+/** Namespaces: 2–16 lowercase letters, digits, and single hyphens, starting with a letter. */
+export const namespacePattern = /^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){1,15}$/u;
+
+/** A team's short name from its display name: "Data Engineering" becomes "data-engineering". */
+export function suggestNamespace(displayName: string): string {
+  const slug = slugify(displayName).slice(0, 16).replace(/-+$/u, "");
+  const lettered = /^[a-z]/u.test(slug) ? slug : `t-${slug}`.slice(0, 16).replace(/-+$/u, "");
+  return namespacePattern.test(lettered) ? lettered : "";
+}
+
 /** Sorts version strings newest first; anything that is not semver sorts last. */
 export function newestFirst(versions: readonly string[]): string[] {
   return [...versions].sort((left, right) => {

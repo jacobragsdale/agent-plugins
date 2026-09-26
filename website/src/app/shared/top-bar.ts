@@ -61,14 +61,20 @@ export class Account {
       </a>
       <nav aria-label="Main">
         <a routerLink="/browse" routerLinkActive="active" ariaCurrentWhenActive="page">Browse</a>
-        @if (session.me()) {
-          <a routerLink="/mine" routerLinkActive="active" ariaCurrentWhenActive="page">My skills</a>
+        @if (session.me(); as me) {
+          <a routerLink="/mine" routerLinkActive="active" ariaCurrentWhenActive="page" class="with-count">
+            My skills
+            @if (me.suggestionsWaiting > 0) {
+              <span class="count">{{ me.suggestionsWaiting }}<span class="visually-hidden"> suggestions waiting for you</span></span>
+            }
+          </a>
+          <a routerLink="/teams" routerLinkActive="active" ariaCurrentWhenActive="page">Teams</a>
         }
         @if (session.isAdmin()) {
           <a routerLink="/admin" routerLinkActive="active" ariaCurrentWhenActive="page" class="with-count">
             Admin
             @if (session.pendingReviews() > 0) {
-              <span class="count">{{ session.pendingReviews() }}<span class="visually-hidden"> waiting for review</span></span>
+              <span class="count">{{ session.pendingReviews() }}<span class="visually-hidden"> waiting for an admin</span></span>
             }
           </a>
         }

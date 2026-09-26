@@ -1,5 +1,7 @@
 import { Component, computed, inject, input, linkedSignal, resource, signal } from "@angular/core";
 import { MatButtonModule } from "@angular/material/button";
+import { MatFormFieldModule } from "@angular/material/form-field";
+import { MatInputModule } from "@angular/material/input";
 import { MatProgressBarModule } from "@angular/material/progress-bar";
 import { MatRadioModule } from "@angular/material/radio";
 import { MatSnackBar } from "@angular/material/snack-bar";
@@ -14,16 +16,17 @@ import { runTask } from "../shared/tasks";
 import type { Picked } from "./publish-parts";
 import { pickedArchive, Problem, UploadPicker, VersionFields } from "./publish-parts";
 
-type Mode = "new" | "upload";
+type Mode = "new" | "upload" | "suggest";
 
 const headings: Readonly<Record<Mode, readonly [string, string]>> = {
   new: ["Share a skill", "Share a skill you already use. Drop its folder or zip here, and everyone you choose can install it."],
-  upload: ["New version", "Upload the updated files. They replace the current version once published."]
+  upload: ["New version", "Upload the updated files. They replace the current version once published."],
+  suggest: ["Suggest a change", "Upload your improved files. The owners read them and decide whether to publish them."]
 };
 
 @Component({
   selector: "app-publish",
-  imports: [RouterLink, MatButtonModule, MatProgressBarModule, MatRadioModule, Icon, UploadPicker, VersionFields, Problem],
+  imports: [RouterLink, MatButtonModule, MatFormFieldModule, MatInputModule, MatProgressBarModule, MatRadioModule, Icon, UploadPicker, VersionFields, Problem],
   templateUrl: "./publish.html",
   styleUrl: "./publish.scss"
 })
@@ -31,6 +34,8 @@ export class PublishPage {
   public readonly mode = input.required<Mode>();
   public readonly ns = input<string>();
   public readonly pkg = input<string>();
+  /** The space to publish to, preselected when a team page sent the person here. */
+  public readonly to = input<string>();
 
   protected readonly session = inject(Session);
   private readonly api = inject(Api);
@@ -49,10 +54,12 @@ export class PublishPage {
     loader: ({ params }) => this.api.package(params.ns, params.pkg)
   });
 
-  protected readonly space = linkedSignal(() => this.ns() ?? this.session.me()?.namespace ?? "");
+  protected readonly space = linkedSignal(() => this.ns() ?? this.to() ?? this.session.me()?.namespace ?? "");
   protected readonly idOverride = signal<string | null>(null);
   protected readonly bump = signal<Bump>("patch");
   protected readonly changelog = signal("");
+  /** Why a suggestion is worth publishing, for the owners. */
+  protected readonly message = signal("");
   protected readonly tags = signal("");
   protected readonly picked = signal<readonly Picked[]>([]);
   protected readonly uploadTitle = signal("");
@@ -60,6 +67,7 @@ export class PublishPage {
   protected readonly problem = signal<ApiError | null>(null);
 
   protected readonly spaces = computed(() => (this.mine.value()?.spaces ?? []).map((space) => ({ namespace: space.namespace, label: space.lane === "personal" ? "Just me" : space.displayName })));
+  protected readonly suggesting = computed(() => this.mode() === "suggest");
 
   protected readonly hasTeam = computed(() => this.mine.value()?.spaces.some((space) => space.lane === "team") === true);
   protected readonly title = computed(() => (this.mode() === "new" ? this.uploadTitle() : (this.existing.value()?.name ?? "")));
@@ -81,7 +89,6 @@ export class PublishPage {
   });
 
   protected readonly taken = computed(() => this.mode() === "new" && this.mine.value()?.packages.some((item) => item.namespace === this.space() && item.packageId === this.packageId()) === true);
-  protected readonly reviewed = computed(() => !this.session.isAdmin() && (this.mode() === "new" || this.existing.value()?.liveVersion === null));
   protected readonly idProblem = computed(() => {
     if (this.taken()) {
       return `${this.spaceLabel()} already has a package called “${this.packageId()}”. Pick another name, or publish a new version of that one from My skills.`;
@@ -102,7 +109,7 @@ export class PublishPage {
       return "Sending…";
     }
 
-    return this.reviewed() ? "Send for review" : `Publish version ${this.version()}`;
+    return this.suggesting() ? "Send suggestion" : `Publish version ${this.version()}`;
   });
 
   protected readonly ready = computed(
@@ -112,7 +119,8 @@ export class PublishPage {
       !this.taken() &&
       this.space() !== "" &&
       this.picked().length > 0 &&
-      (this.mode() === "new" ? this.uploadTitle().trim().length > 0 : this.existing.hasValue())
+      (this.mode() === "new" ? this.uploadTitle().trim().length > 0 : this.existing.hasValue()) &&
+      (!this.suggesting() || this.message().trim().length > 0)
   );
 
   protected setSpace(value: unknown): void {
@@ -128,15 +136,30 @@ export class PublishPage {
     }
   }
 
+  protected setMessage(event: Event): void {
+    if (event.target instanceof HTMLTextAreaElement) {
+      this.message.set(event.target.value);
+    }
+  }
+
   private async send(): Promise<void> {
     this.submitting.set(true);
     this.problem.set(null);
     try {
       const ns = this.space();
       const packageId = this.packageId();
+      if (this.suggesting()) {
+        const suggestion = await this.api.suggest(ns, packageId, this.message().trim(), this.form());
+        this.snackBar.open("Sent. The owners will take a look.", undefined, { duration: 6000 });
+        await this.router.navigate(["/suggestions", suggestion.id]);
+        return;
+      }
+
       const published = await this.api.publish(ns, packageId, this.form());
-      const message = published.reviewState === "pending" ? "Sent for review. You'll see the result on My skills." : `Published version ${published.version}. It's live now.`;
-      this.snackBar.open(message, undefined, { duration: 6000 });
+      const message = published.waitingForPublicReview
+        ? `Published version ${published.version}. You and the people you share it with can use it now; everyone else sees it once an admin checks its MCP server.`
+        : `Published version ${published.version}. It's live now.`;
+      this.snackBar.open(message, undefined, { duration: 8000 });
       await this.router.navigate(["/p", ns, packageId]);
     } catch (error) {
       this.problem.set(ApiError.from(error));

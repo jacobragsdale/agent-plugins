@@ -6,28 +6,28 @@ import { MatSelectModule } from "@angular/material/select";
 import { MatSnackBar } from "@angular/material/snack-bar";
 import { RouterLink } from "@angular/router";
 import type { IndexPackage, PackageDetail, PackageStats, PackageVersion } from "../api";
-import { archiveUrl } from "../api";
+import { Api, ApiError, archiveUrl, versionFiles } from "../api";
 import { formatAge, formatBytes, formatDate } from "../format";
-import { editVisibility } from "../shared/dialogs";
+import { AccessBadge } from "../shared/access-badge";
+import { prompt } from "../shared/dialogs";
 import { FileViewer } from "../shared/file-viewer";
 import { Icon } from "../shared/icon";
+import { InstallButton } from "../shared/install-button";
 import { LaneBadge } from "../shared/lane-badge";
+import { share } from "../shared/share-dialog";
 import type { PackageStatus } from "../shared/status";
-import { versionState } from "../shared/status";
-import { runTask } from "../shared/tasks";
+import { copyText, runTask } from "../shared/tasks";
 
 @Component({
   selector: "app-package-header",
-  imports: [Icon, LaneBadge],
+  imports: [LaneBadge, AccessBadge],
   template: `
     <h1>{{ item().name }}</h1>
     <div class="row badges">
       @if (entry(); as listed) {
         <app-lane-badge [lane]="listed.lane" [publisher]="listed.publisher.displayName" />
-        @if (listed.restricted) {
-          <span class="badge"><app-icon name="lock" />Only some people can see this</span>
-        }
       }
+      <app-access-badge [restricted]="item().effective === 'private'" [sharedWithYou]="item().sharedWithYou" [showPublic]="item().owned" />
       <span class="badge">{{ kinds() }}</span>
       @for (tag of item().tags; track tag) {
         <span class="badge tag">#{{ tag }}</span>
@@ -52,7 +52,7 @@ export class PackageHeader {
   public readonly kinds = input.required<string>();
 }
 
-/** What the owner sees: the review status and what they can do next. */
+/** What the owner sees: the package's status and what they can do next. */
 @Component({
   selector: "app-owner-panel",
   imports: [RouterLink, MatButtonModule, Icon],
@@ -63,7 +63,13 @@ export class PackageHeader {
     </div>
     <div class="row">
       <a mat-flat-button [routerLink]="['/p', ns(), pkg(), 'upload']"><app-icon name="upload" />Upload a new version</a>
-      <button mat-stroked-button type="button" (click)="visibility()"><app-icon name="visibility" />Who can see this</button>
+      <button mat-stroked-button type="button" (click)="share()"><app-icon name="share" />Share</button>
+      <span class="spacer"></span>
+      @if (revoked()) {
+        <button mat-button type="button" (click)="setRevoked(false)">Restore</button>
+      } @else {
+        <button mat-button type="button" class="danger" (click)="setRevoked(true)"><app-icon name="delete" />Remove from every PC</button>
+      }
     </div>
   `,
   styles: `
@@ -76,6 +82,9 @@ export class PackageHeader {
       margin: 0;
       flex: 1 1 20rem;
     }
+    .danger {
+      color: var(--mat-sys-error);
+    }
   `,
   host: { class: "card", role: "region", "aria-label": "Your package" }
 })
@@ -83,25 +92,58 @@ export class OwnerPanel {
   public readonly ns = input.required<string>();
   public readonly pkg = input.required<string>();
   public readonly name = input.required<string>();
+  public readonly spaceName = input.required<string>();
+  public readonly owners = input.required<string>();
+  public readonly revoked = input.required<boolean>();
   public readonly status = input.required<PackageStatus>();
   public readonly changed = output();
 
+  private readonly api = inject(Api);
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
 
-  protected visibility(): void {
-    runTask(this.editVisibility());
+  protected share(): void {
+    runTask(this.openShare());
   }
 
-  private async editVisibility(): Promise<void> {
-    if (await editVisibility(this.dialog, { namespace: this.ns(), packageId: this.pkg(), label: this.name() })) {
-      this.snackBar.open("Visibility saved.", undefined, { duration: 4000 });
+  protected setRevoked(revoked: boolean): void {
+    runTask(this.confirmRevoked(revoked));
+  }
+
+  private async openShare(): Promise<void> {
+    if (await share(this.dialog, { namespace: this.ns(), id: this.pkg(), label: this.name(), spaceName: this.spaceName(), owners: this.owners() })) {
+      this.snackBar.open("Sharing saved.", undefined, { duration: 4000 });
       this.changed.emit();
+    }
+  }
+
+  private async confirmRevoked(revoked: boolean): Promise<void> {
+    const confirmed = await prompt(
+      this.dialog,
+      revoked
+        ? {
+            title: `Remove ${this.name()} from every PC?`,
+            message: "Nobody can install it anymore, and Agent Plugins removes it from every PC that has it at its next check. You can restore it later, but it won't come back on its own.",
+            confirm: "Remove from every PC",
+            danger: true
+          }
+        : { title: `Restore ${this.name()}?`, message: "People can find and install it again. PCs it was removed from don't get it back until someone installs it.", confirm: "Restore" }
+    );
+    if (confirmed === undefined) {
+      return;
+    }
+
+    try {
+      await this.api.setRevoked(this.ns(), this.pkg(), revoked);
+      this.snackBar.open(revoked ? `${this.name()} is being removed from every PC.` : `${this.name()} is offered again.`, undefined, { duration: 5000 });
+      this.changed.emit();
+    } catch (error) {
+      this.snackBar.open(ApiError.from(error).message, "Dismiss");
     }
   }
 }
 
-/** The files of the version being shown; owners can switch to pending or older versions. */
+/** The files of the version being shown; owners can switch to older or withdrawn versions. */
 @Component({
   selector: "app-version-files",
   imports: [MatFormFieldModule, MatSelectModule, FileViewer],
@@ -117,7 +159,7 @@ export class OwnerPanel {
           </mat-select>
         </mat-form-field>
       }
-      <app-file-viewer [ns]="ns()" [packageId]="pkg()" [version]="version" />
+      <app-file-viewer [source]="source(version)" />
     } @else {
       <p class="muted">No version to show.</p>
     }
@@ -140,7 +182,13 @@ export class VersionFiles {
   public readonly owner = input.required<boolean>();
   public readonly shown = model<string | null>(null);
 
-  protected readonly options = computed(() => (this.owner() ? this.versions().map((version) => ({ value: version.version, label: `${version.version} · ${versionState(version).label}` })) : []));
+  protected readonly options = computed(() =>
+    this.owner() ? this.versions().map((version) => ({ value: version.version, label: version.yanked ? `${version.version} · Withdrawn` : version.version })) : []
+  );
+
+  protected source(version: string): string {
+    return versionFiles(this.ns(), this.pkg(), version);
+  }
 
   protected select(value: unknown): void {
     if (typeof value === "string") {
@@ -207,9 +255,6 @@ interface VersionRow {
           @if (row.version.changelog; as changelog) {
             <p>{{ changelog }}</p>
           }
-          @if (row.version.reviewNote; as note) {
-            <p class="note"><strong>Reviewer:</strong> {{ note }}</p>
-          }
           <app-version-actions class="actions" [version]="row.version" [archive]="row.archive" [owner]="owner()" (withdraw)="withdraw.emit($event)" (restore)="restore.emit($event)" />
         </li>
       }
@@ -228,9 +273,6 @@ interface VersionRow {
     p {
       margin: 0.5rem 0 0;
     }
-    .note {
-      color: var(--mat-sys-on-surface-variant);
-    }
     .actions {
       margin-top: 0.25rem;
     }
@@ -247,9 +289,8 @@ export class VersionList {
 
   protected readonly rows = computed<readonly VersionRow[]>(() =>
     this.versions().map((version) => {
-      const state = versionState(version);
-      const badges = [...(this.owner() || version.yanked ? [state] : []), ...(version.version === this.liveVersion() ? [{ label: "Live", badge: "badge live" }] : [])];
-      const readable = this.owner() || (version.reviewState === "approved" && !version.yanked);
+      const badges = [...(version.yanked ? [{ label: "Withdrawn", badge: "badge" }] : []), ...(version.version === this.liveVersion() ? [{ label: "Live", badge: "badge live" }] : [])];
+      const readable = this.owner() || !version.yanked;
       return { version, badges, when: formatDate(version.publishedAt), archive: readable ? archiveUrl(this.ns(), this.pkg(), version.version) : null };
     })
   );
@@ -342,13 +383,56 @@ export class PackageUsage {
   });
 }
 
+/** Install it through the desktop app, whole or one skill of a pack at a time. */
+@Component({
+  selector: "app-get-it",
+  imports: [InstallButton],
+  template: `
+    <h2>Get it</h2>
+    @if (item().liveVersion !== null && !item().revoked) {
+      <app-install-button [target]="item().id" />
+      <p class="muted">Agent Plugins asks before it adds anything, then adds it to every AI assistant it found.</p>
+      @if (skills().length > 0) {
+        <details class="skills">
+          <summary>Install one skill instead</summary>
+          <ul>
+            @for (skill of skills(); track skill) {
+              <li>
+                <span>{{ skill }}</span>
+                <app-install-button [target]="item().id + '/' + skill" label="Install" />
+              </li>
+            }
+          </ul>
+        </details>
+      }
+    } @else {
+      <p class="muted">Not available to install. Its status above says why.</p>
+    }
+    @if (hasServer()) {
+      <p class="notice">
+        This includes an <strong>MCP server</strong>, a small program that runs on your PC so the assistant can use a tool. The app shows exactly what it runs and asks you before installing.
+      </p>
+    }
+  `,
+  styleUrl: "./package-side.scss"
+})
+export class GetIt {
+  public readonly item = input.required<PackageDetail>();
+  /** The skills of a pack, each installable on its own; empty for a single-skill package. */
+  public readonly skills = input.required<readonly string[]>();
+  public readonly hasServer = input.required<boolean>();
+}
+
 /** How to get it, the facts, and the technical details, in the sidebar. */
-@Component({ selector: "app-package-side", imports: [RouterLink, MatButtonModule, Icon], templateUrl: "./package-side.html", styleUrl: "./package-side.scss" })
+@Component({ selector: "app-package-side", imports: [RouterLink, MatButtonModule, Icon, GetIt], templateUrl: "./package-side.html", styleUrl: "./package-side.scss" })
 export class PackageSide {
   public readonly item = input.required<PackageDetail>();
   public readonly entry = input.required<IndexPackage | null>();
   public readonly version = input.required<PackageVersion | null>();
+  /** The skills of a pack, each installable on its own; empty for a single-skill package. */
+  public readonly skills = input.required<readonly string[]>();
   public readonly canReport = input.required<boolean>();
+  public readonly canSuggest = input.required<boolean>();
   public readonly report = output();
 
   private readonly snackBar = inject(MatSnackBar);
@@ -362,15 +446,6 @@ export class PackageSide {
   protected readonly size = computed(() => formatBytes(this.version()?.sizeBytes ?? 0));
 
   protected copy(): void {
-    runTask(this.copyCommand());
-  }
-
-  private async copyCommand(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(this.installCommand());
-      this.snackBar.open("Copied.", undefined, { duration: 2000 });
-    } catch {
-      this.snackBar.open("The browser blocked the clipboard; select the command and copy it instead.", "Dismiss");
-    }
+    runTask(copyText(this.snackBar, this.installCommand()));
   }
 }

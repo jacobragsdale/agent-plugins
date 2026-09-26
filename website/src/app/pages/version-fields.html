@@ -45,6 +45,3 @@
 @if (idProblem(); as message) {
   <p class="problem" role="alert">{{ message }}</p>
 }
-@if (reviewed()) {
-  <p class="notice">An admin checks new skills before others can see them. You'll find the status on <a routerLink="/mine">My skills</a>.</p>
-}

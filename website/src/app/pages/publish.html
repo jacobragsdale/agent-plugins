@@ -13,7 +13,7 @@
     </div>
   } @else if (session.me() !== null) {
     <form class="stack" (submit)="submit($event)">
-      @if (mode() === "new" && spaces().length > 1) {
+      @if (mode() === "new") {
         <section class="card stack">
           <h2 id="space-heading">Who is it for?</h2>
           <mat-radio-group class="spaces" aria-labelledby="space-heading" [value]="space()" (change)="setSpace($event.value)">
@@ -21,26 +21,39 @@
               <mat-radio-button [value]="option.namespace">{{ option.label }}</mat-radio-button>
             }
           </mat-radio-group>
-          @if (hasTeam()) {
-            <p class="muted">A team space is shared: everyone on the team can publish new versions.</p>
-          }
+          <p class="muted">
+            @if (hasTeam()) {
+              A team space is shared: everyone on the team can publish new versions.
+            }
+            Need a shared space? <a routerLink="/teams">Create a team</a>.
+          </p>
         </section>
       }
 
       <app-upload-picker [showName]="mode() === 'new'" [(picked)]="picked" [(title)]="uploadTitle" />
 
-      <app-version-fields
-        [isNew]="mode() === 'new'"
-        [reviewed]="reviewed()"
-        [version]="version()"
-        [space]="space()"
-        [packageId]="packageId()"
-        [idProblem]="idProblem()"
-        [(bump)]="bump"
-        [(changelog)]="changelog"
-        [(tags)]="tags"
-        [(idOverride)]="idOverride"
-      />
+      @if (suggesting()) {
+        <section class="card stack">
+          <h2>What did you change?</h2>
+          <mat-form-field appearance="outline">
+            <mat-label>Tell the owners what you changed and why</mat-label>
+            <textarea matInput rows="4" required maxlength="4096" [value]="message()" (input)="setMessage($event)"></textarea>
+          </mat-form-field>
+          <p class="muted">Nothing changes until an owner publishes it. You'll see their answer on My skills.</p>
+        </section>
+      } @else {
+        <app-version-fields
+          [isNew]="mode() === 'new'"
+          [version]="version()"
+          [space]="space()"
+          [packageId]="packageId()"
+          [idProblem]="idProblem()"
+          [(bump)]="bump"
+          [(changelog)]="changelog"
+          [(tags)]="tags"
+          [(idOverride)]="idOverride"
+        />
+      }
 
       <app-problem [problem]="shownProblem()" />
 

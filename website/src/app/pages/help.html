@@ -325,7 +325,7 @@ Follow the repository's review workflow.</code></pre>
             <li>
               <h3>Check who you publish as</h3>
               <pre><code>agent-plugins whoami</code></pre>
-              <p><code>publishes to</code> lists every space you may publish to: your own, your team spaces, and <code>official</code> if you are an approved publisher.</p>
+              <p><code>publishes to</code> lists every space you may publish to: your own, the teams you are on, and <code>official</code> if you are an approved publisher.</p>
             </li>
             <li>
               <h3>Publish</h3>
@@ -359,28 +359,56 @@ Follow the repository's review workflow.</code></pre>
                 </table>
               </div>
               <p>
-                Add <code>--namespace team-data</code> to publish to a team space, <code>--package-id</code> to choose the ID, <code>--tags a,b</code>, <code>--changelog "…"</code>, and
+                Add <code>--namespace data-team</code> to publish to a team, <code>--package-id</code> to choose the ID, <code>--tags a,b</code>, <code>--changelog "…"</code>, and
                 <code>--yes</code> to skip the confirmation.
               </p>
             </li>
             <li>
-              <h3>Review</h3>
+              <h3>Who checks it</h3>
               <p>
-                A package's first version, and every version that contains an MCP server, waits for an admin. The command prints <code>submitted … for review</code>; later skill-only versions of an
-                approved package go live at once. The result shows on <a routerLink="/mine">My skills</a>.
+                A version goes live when you publish it. The one exception is an MCP server that everyone can see: an admin checks the package once before it shows for everyone. You, your team, and
+                people you share it with can use it right away.
+              </p>
+              <p>
+                Publishing to a skill you don't own sends your files to its owners as a suggestion, with <code>--message "…"</code> saying what you changed. Owners answer suggestions on
+                <a routerLink="/mine">My skills</a> or with <code>agent-plugins review</code>.
               </p>
             </li>
             <li>
               <h3>Choose who can see it</h3>
-              <pre><code>agent-plugins access jacob/review --group "Finance Team" --user CORP\jane
-agent-plugins access jacob/review --public</code></pre>
-              <p>Without a list, everyone who signs in can see a package. A package's list replaces its space's list.</p>
+              <pre><code>agent-plugins share jacob/review --private --add CORP\jane --add team:platform
+agent-plugins share jacob/review --link
+agent-plugins share jacob/review --public</code></pre>
+              <p>
+                A skill follows its space unless you set it. Private means you (or your team) and the people and teams you add. Anyone who opens the share link is added to the list. Use
+                <code>--inherit</code> to follow the space again.
+              </p>
+            </li>
+            <li>
+              <h3>Work as a team</h3>
+              <pre><code>agent-plugins team create data-team --name "Data Team"
+agent-plugins team invite data-team
+agent-plugins team add data-team CORP\jane</code></pre>
+              <p>Anyone can start a team. Everyone on it can publish to its space; owners add and remove people. Send the invite link to let colleagues join themselves.</p>
+            </li>
+            <li>
+              <h3>Bundle skills</h3>
+              <pre><code>agent-plugins bundle set data-team/starter --name "Starter kit" jacob/review data-team/sql</code></pre>
+              <p>A bundle groups skills that already exist, anyone's, so people can install them all at once. Each one still installs on its own.</p>
             </li>
             <li>
               <h3>Install</h3>
+              <p>On this site, choose <strong>Install in Agent Plugins</strong>: the app opens and asks before it adds anything. From a terminal:</p>
               <pre><code>agent-plugins search meeting
-agent-plugins install jacob/meeting-notes</code></pre>
-              <p>Installing an MCP server needs <code>--approve-mcp</code>, after you have read what it runs.</p>
+agent-plugins install jacob/meeting-notes
+agent-plugins install data-team/starter
+agent-plugins install data-team/writing-helpers/tone</code></pre>
+              <p>The last line installs one skill of a pack. Installing an MCP server needs <code>--approve-mcp</code>, after you have read what it runs.</p>
+            </li>
+            <li>
+              <h3>Take it back</h3>
+              <pre><code>agent-plugins revoke jacob/review</code></pre>
+              <p>This removes it from every PC at their next check, and nobody can install it until you run it again with <code>--undo</code>.</p>
             </li>
           </ol>
         </section>
