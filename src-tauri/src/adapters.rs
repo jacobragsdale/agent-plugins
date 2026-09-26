@@ -1,6 +1,6 @@
 //! Compile-time target registry. Adapters translate components and never mutate the machine.
 
-use crate::agent_profiles::{AgentProfile, TargetId, CLAUDE_DESKTOP_MSIX, COWORK_RELATIVE};
+use crate::agent_profiles::{cowork_dir, AgentProfile, TargetId, CLAUDE_DESKTOP_MSIX};
 use crate::catalog::{CatalogComponent, CatalogComponentKind};
 use crate::ledger::OwnedPathKind;
 use crate::mcp::McpServer;
@@ -46,17 +46,6 @@ impl TargetPlan {
     }
 }
 
-pub(crate) trait TargetAdapter: Sync {
-    fn target_id(&self) -> TargetId;
-
-    fn plan(
-        &self,
-        component: &CatalogComponent,
-        profile: &AgentProfile,
-        context: &PlanningContext<'_>,
-    ) -> Result<TargetPlan, String>;
-}
-
 #[derive(Clone, Copy)]
 enum SkillProjection {
     NativeClaude,
@@ -85,7 +74,7 @@ enum McpMapping {
 }
 
 #[derive(Clone, Copy)]
-struct TargetSpec {
+pub(crate) struct TargetSpec {
     target_id: TargetId,
     skill: SkillProjection,
     unknown_dialect_allows_shared_skills: bool,
@@ -120,7 +109,7 @@ impl TargetSpec {
                 Some((home.join(relative), StructuredFormat::Toml, key))
             }
             McpMapping::OpenCode => Some((
-                home.join(".config/opencode/opencode.jsonc"),
+                home.join(".config").join("opencode").join("opencode.jsonc"),
                 StructuredFormat::Jsonc,
                 "mcp",
             )),
@@ -130,9 +119,16 @@ impl TargetSpec {
             McpMapping::ClaudeDesktop => {
                 let package = paths.local_data.join("Packages").join(CLAUDE_DESKTOP_MSIX);
                 let document = if package.is_dir() {
-                    package.join("LocalCache/Roaming/Claude/claude_desktop_config.json")
+                    package
+                        .join("LocalCache")
+                        .join("Roaming")
+                        .join("Claude")
+                        .join("claude_desktop_config.json")
                 } else {
-                    paths.config.join("Claude/claude_desktop_config.json")
+                    paths
+                        .config
+                        .join("Claude")
+                        .join("claude_desktop_config.json")
                 };
                 Some((document, StructuredFormat::Json, "mcpServers"))
             }
@@ -153,7 +149,7 @@ impl TargetSpec {
     }
 }
 
-const SPECS: [TargetSpec; 9] = [
+static SPECS: [TargetSpec; 9] = [
     TargetSpec {
         target_id: TargetId::Cursor,
         skill: SkillProjection::SharedAgents,
@@ -239,33 +235,22 @@ const SPECS: [TargetSpec; 9] = [
     },
 ];
 
-struct BuiltInAdapter {
-    spec: TargetSpec,
-}
-
-impl TargetAdapter for BuiltInAdapter {
-    fn target_id(&self) -> TargetId {
-        self.spec.target_id
-    }
-
-    fn plan(
+impl TargetSpec {
+    pub(crate) fn plan(
         &self,
         component: &CatalogComponent,
         profile: &AgentProfile,
         context: &PlanningContext<'_>,
     ) -> Result<TargetPlan, String> {
-        if profile.target_id != self.spec.target_id {
-            return Err("An adapter received a profile for a different target.".to_string());
-        }
-        if profile.dialect_id != self.spec.target_id.current_dialect() {
+        if profile.dialect_id != self.target_id.current_dialect() {
             let shared_skill_is_stable = component.kind == CatalogComponentKind::Skill
-                && self.spec.unknown_dialect_allows_shared_skills;
+                && self.unknown_dialect_allows_shared_skills;
             if !shared_skill_is_stable {
                 return Ok(TargetPlan::blocked(
                     format!(
                         "Dialect {} is not recognized by the built-in {} adapter.",
                         profile.dialect_id,
-                        self.spec.target_id.display_name()
+                        self.target_id.display_name()
                     ),
                     "Select a supported dialect after its configuration contract has been verified.",
                 ));
@@ -276,9 +261,7 @@ impl TargetAdapter for BuiltInAdapter {
             CatalogComponentKind::McpServer => self.plan_mcp(component, context),
         }
     }
-}
 
-impl BuiltInAdapter {
     fn plan_skill(
         &self,
         component: &CatalogComponent,
@@ -286,12 +269,13 @@ impl BuiltInAdapter {
     ) -> Result<TargetPlan, String> {
         let home = &context.paths.home;
         let mut warnings = Vec::new();
-        let (root, capability) = match self.spec.skill {
-            SkillProjection::NativeClaude => {
-                (home.join(".claude/skills"), CapabilityResult::Native)
-            }
+        let (root, capability) = match self.skill {
+            SkillProjection::NativeClaude => (
+                home.join(".claude").join("skills"),
+                CapabilityResult::Native,
+            ),
             SkillProjection::SharedAgents => (
-                home.join(".agents/skills"),
+                home.join(".agents").join("skills"),
                 CapabilityResult::LosslessTranslation,
             ),
             SkillProjection::ClaudeAccountUpload => {
@@ -315,7 +299,7 @@ impl BuiltInAdapter {
                         .to_string(),
                 );
                 (
-                    onedrive.join(COWORK_RELATIVE).join("skills"),
+                    cowork_dir(onedrive).join("skills"),
                     CapabilityResult::LosslessTranslation,
                 )
             }
@@ -329,6 +313,7 @@ impl BuiltInAdapter {
                 source_digest: component.digest.clone(),
                 materialization: PathMaterialization::AgentSkill {
                     effective_name: component.effective_name.clone(),
+                    disable_model_invocation: None,
                 },
             })],
             warnings,
@@ -344,25 +329,25 @@ impl BuiltInAdapter {
             .mcp_server
             .as_ref()
             .ok_or_else(|| format!("MCP component {} has no server definition.", component.id))?;
-        let Some((document_path, format, key_root)) = self.spec.mcp_document(context.paths) else {
+        let Some((document_path, format, key_root)) = self.mcp_document(context.paths) else {
             return Ok(TargetPlan::unsupported(format!(
                 "{} has no local MCP configuration file.",
-                self.spec.target_id.display_name()
+                self.target_id.display_name()
             )));
         };
-        if matches!(server, McpServer::Sse { .. }) && self.spec.sse_unsupported {
+        if matches!(server, McpServer::Sse { .. }) && self.sse_unsupported {
             return Ok(TargetPlan::unsupported(
                 "This target dialect does not expose a distinct legacy SSE transport.",
             ));
         }
-        if matches!(self.spec.mcp, McpMapping::ClaudeDesktop)
+        if matches!(self.mcp, McpMapping::ClaudeDesktop)
             && !matches!(server, McpServer::Stdio { .. })
         {
             return Ok(TargetPlan::unsupported(
                 "Claude Desktop reads only local command servers from its configuration file. Add remote servers in Claude Desktop under Settings > Connectors.",
             ));
         }
-        let value = self.spec.mcp_value(server)?;
+        let value = self.mcp_value(server)?;
         Ok(TargetPlan {
             capability: CapabilityResult::LosslessTranslation,
             resources: vec![DesiredResource::StructuredEntry(DesiredStructuredEntry {
@@ -446,52 +431,47 @@ fn opencode_mcp_value(server: &McpServer) -> Value {
     }
 }
 
-static ADAPTERS: [BuiltInAdapter; 9] = [
-    BuiltInAdapter { spec: SPECS[0] },
-    BuiltInAdapter { spec: SPECS[1] },
-    BuiltInAdapter { spec: SPECS[2] },
-    BuiltInAdapter { spec: SPECS[3] },
-    BuiltInAdapter { spec: SPECS[4] },
-    BuiltInAdapter { spec: SPECS[5] },
-    BuiltInAdapter { spec: SPECS[6] },
-    BuiltInAdapter { spec: SPECS[7] },
-    BuiltInAdapter { spec: SPECS[8] },
-];
-
-pub(crate) fn adapter(target_id: TargetId) -> &'static dyn TargetAdapter {
-    ADAPTERS
-        .iter()
-        .find(|adapter| adapter.spec.target_id == target_id)
-        .expect("every stable target has a built-in adapter")
-}
-
-fn spec(target_id: TargetId) -> TargetSpec {
+pub(crate) fn adapter(target_id: TargetId) -> &'static TargetSpec {
     SPECS
-        .into_iter()
+        .iter()
         .find(|candidate| candidate.target_id == target_id)
         .expect("every stable target has a built-in spec")
 }
 
 pub(crate) fn reads_shared_agents(target_id: TargetId) -> bool {
-    spec(target_id).reads_shared_agents()
+    adapter(target_id).reads_shared_agents()
 }
 
 pub(crate) fn skill_display_root(target_id: TargetId) -> &'static str {
-    spec(target_id).skill_display_root()
+    adapter(target_id).skill_display_root()
+}
+
+/// The folder `target_id` reads skills from, when it reads them from disk.
+pub(crate) fn skill_root(target_id: TargetId, paths: &SystemPaths) -> Option<PathBuf> {
+    let home = &paths.home;
+    match adapter(target_id).skill {
+        SkillProjection::NativeClaude => Some(home.join(".claude").join("skills")),
+        SkillProjection::SharedAgents => Some(home.join(".agents").join("skills")),
+        SkillProjection::ClaudeAccountUpload => None,
+        SkillProjection::CoworkOneDrive => paths
+            .onedrive_commercial
+            .as_ref()
+            .map(|onedrive| cowork_dir(onedrive).join("skills")),
+    }
 }
 
 pub(crate) fn managed_skill_roots(paths: &SystemPaths) -> Vec<PathBuf> {
     let home = &paths.home;
     let mut roots = vec![
-        home.join(".agents/skills"),
-        home.join(".claude/skills"),
-        home.join(".cursor/skills"),
-        home.join(".copilot/skills"),
-        home.join(".grok/skills"),
-        home.join(".config/opencode/skills"),
+        home.join(".agents").join("skills"),
+        home.join(".claude").join("skills"),
+        home.join(".cursor").join("skills"),
+        home.join(".copilot").join("skills"),
+        home.join(".grok").join("skills"),
+        home.join(".config").join("opencode").join("skills"),
     ];
     if let Some(onedrive) = &paths.onedrive_commercial {
-        roots.push(onedrive.join(COWORK_RELATIVE).join("skills"));
+        roots.push(cowork_dir(onedrive).join("skills"));
     }
     roots.sort();
     roots.dedup();

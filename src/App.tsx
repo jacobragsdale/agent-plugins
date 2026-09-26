@@ -3,11 +3,12 @@ import type { JSX } from "react";
 import { Button, Callout, Heading, Spinner, Text } from "@radix-ui/themes";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { AgentSetupNotice } from "./components/AgentSetupNotice";
+import { AgentSetupNotice, TutorialNotice } from "./components/AgentSetupNotice";
 import { ManageSourcesDialog } from "./components/ManageSourcesDialog";
 import { ErrorMessage, Notices, OfflineBanner } from "./components/Notice";
 import type { InfoNotice } from "./components/Notice";
 import { SourceGroup } from "./components/SourceGroup";
+import type { SourceAction } from "./components/SourceGroup";
 import { CatalogToolbar, StatusButton, SyncMeta } from "./components/CatalogToolbar";
 import { diagnosticsFailure, diagnosticsResult, seriousProblems, SystemStatusDialog } from "./components/SystemStatusDialog";
 import { errorResponse, explainAfterRetry, invokeParsed, SCHEDULED_SYNC_EVENT, toAppError, withRetry } from "./ipc/client";
@@ -25,8 +26,8 @@ import {
   unitSchema
 } from "./ipc/schemas";
 import type { DiagnosticsResult } from "./components/SystemStatusDialog";
-import type { AppIdentity, AppState, BulkAction, CatalogItem, ListedSource, PreflightCheck, PreflightReport, RepositoryState, SourceState } from "./ipc/schemas";
-import { catalogBody, isChecking, lastCheckedLabel, offlineBanner } from "./lib/connectivity";
+import type { AgentProfile, AppIdentity, AppState, BulkAction, CatalogItem, ListedSource, PreflightCheck, PreflightReport, RepositoryState, SourceState } from "./ipc/schemas";
+import { catalogBody, headerProblems, isChecking, isOffline, lastCheckedLabel, noMatchesText, offlineBanner } from "./lib/connectivity";
 import {
   bulkLabels,
   failuresError,
@@ -39,7 +40,8 @@ import {
   reviewBulk,
   reviewBulkApproval,
   reviewReset,
-  reviewSourceRemoval
+  reviewSourceRemoval,
+  reviewTutorial
 } from "./lib/status";
 import type { ReportNotice } from "./lib/status";
 import "./App.css";
@@ -73,6 +75,17 @@ function toggled(current: ReadonlySet<string>, id: string, busy: boolean): Reado
   return next;
 }
 
+/** A source's running action, or none: `busy` null clears it. */
+function marked(current: ReadonlyMap<string, SourceAction>, id: string, busy: SourceAction | null): ReadonlyMap<string, SourceAction> {
+  const next = new Map(current);
+  if (busy === null) {
+    next.delete(id);
+  } else {
+    next.set(id, busy);
+  }
+  return next;
+}
+
 function backupNotice(lead: string, paths: readonly string[]): InfoNotice {
   return { text: `${lead} ${paths.join(", ")}.`, folder: paths[0] ?? null, caution: false };
 }
@@ -90,11 +103,12 @@ export default function App(): JSX.Element {
   const [info, setInfo] = useState<InfoNotice | null>(null);
   const [dismissedReport, setDismissedReport] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const [adding, setAdding] = useState(false);
+  const [adding, setAdding] = useState<string | null>(null);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
   const [busyItems, setBusyItems] = useState<ReadonlySet<string>>(new Set());
-  const [busySources, setBusySources] = useState<ReadonlySet<string>>(new Set());
+  const [busySources, setBusySources] = useState<ReadonlyMap<string, SourceAction>>(new Map());
   const [resetting, setResetting] = useState(false);
+  const [tutorialRunning, setTutorialRunning] = useState(false);
   const [statusDialogOpen, setStatusDialogOpen] = useState(false);
   const [preflightRunning, setPreflightRunning] = useState(false);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
@@ -346,11 +360,29 @@ export default function App(): JSX.Element {
     }
   }
 
+  async function changeManualInvocation(item: CatalogItem, manual: boolean, componentId?: string): Promise<void> {
+    setBusyItems((current) => toggled(current, item.id, true));
+    try {
+      setError(null);
+      setInfo(null);
+      const outcome = await retrying(() => invokeParsed("set_manual_invocation", operationOutcomeSchema, itemCommandArgs(item, componentId, { manual })));
+      const notice = outcomeNotice("The files that were there before were backed up to", outcome);
+      if (notice !== null) {
+        setInfo(notice);
+      }
+    } catch (reason) {
+      showActionError(toAppError(reason, `Couldn't change how ${item.name} is used.`));
+    } finally {
+      setBusyItems((current) => toggled(current, item.id, false));
+      await refreshAfterOperation();
+    }
+  }
+
   async function runBulk(source: SourceState, action: BulkAction): Promise<void> {
     const verb = bulkLabels(action).action.toLowerCase();
     setError(null);
     setInfo(null);
-    setBusySources((current) => toggled(current, source.sourceId, true));
+    setBusySources((current) => marked(current, source.sourceId, action));
     try {
       const plan = await retrying(() => invokeParsed("plan_bulk_items", bulkPlanSchema, { sourceId: source.sourceId, action }));
       const eligible = plan.entries.filter((entry) => entry.willRun);
@@ -362,8 +394,15 @@ export default function App(): JSX.Element {
         return;
       }
       const items = state?.items ?? [];
-      const approvals = action === "uninstall" ? [] : items.filter((item) => item.requiresApproval && eligible.some((entry) => entry.id === item.id)).map((item) => item.name);
-      if (approvals.length > 0 && !(await reviewBulkApproval(approvals))) {
+      const needApproval = action === "uninstall" ? [] : items.filter((item) => item.requiresApproval && eligible.some((entry) => entry.id === item.id));
+      const approvals = needApproval.map((item) => item.name);
+      if (
+        approvals.length > 0 &&
+        !(await reviewBulkApproval(
+          approvals,
+          needApproval.flatMap((item) => item.riskDetails)
+        ))
+      ) {
         return;
       }
       const result = await retrying(() => invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action, trustApproved: approvals.length > 0 }));
@@ -376,7 +415,7 @@ export default function App(): JSX.Element {
     } catch (reason) {
       showActionError(toAppError(reason, `Couldn't ${verb} packages from ${source.name}.`));
     } finally {
-      setBusySources((current) => toggled(current, source.sourceId, false));
+      setBusySources((current) => marked(current, source.sourceId, null));
       await refreshAfterOperation();
     }
   }
@@ -394,9 +433,9 @@ export default function App(): JSX.Element {
       if (result.failures.length > 0) {
         showActionError(failuresError("uninstall", result.failures, state?.items ?? []));
       } else {
-        const removed = count === 0 ? "No leftover installs remained." : `Removed ${String(count)} leftover install${count === 1 ? "" : "s"}.`;
-        const backups = result.backupPaths.length === 0 ? "" : ` Leftover files were backed up to ${result.backupPaths.join(", ")}.`;
-        setInfo({ text: `${removed} All Agent Plugins data was cleared.${backups}`, folder: result.backupPaths[0] ?? null, caution: false });
+        const cleared = count === 0 ? "Cleared all Agent Plugins data." : `Uninstalled ${String(count)} package${count === 1 ? "" : "s"} and cleared all Agent Plugins data.`;
+        const backups = result.backupPaths.length === 0 ? "" : ` Changed files were backed up to ${result.backupPaths.join(", ")}.`;
+        setInfo({ text: `${cleared}${backups}`, folder: result.backupPaths[0] ?? null, caution: false });
       }
       await synchronize();
     } catch (reason) {
@@ -406,10 +445,37 @@ export default function App(): JSX.Element {
     }
   }
 
+  async function runTutorial({ targetId, displayName: app }: AgentProfile): Promise<void> {
+    // Busy before the confirmation, so a double-click cannot open a second one.
+    setTutorialRunning(true);
+    try {
+      if (!(await reviewTutorial(app))) {
+        return;
+      }
+      setError(null);
+      setInfo(null);
+      await invokeParsed("run_tutorial", unitSchema, { targetId });
+    } catch (reason) {
+      showActionError(toAppError(reason, `Couldn't start the ${app} tutorial.`));
+    } finally {
+      setTutorialRunning(false);
+      await refreshAfterOperation();
+    }
+  }
+
+  async function dismissTutorial(): Promise<void> {
+    setState((current) => (current === null ? current : { ...current, tutorial: null }));
+    try {
+      await invokeParsed("dismiss_tutorial", unitSchema);
+    } finally {
+      await refreshAfterOperation();
+    }
+  }
+
   async function addListedSource(repository: RepositoryState, listed: ListedSource): Promise<void> {
     setError(null);
     setInfo(null);
-    setAdding(true);
+    setAdding(listed.url);
     try {
       const prepared = await retrying(() => invokeParsed("prepare_source", preparedSourceSchema, { url: listed.url, repositoryKey: repository.repositoryKey }));
       try {
@@ -422,18 +488,18 @@ export default function App(): JSX.Element {
     } catch (reason) {
       showActionError(toAppError(reason, `Couldn't add ${listed.name}.`));
     } finally {
-      setAdding(false);
+      setAdding(null);
     }
   }
 
   async function removeSource(source: SourceState): Promise<void> {
     // Busy before the first await, so a double-click cannot open a second confirmation.
-    setBusySources((current) => toggled(current, source.sourceId, true));
+    setBusySources((current) => marked(current, source.sourceId, "remove"));
     try {
       const plan = await invokeParsed("plan_source_removal", sourceRemovalPlanSchema, { sourceId: source.sourceId });
       // Removing a source uninstalls everything it installed, and local edits go
       // with it, so the person acknowledges both before anything is touched.
-      if (!(await reviewSourceRemoval(source, plan))) {
+      if (!(await reviewSourceRemoval(source, plan, state?.repositories ?? []))) {
         return;
       }
       const modified = plan.items.flatMap((item) => item.paths).filter((path) => path.modified);
@@ -449,7 +515,7 @@ export default function App(): JSX.Element {
     } catch (reason) {
       showActionError(toAppError(reason, `Couldn't remove ${source.name}.`));
     } finally {
-      setBusySources((current) => toggled(current, source.sourceId, false));
+      setBusySources((current) => marked(current, source.sourceId, null));
       await refreshAfterOperation();
     }
   }
@@ -472,7 +538,8 @@ export default function App(): JSX.Element {
 
   const checked = lastCheckedLabel(state);
   const body = catalogBody(state, offlineHint, filtering);
-  const view = marketplaceView(state);
+  const view = marketplaceView(state, isOffline(state, offlineHint));
+  const noMatches = noMatchesText(query, driftOnly, visibleSources.length);
   const matchCount = [...itemsBySource.values()].reduce((total, items) => total + items.length, 0);
   // With nothing loaded yet, a failure replaces the spinner instead of sitting above it forever.
   const loadFailed = state === null && error !== null && !syncing;
@@ -557,10 +624,33 @@ export default function App(): JSX.Element {
           }}
         />
       </div>
+      {/* An invitation, not a notice: it scrolls away with the page instead of staying pinned over it. */}
+      <TutorialNotice
+        profile={tutorialProfile(state)}
+        running={tutorialRunning}
+        onStart={(profile) => {
+          settle(runTutorial(profile));
+        }}
+        onDismiss={() => {
+          settle(dismissTutorial());
+        }}
+      />
       {body.kind === "empty" ? (
         <EmptyCatalog text={body.text} offline={body.offline} checking={syncing} onTryNow={tryNow} />
       ) : body.kind === "loading" ? (
         <LoadingOrFailed error={loadFailed ? error : null} onRetry={retryLoad} />
+      ) : noMatches !== null ? (
+        <div className="load-failed">
+          <Text color="gray">{noMatches}</Text>
+          <Button
+            onClick={() => {
+              setQuery("");
+              setDriftOnly(false);
+            }}
+          >
+            Show all
+          </Button>
+        </div>
       ) : (
         <div className="sources-list">
           {visibleSources.map((source) => (
@@ -570,8 +660,10 @@ export default function App(): JSX.Element {
               items={itemsBySource.get(source.sourceKey) ?? []}
               busyIds={busyItems}
               allBusy={resetting || busySources.has(source.sourceId)}
+              running={busySources.get(source.sourceId) ?? null}
               filtering={filtering}
               onItemChange={changeItem}
+              onManualChange={changeManualInvocation}
               onBulk={runBulk}
               onError={showActionError}
             />
@@ -610,6 +702,11 @@ export default function App(): JSX.Element {
       />
     </main>
   );
+}
+
+/** The app the skill tutorial is offered for, until it has run once. */
+function tutorialProfile(state: AppState | null): AgentProfile | null {
+  return state?.agentProfiles.find((profile) => profile.targetId === state.tutorial) ?? null;
 }
 
 /** The background-update report, unless the person already dismissed this exact one. */
@@ -656,8 +753,15 @@ function matchesQuery(item: CatalogItem, needle: string): boolean {
 }
 
 function marketplaceView(
-  state: AppState | null
+  state: AppState | null,
+  offline: boolean
 ): Readonly<{ identity: AppIdentity | null; marketplaceUrl: string | null; preflight: PreflightReport | null; blocked: boolean; problems: readonly PreflightCheck[] }> {
   const preflight = state?.preflight ?? null;
-  return { identity: state?.identity ?? null, marketplaceUrl: state?.marketplaceUrl ?? null, preflight, blocked: preflight?.blocked === true, problems: seriousProblems(preflight) };
+  return {
+    identity: state?.identity ?? null,
+    marketplaceUrl: state?.marketplaceUrl ?? null,
+    preflight,
+    blocked: preflight?.blocked === true,
+    problems: headerProblems(seriousProblems(preflight), offline)
+  };
 }

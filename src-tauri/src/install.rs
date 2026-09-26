@@ -63,16 +63,6 @@ pub(crate) fn install_item(
     crate::executor::install(paths, source, snapshot, item, false, false)
 }
 
-pub(crate) fn install_item_approved(
-    paths: &SystemPaths,
-    source: &ConfiguredSource,
-    snapshot: &SourceSnapshot,
-    item: &CatalogItem,
-    trust_approved: bool,
-) -> Result<OperationOutcome, String> {
-    install_item_components_approved(paths, source, snapshot, item, trust_approved, None)
-}
-
 pub(crate) fn install_item_components_approved(
     paths: &SystemPaths,
     source: &ConfiguredSource,
@@ -100,16 +90,6 @@ pub(crate) fn replace_item(
     item: &CatalogItem,
 ) -> Result<OperationOutcome, String> {
     crate::executor::install(paths, source, snapshot, item, true, false)
-}
-
-pub(crate) fn replace_item_approved(
-    paths: &SystemPaths,
-    source: &ConfiguredSource,
-    snapshot: &SourceSnapshot,
-    item: &CatalogItem,
-    trust_approved: bool,
-) -> Result<OperationOutcome, String> {
-    replace_item_components_approved(paths, source, snapshot, item, trust_approved, None)
 }
 
 pub(crate) fn replace_item_components_approved(

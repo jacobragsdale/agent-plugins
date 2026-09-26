@@ -756,6 +756,35 @@ fn persist_session_path(host: &mut impl Host, dirs: &[PathBuf]) -> Result<Vec<Pa
     Ok(added)
 }
 
+/// Takes this copy's folder back off the user PATH, where the app put it so
+/// shells find `agent-plugins`. The uninstaller runs it just before it deletes
+/// the folder. Every other entry stays, unexpanded and in its place. True when
+/// the folder was there.
+pub(crate) fn remove_cli_dir_from_path() -> Result<bool, String> {
+    remove_cli_dir_from_path_with(&mut LiveHost)
+}
+
+fn remove_cli_dir_from_path_with(host: &mut impl Host) -> Result<bool, String> {
+    if !host.persist_enabled() {
+        return Ok(false);
+    }
+    let (Some(dir), Some(path)) = (host.cli_dir(), host.session_env("PATH")?) else {
+        return Ok(false);
+    };
+    let sep = host.path_separator();
+    let entries = split_paths(&path, sep);
+    let kept = entries
+        .iter()
+        .filter(|entry| !paths_match(host, &expand_path_vars(host, (*entry).clone()), &dir))
+        .cloned()
+        .collect::<Vec<_>>();
+    if kept.len() == entries.len() {
+        return Ok(false);
+    }
+    host.persist_session("PATH", &join_paths(&kept, sep))?;
+    Ok(true)
+}
+
 fn user_proxy_values(host: &impl Host) -> Vec<(String, OsString)> {
     proxy_keys(host)
         .into_iter()
@@ -1089,11 +1118,11 @@ fn live_search_roots() -> Vec<PathBuf> {
         roots.push(managed.join("uv"));
     }
     if let Some(home) = dirs::home_dir() {
-        roots.push(home.join(".local/bin"));
-        roots.push(home.join(".cargo/bin"));
-        roots.push(home.join(".asdf/shims"));
-        roots.push(home.join(".local/share/mise/shims"));
-        roots.push(home.join("scoop/shims"));
+        roots.push(home.join(".local").join("bin"));
+        roots.push(home.join(".cargo").join("bin"));
+        roots.push(home.join(".asdf").join("shims"));
+        roots.push(home.join(".local").join("share").join("mise").join("shims"));
+        roots.push(home.join("scoop").join("shims"));
     }
     #[cfg(unix)]
     {
@@ -1851,6 +1880,7 @@ fn download_https(url: &str) -> Result<Vec<u8>, String> {
         return Err("Tool download URLs may not contain credentials.".to_string());
     }
     let client = reqwest::blocking::Client::builder()
+        .use_preconfigured_tls(crate::marketplace::tls()?)
         .timeout(TOOL_FETCH_TIMEOUT)
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= TOOL_FETCH_REDIRECTS {
@@ -1866,7 +1896,7 @@ fn download_https(url: &str) -> Result<Vec<u8>, String> {
     let response = client
         .get(url)
         .send()
-        .map_err(|error| format!("Could not download {url}: {error}"))?;
+        .map_err(|error| crate::marketplace::describe_error(url, &error))?;
     if !response.status().is_success() {
         return Err(format!(
             "Could not download {url}: HTTP {}.",
@@ -2255,6 +2285,24 @@ mod tests {
 
     fn uv_path() -> PathBuf {
         PathBuf::from("/home/user/.local/bin").join(tool_file_name("uv"))
+    }
+
+    #[test]
+    fn uninstalling_takes_only_this_folder_off_the_user_path() {
+        let mut host = FakeHost::new();
+        host.path_separator = ';';
+        host.case_insensitive = true;
+        host.cli_dir = Some(PathBuf::from(r"C:\Users\sam\AppData\Local\Agent Plugins"));
+        host.persisted.insert(
+            "PATH".to_string(),
+            OsString::from(r"C:\Users\sam\AppData\Local\agent plugins;%USERPROFILE%\bin;C:\Tools"),
+        );
+        assert!(remove_cli_dir_from_path_with(&mut host).expect("removed"));
+        assert_eq!(
+            host.persisted["PATH"],
+            OsString::from(r"%USERPROFILE%\bin;C:\Tools")
+        );
+        assert!(!remove_cli_dir_from_path_with(&mut host).expect("already gone"));
     }
 
     #[test]

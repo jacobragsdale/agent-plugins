@@ -1,8 +1,10 @@
+use crate::agent_profiles::AgentProfile;
 use crate::catalog::CatalogItem;
 use crate::executor::ContentState;
 use crate::install::ItemStatus;
 use crate::ledger::{InstallationLedger, InstallationRecord};
 use crate::paths::SystemPaths;
+use crate::resource::OperationPlan;
 use crate::source::SourceSnapshot;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -13,7 +15,8 @@ pub(super) fn refined_item_status(
     ledger_state: &InstallationLedger,
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
-    full_plan: Option<&crate::resource::OperationPlan>,
+    full_plan: Option<&OperationPlan>,
+    profiles: Option<&[AgentProfile]>,
 ) -> ItemStatus {
     let record = ledger_state.items.get(&item.id);
     let selected = record
@@ -22,20 +25,14 @@ pub(super) fn refined_item_status(
     let selected_plan = if selected.is_empty() {
         None
     } else {
-        crate::planner::plan(paths, snapshot, item, None, Some(&selected)).ok()
+        crate::planner::plan(paths, snapshot, item, profiles, Some(&selected)).ok()
     };
-    let mut status = item_status(paths, ledger_state, Some(item), &item.id);
-    if status == ItemStatus::UpdateAvailable
-        && selected_plan.as_ref().is_some_and(|plan| {
-            crate::executor::plan_satisfied(ledger_state, plan).unwrap_or(false)
-        })
-    {
-        status = if selected.len() < item.components.len() {
-            ItemStatus::PartiallyInstalled
-        } else {
-            ItemStatus::Installed
-        };
-    }
+    let current = record.is_some_and(|record| {
+        selected_plan
+            .as_ref()
+            .is_some_and(|plan| selection_current(ledger_state, record, item, plan))
+    });
+    let mut status = status_on_disk(paths, ledger_state, Some(item), &item.id, current);
     if status == ItemStatus::Installed
         && ((!selected.is_empty() && selected.len() < item.components.len())
             || selected_plan.as_ref().or(full_plan).is_some_and(|plan| {
@@ -53,8 +50,8 @@ pub(super) fn component_status(
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
     component_id: &str,
-    record: Option<&InstallationRecord>,
     package_status: ItemStatus,
+    profiles: Option<&[AgentProfile]>,
 ) -> ItemStatus {
     match package_status {
         ItemStatus::SourceConflict => return ItemStatus::SourceConflict,
@@ -62,7 +59,7 @@ pub(super) fn component_status(
         ItemStatus::Conflict => return ItemStatus::Conflict,
         _ => {}
     }
-    let Some(record) = record else {
+    let Some(record) = ledger_state.items.get(&item.id) else {
         return ItemStatus::Available;
     };
     let selected = crate::planner::selected_component_ids(record, item);
@@ -75,6 +72,13 @@ pub(super) fn component_status(
             .get(binding_id)
             .is_some_and(|binding| binding.component_id == component_id)
     });
+    let plan = crate::planner::plan(
+        paths,
+        snapshot,
+        item,
+        profiles,
+        Some(&[component_id.to_string()]),
+    );
     if bindings_exist {
         match crate::executor::installation_state(
             paths,
@@ -83,20 +87,18 @@ pub(super) fn component_status(
             Some(&[component_id.to_string()]),
         ) {
             ContentState::Modified => return ItemStatus::Modified,
-            ContentState::Missing if item.digest == record.item_digest => {
+            ContentState::Missing
+                if item.digest == record.item_digest
+                    || plan
+                        .as_ref()
+                        .is_ok_and(|plan| selection_current(ledger_state, record, item, plan)) =>
+            {
                 return ItemStatus::Missing
             }
             ContentState::Unknown(_) => return package_status,
             _ => {}
         }
     }
-    let plan = crate::planner::plan(
-        paths,
-        snapshot,
-        item,
-        None,
-        Some(&[component_id.to_string()]),
-    );
     // A plan that cannot be made right now, such as while no agent is
     // detected, says nothing about what is installed.
     let Ok(plan) = plan else {
@@ -119,11 +121,45 @@ pub(super) fn component_status(
     ItemStatus::Installed
 }
 
+/// Whether the installed components are the published ones although the
+/// package changed: everything the plan for them writes is already recorded,
+/// and nothing is left of a component the publisher removed. A change to a
+/// component that is not installed is no update.
+pub(super) fn selection_current(
+    ledger: &InstallationLedger,
+    record: &InstallationRecord,
+    item: &CatalogItem,
+    plan: &OperationPlan,
+) -> bool {
+    let dropped = record
+        .binding_ids
+        .iter()
+        .filter_map(|binding_id| ledger.bindings.get(binding_id))
+        .any(|binding| {
+            !item
+                .components
+                .iter()
+                .any(|component| component.id == binding.component_id)
+        });
+    !dropped && crate::executor::plan_satisfied(ledger, plan).unwrap_or(false)
+}
+
 pub(crate) fn item_status(
     paths: &SystemPaths,
     ledger: &InstallationLedger,
     item: Option<&CatalogItem>,
     canonical_id: &str,
+) -> ItemStatus {
+    status_on_disk(paths, ledger, item, canonical_id, false)
+}
+
+/// `current` counts a changed package as installed; see `selection_current`.
+fn status_on_disk(
+    paths: &SystemPaths,
+    ledger: &InstallationLedger,
+    item: Option<&CatalogItem>,
+    canonical_id: &str,
+    current: bool,
 ) -> ItemStatus {
     let Some(record) = ledger.items.get(canonical_id) else {
         return item.map_or(ItemStatus::Removed, |_| ItemStatus::Available);
@@ -133,7 +169,7 @@ pub(crate) fn item_status(
     }
     let published = match item {
         None => ItemStatus::Removed,
-        Some(item) if item.digest != record.item_digest => ItemStatus::UpdateAvailable,
+        Some(item) if item.digest != record.item_digest && !current => ItemStatus::UpdateAvailable,
         Some(_) => ItemStatus::Installed,
     };
     let key = (paths.app_data(), canonical_id.to_string());
@@ -165,7 +201,7 @@ fn last_statuses() -> &'static Mutex<BTreeMap<(PathBuf, String), ItemStatus>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::{component_status, item_status, refined_item_status};
     use crate::catalog::read_manifest_catalog;
     use crate::install::{self, ItemStatus};
@@ -174,7 +210,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    fn paths(root: &Path) -> SystemPaths {
+    pub(in crate::application) fn paths(root: &Path) -> SystemPaths {
         SystemPaths {
             home: root.join("home"),
             config: root.join("config"),
@@ -195,7 +231,9 @@ mod tests {
         .expect("skill");
     }
 
-    fn two_component_snapshot(root: &Path) -> (ConfiguredSource, SourceSnapshot) {
+    pub(in crate::application) fn two_component_snapshot(
+        root: &Path,
+    ) -> (ConfiguredSource, SourceSnapshot) {
         let source_root = root.join("source");
         write_skill(&source_root, "review");
         write_skill(&source_root, "docs");
@@ -229,7 +267,15 @@ mod tests {
         (source, snapshot)
     }
 
-    fn enable_cursor(paths: &SystemPaths) {
+    /// The snapshot again after the publisher changed its files.
+    pub(in crate::application) fn reread(snapshot: &SourceSnapshot) -> SourceSnapshot {
+        SourceSnapshot {
+            catalog: read_manifest_catalog(&snapshot.path, TEST_SOURCE_KEY).expect("catalog"),
+            ..snapshot.clone()
+        }
+    }
+
+    pub(in crate::application) fn enable_cursor(paths: &SystemPaths) {
         crate::agent_profiles::set_enabled(paths, crate::agent_profiles::TargetId::Cursor, true)
             .expect("enable");
     }
@@ -249,7 +295,7 @@ mod tests {
             ItemStatus::Available
         );
         assert_eq!(
-            refined_item_status(&paths, &empty, &snapshot, &item, None),
+            refined_item_status(&paths, &empty, &snapshot, &item, None, None),
             ItemStatus::Available
         );
         assert_eq!(
@@ -259,8 +305,8 @@ mod tests {
                 &snapshot,
                 &item,
                 review,
-                None,
-                ItemStatus::Available
+                ItemStatus::Available,
+                None
             ),
             ItemStatus::Available
         );
@@ -279,9 +325,8 @@ mod tests {
         )
         .expect("install review");
         let ledger = crate::executor::read_ledger(&paths).expect("ledger");
-        let record = ledger.items.get(&item.id);
         assert_eq!(
-            refined_item_status(&paths, &ledger, &snapshot, &item, None),
+            refined_item_status(&paths, &ledger, &snapshot, &item, None, None),
             ItemStatus::PartiallyInstalled
         );
         assert_eq!(
@@ -291,8 +336,8 @@ mod tests {
                 &snapshot,
                 &item,
                 review,
-                record,
-                ItemStatus::PartiallyInstalled
+                ItemStatus::PartiallyInstalled,
+                None
             ),
             ItemStatus::Installed
         );
@@ -303,8 +348,8 @@ mod tests {
                 &snapshot,
                 &item,
                 "docs",
-                record,
-                ItemStatus::PartiallyInstalled
+                ItemStatus::PartiallyInstalled,
+                None
             ),
             ItemStatus::Available
         );
@@ -313,7 +358,7 @@ mod tests {
             .expect("install all");
         let ledger = crate::executor::read_ledger(&paths).expect("ledger");
         assert_eq!(
-            refined_item_status(&paths, &ledger, &snapshot, &item, None),
+            refined_item_status(&paths, &ledger, &snapshot, &item, None, None),
             ItemStatus::Installed
         );
 
@@ -341,10 +386,57 @@ mod tests {
                 &snapshot,
                 &item,
                 review,
-                ledger.items.get(&item.id),
-                ItemStatus::SourceConflict
+                ItemStatus::SourceConflict,
+                None
             ),
             ItemStatus::SourceConflict
+        );
+    }
+
+    #[test]
+    fn a_component_the_publisher_removed_is_an_update_that_releases_it() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        enable_cursor(&paths);
+        let (source, snapshot) = two_component_snapshot(root.path());
+        let item = snapshot.catalog.items["tools"].clone();
+        install::install_item_components_approved(&paths, &source, &snapshot, &item, false, None)
+            .expect("install");
+        let docs = paths.home.join(".agents/skills/skillbook-docs");
+        assert!(docs.is_dir());
+
+        fs::write(
+            snapshot.path.join("agent-plugins.json"),
+            r#"{
+              "version": 2,
+              "source": { "id": "skillbook", "name": "Skillbook", "description": "Skills" },
+              "packages": [{
+                "id": "tools",
+                "components": [{"kind": "skill", "id": "review", "path": "skills/review"}]
+              }]
+            }"#,
+        )
+        .expect("manifest");
+        let snapshot = reread(&snapshot);
+        let item = snapshot.catalog.items["tools"].clone();
+        let ledger = crate::executor::read_ledger(&paths).expect("ledger");
+        assert_eq!(
+            refined_item_status(&paths, &ledger, &snapshot, &item, None, None),
+            ItemStatus::UpdateAvailable
+        );
+
+        install::install_item_components_approved(&paths, &source, &snapshot, &item, false, None)
+            .expect("update");
+        let ledger = crate::executor::read_ledger(&paths).expect("ledger");
+        assert!(ledger
+            .bindings
+            .values()
+            .all(|binding| binding.component_id != "docs"));
+        assert!(!docs.exists());
+        assert!(paths.home.join(".agents/skills/skillbook-review").is_dir());
+        assert_eq!(
+            refined_item_status(&paths, &ledger, &snapshot, &item, None, None),
+            ItemStatus::Installed
         );
     }
 

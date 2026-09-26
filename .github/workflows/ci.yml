@@ -58,8 +58,9 @@ jobs:
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       # The marketplace server image builds the validator without the desktop
-      # application; keep that configuration compiling and lint-clean too.
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --no-default-features --bin validate-source -- -D warnings
+      # application; keep that configuration, and the other tools only it
+      # builds, compiling and lint-clean too.
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --no-default-features --features tools --bins -- -D warnings
 
       - name: Build Windows application bundles
         if: runner.os == 'Windows'
@@ -112,7 +113,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Build the validator the server image ships
-        run: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin validate-source
+        run: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --features tools --bin validate-source
 
       - run: dotnet restore server/Marketplace.slnx
       - run: dotnet build server/Marketplace.slnx --no-restore -warnaserror

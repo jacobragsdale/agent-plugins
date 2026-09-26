@@ -13,6 +13,7 @@ use reqwest::StatusCode;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -21,6 +22,12 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REDIRECTS: usize = 5;
 const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
+/// Files and folders together; `validate_catalog_tree` holds files to
+/// `MAX_SOURCE_FILES` once the archive is out.
+const MAX_ARCHIVE_ENTRIES: usize = 2 * MAX_SOURCE_FILES;
+/// The most a tar stream may decompress to: the file bytes plus headers,
+/// padding, and long names.
+const MAX_TAR_STREAM_BYTES: u64 = 2 * MAX_SOURCE_BYTES;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ArtifactValidators {
@@ -196,6 +203,7 @@ fn extract_zip(bytes: &[u8], destination: &Path) -> Result<(), String> {
         let relative = sanitize_archive_path(&enclosed)?;
         let path = destination.join(&relative);
         if entry.is_dir() {
+            account_extracted_file(0, &mut file_count, &mut total_bytes)?;
             fs::create_dir_all(&path)
                 .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
             continue;
@@ -204,17 +212,40 @@ fn extract_zip(bytes: &[u8], destination: &Path) -> Result<(), String> {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
         }
-        account_extracted_file(entry.size(), &mut file_count, &mut total_bytes)?;
+        let size = entry.size();
+        account_extracted_file(size, &mut file_count, &mut total_bytes)?;
+        let mode = entry.unix_mode();
         let mut file = File::create(&path)
             .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
-        io::copy(&mut entry, &mut file)
+        // The declared size is only checked against the CRC at the end of the
+        // entry, so stop one byte past it instead of trusting it.
+        let copied = io::copy(&mut (&mut entry).take(size + 1), &mut file)
             .map_err(|error| format!("Could not extract {}: {error}", path.display()))?;
+        if copied > size {
+            return Err(format!(
+                "The zip entry {} is larger than it declares.",
+                relative.display()
+            ));
+        }
+        keep_executable_bits(&file, mode, &path)?;
     }
     Ok(())
 }
 
 fn extract_tar<R: Read>(reader: R, destination: &Path) -> Result<(), String> {
-    let mut archive = tar::Archive::new(reader);
+    let mut archive = tar::Archive::new(reader.take(MAX_TAR_STREAM_BYTES));
+    let result = extract_tar_entries(&mut archive, destination);
+    // A stream cut off at the bound fails mid-entry or looks like a clean end.
+    if archive.into_inner().limit() == 0 {
+        return Err("The source expands beyond 50 MB.".to_string());
+    }
+    result
+}
+
+fn extract_tar_entries<R: Read>(
+    archive: &mut tar::Archive<R>,
+    destination: &Path,
+) -> Result<(), String> {
     let mut file_count = 0;
     let mut total_bytes = 0_u64;
     for entry in archive
@@ -238,6 +269,7 @@ fn extract_tar<R: Read>(reader: R, destination: &Path) -> Result<(), String> {
         let relative = sanitize_archive_path(&entry_path)?;
         let path = destination.join(&relative);
         if entry_type.is_dir() {
+            account_extracted_file(0, &mut file_count, &mut total_bytes)?;
             fs::create_dir_all(&path)
                 .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
             continue;
@@ -258,16 +290,36 @@ fn extract_tar<R: Read>(reader: R, destination: &Path) -> Result<(), String> {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
         }
-        account_extracted_file(
-            header.size().unwrap_or(0),
-            &mut file_count,
-            &mut total_bytes,
-        )?;
+        let mode = header.mode().ok();
+        // The entry's size, not the header's: a PAX record can override it.
+        account_extracted_file(entry.size(), &mut file_count, &mut total_bytes)?;
         let mut file = File::create(&path)
             .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
         io::copy(&mut entry, &mut file)
             .map_err(|error| format!("Could not extract {}: {error}", path.display()))?;
+        keep_executable_bits(&file, mode, &path)?;
     }
+    Ok(())
+}
+
+/// Adds the archive's executable bits to the new file. The rest of the mode
+/// stays the process default, so an archive cannot make a file unreadable.
+#[cfg(unix)]
+fn keep_executable_bits(file: &File, mode: Option<u32>, path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let executable = mode.unwrap_or(0) & 0o111;
+    if executable == 0 {
+        return Ok(());
+    }
+    let describe =
+        |error: io::Error| format!("Could not set permissions on {}: {error}", path.display());
+    let mut permissions = file.metadata().map_err(describe)?.permissions();
+    permissions.set_mode(permissions.mode() | executable);
+    file.set_permissions(permissions).map_err(describe)
+}
+
+#[cfg(not(unix))]
+fn keep_executable_bits(_file: &File, _mode: Option<u32>, _path: &Path) -> Result<(), String> {
     Ok(())
 }
 
@@ -305,9 +357,9 @@ fn account_extracted_file(
     *file_count = file_count
         .checked_add(1)
         .ok_or_else(|| "The source contains too many files.".to_string())?;
-    if *file_count > MAX_SOURCE_FILES {
+    if *file_count > MAX_ARCHIVE_ENTRIES {
         return Err(format!(
-            "The source contains more than {MAX_SOURCE_FILES} files."
+            "The source archive contains more than {MAX_ARCHIVE_ENTRIES} files and folders."
         ));
     }
     *total_bytes = total_bytes
@@ -369,13 +421,16 @@ fn unwrap_single_directory(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) static CLIENT: Mutex<Option<Client>> = Mutex::new(None);
+
 fn client() -> Result<Client, String> {
-    Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .redirect(Policy::custom(redirect_policy))
-        .build()
-        .map_err(|error| format!("Could not create the HTTPS client: {error}"))
+    crate::marketplace::cached_client(&CLIENT, |builder| {
+        builder
+            .timeout(FETCH_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .redirect(Policy::custom(redirect_policy))
+            .build()
+    })
 }
 
 fn redirect_policy(attempt: Attempt<'_>) -> Action {
@@ -427,9 +482,11 @@ pub(crate) fn is_gone(message: &str) -> bool {
 }
 
 /// True when the request never reached the server: the connection was
-/// refused, the name did not resolve, or the connect timed out.
+/// refused, the name did not resolve, the connect timed out, or Windows could
+/// not reach a domain controller to sign the request.
 pub(crate) fn is_connect_failure(message: &str) -> bool {
     message.contains(crate::marketplace::CONNECT_FAILURE)
+        || message.contains(crate::host_identity::NO_DOMAIN_CONTROLLER)
 }
 
 /// True when the server was not reached or did not answer in time.
@@ -440,7 +497,13 @@ pub(crate) fn is_unreachable(message: &str) -> bool {
 /// True when the failure is worth trying again later: the server was not
 /// reached, was too slow, was overloaded, or asked the client to back off.
 pub(crate) fn is_transient(message: &str) -> bool {
-    is_unreachable(message) || message.contains("(HTTP 5") || message.contains("(HTTP 429")
+    is_unreachable(message) || server_busy(message)
+}
+
+/// True when the server answered, but was failing or asked the client to back
+/// off. The machine is online, so this is not reported as being offline.
+pub(crate) fn server_busy(message: &str) -> bool {
+    message.contains("(HTTP 5") || message.contains("(HTTP 429")
 }
 
 /// The status code stays in the text (`is_gone` and `is_transient` read it);
@@ -609,6 +672,92 @@ mod tests {
         assert!(destination.path().join("agent-plugins.json").is_file());
         assert!(destination.path().join("skills/review/SKILL.md").is_file());
         assert!(!destination.path().join("repo-main").exists());
+    }
+
+    #[test]
+    fn zip_entries_cannot_inflate_past_their_declared_size() {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut cursor);
+            zip.start_file(
+                "big.txt",
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
+            )
+            .expect("start");
+            zip.write_all(&vec![0; 8 * 1024 * 1024]).expect("write");
+            zip.finish().expect("finish");
+        }
+        let mut bytes = cursor.into_inner();
+        // Declare one byte in the local header and the central directory.
+        bytes[22..26].copy_from_slice(&1_u32.to_le_bytes());
+        let central = bytes
+            .windows(4)
+            .position(|window| window == b"PK\x01\x02")
+            .expect("central directory");
+        bytes[central + 24..central + 28].copy_from_slice(&1_u32.to_le_bytes());
+        let destination = tempfile::tempdir().expect("dest");
+        let error = extract_source_archive(&bytes, destination.path()).expect_err("bomb");
+        assert!(error.contains("larger than it declares"), "{error}");
+        let written = fs::metadata(destination.path().join("big.txt")).map_or(0, |m| m.len());
+        assert!(written <= 2, "{written} bytes written");
+    }
+
+    #[test]
+    fn tar_gz_streams_stop_at_the_bound() {
+        let mut header = tar::Header::new_gnu();
+        header.set_path("././@LongLink").expect("path");
+        header.set_entry_type(tar::EntryType::GNULongName);
+        header.set_size(MAX_TAR_STREAM_BYTES + 1);
+        header.set_cksum();
+        // Repeat one sync-flushed block of zeros instead of deflating the
+        // whole stream, which is slow in a debug build.
+        let mut compress = flate2::Compress::new(flate2::Compression::fast(), false);
+        let mut deflate = |input: &[u8]| {
+            let mut output = Vec::with_capacity(input.len() + 1024);
+            compress
+                .compress_vec(input, &mut output, flate2::FlushCompress::Sync)
+                .expect("deflate");
+            output
+        };
+        let mut bytes = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+        bytes.extend(deflate(header.as_bytes()));
+        let chunk = 1024 * 1024;
+        let zeros = deflate(&vec![0; chunk]);
+        for _ in 0..=MAX_TAR_STREAM_BYTES / chunk as u64 {
+            bytes.extend_from_slice(&zeros);
+        }
+        let destination = tempfile::tempdir().expect("dest");
+        let error = extract_source_archive(&bytes, destination.path()).expect_err("bomb");
+        assert!(error.contains("beyond 50 MB"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_keeps_executable_bits() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (tree, skill) = source_tree();
+        let script = skill.join("x.sh");
+        fs::write(&script, "#!/bin/sh\n").expect("script");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let zip = crate::staging::zip_tree(tree.path()).expect("zip");
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.mode(tar::HeaderMode::Complete);
+        builder.append_dir_all("repo", tree.path()).expect("tar");
+        let tar = builder.into_inner().expect("tar");
+        for bytes in [zip, tar] {
+            let destination = tempfile::tempdir().expect("dest");
+            extract_source_archive(&bytes, destination.path()).expect("extract");
+            let mode = fs::metadata(destination.path().join("skills/review/x.sh"))
+                .expect("x.sh")
+                .permissions()
+                .mode();
+            assert_ne!(mode & 0o111, 0, "{mode:o}");
+            let plain = fs::metadata(destination.path().join("agent-plugins.json"))
+                .expect("manifest")
+                .permissions()
+                .mode();
+            assert_eq!(plain & 0o111, 0, "{plain:o}");
+        }
     }
 
     #[test]
@@ -789,5 +938,59 @@ mod tests {
         assert!(is_transient(
             "Could not download the artifact (HTTP 503): x"
         ));
+    }
+
+    #[test]
+    fn requests_share_one_client_until_reset() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}/source.zip", listener.local_addr().expect("addr"));
+        let connections = Arc::new(Mutex::new(0));
+        let accepted = Arc::clone(&connections);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                *accepted.lock().expect("lock") += 1;
+                thread::spawn(move || {
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) if line == "\r\n" => {
+                                let _ = reader
+                                    .get_mut()
+                                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                            }
+                            Ok(_) => {}
+                        }
+                    }
+                });
+            }
+        });
+        head_artifact(&url).expect("first");
+        head_artifact(&url).expect("second");
+        assert_eq!(
+            *connections.lock().expect("lock"),
+            1,
+            "one pooled connection"
+        );
+        crate::marketplace::reset_http_clients();
+        head_artifact(&url).expect("after reset");
+        assert_eq!(*connections.lock().expect("lock"), 2, "a fresh client");
+    }
+
+    #[test]
+    fn an_unreachable_domain_controller_is_offline() {
+        let error = format!(
+            "{} (Windows code 0x80090311 for HTTP/marketplace.example.com)",
+            crate::host_identity::NO_DOMAIN_CONTROLLER
+        );
+        assert!(is_connect_failure(&error));
+        assert!(is_unreachable(&error));
+        assert_eq!(
+            crate::ipc_error::IpcError::from(error).kind,
+            crate::ipc_error::IpcErrorKind::Offline
+        );
     }
 }

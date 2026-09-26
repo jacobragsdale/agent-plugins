@@ -10,10 +10,25 @@ export function ItemCard({
   busy,
   allBusy,
   onChange,
+  onManualChange,
   onError
-}: Readonly<{ item: CatalogItem; busy: boolean; allBusy: boolean; onChange: (item: CatalogItem, componentId?: string) => Promise<void>; onError: (error: AppError) => void }>): JSX.Element {
+}: Readonly<{
+  item: CatalogItem;
+  busy: boolean;
+  allBusy: boolean;
+  onChange: (item: CatalogItem, componentId?: string) => Promise<void>;
+  onManualChange: (item: CatalogItem, manual: boolean, componentId?: string) => Promise<void>;
+  onError: (error: AppError) => void;
+}>): JSX.Element {
   // A package another source installed is not this one's to touch.
   const protectedItem = item.status === "sourceConflict";
+  // A package its source no longer publishes has no skill to reinstall.
+  const manualLocked = busy || allBusy || protectedItem || item.status === "removed";
+  const changeManual = (manual: boolean, componentId?: string): void => {
+    onManualChange(item, manual, componentId).catch((reason: unknown) => {
+      onError(toAppError(reason));
+    });
+  };
   const expandable = item.components.length > 1;
   const [componentsOpen, setComponentsOpen] = useState(true);
   return (
@@ -28,7 +43,15 @@ export function ItemCard({
               <KindBadge key={kind} kind={kind} />
             ))}
             {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
-            {item.manualInvocation ? <Badge color="blue">Only when you ask</Badge> : null}
+            {item.components.some((component) => component.kind === "skill") ? (
+              <ManualInvocationToggle
+                manual={item.manualInvocation}
+                disabled={manualLocked}
+                onToggle={() => {
+                  changeManual(!item.manualInvocation);
+                }}
+              />
+            ) : null}
             <MarketplaceBadges meta={item.marketplace} />
           </div>
           <Text as="p" color="gray" size="2">
@@ -78,7 +101,18 @@ export function ItemCard({
           <ul>
             {item.components.map((component) => (
               <li key={`${component.kind}:${component.id}`}>
-                <ComponentRow component={component} busy={busy} allBusy={allBusy} protectedItem={protectedItem} onChange={() => onChange(item, component.id)} onError={onError} />
+                <ComponentRow
+                  component={component}
+                  busy={busy}
+                  allBusy={allBusy}
+                  protectedItem={protectedItem}
+                  manualLocked={manualLocked}
+                  onChange={() => onChange(item, component.id)}
+                  onManualToggle={() => {
+                    changeManual(!component.manualInvocation, component.id);
+                  }}
+                  onError={onError}
+                />
               </li>
             ))}
           </ul>
@@ -105,10 +139,29 @@ function MarketplaceBadges({ meta }: Readonly<{ meta: CatalogItem["marketplace"]
   );
 }
 
-function KindBadge({ kind }: Readonly<{ kind: string }>): JSX.Element {
+/** Whether a skill runs only when asked. Clicking flips it and reinstalls the skill with the new setting. */
+function ManualInvocationToggle({ manual, disabled, onToggle }: Readonly<{ manual: boolean; disabled: boolean; onToggle: () => void }>): JSX.Element {
   return (
+    <Badge asChild color={manual ? "blue" : "gray"} variant={manual ? "soft" : "outline"}>
+      <button
+        type="button"
+        className="manual-invocation-toggle"
+        aria-pressed={manual}
+        disabled={disabled}
+        title={manual ? "Click to let the AI use this on its own." : "Click to use this only when you ask for it."}
+        onClick={onToggle}
+      >
+        {manual ? "Only when you ask" : "Used automatically"}
+      </button>
+    </Badge>
+  );
+}
+
+function KindBadge({ kind }: Readonly<{ kind: string }>): JSX.Element | null {
+  const label = componentLabel(kind);
+  return label === null ? null : (
     <Badge color="gray" variant="soft">
-      {componentLabel(kind)}
+      {label}
     </Badge>
   );
 }
@@ -138,9 +191,20 @@ function ComponentRow({
   busy,
   allBusy,
   protectedItem,
+  manualLocked,
   onChange,
+  onManualToggle,
   onError
-}: Readonly<{ component: CatalogComponent; busy: boolean; allBusy: boolean; protectedItem: boolean; onChange: () => Promise<void>; onError: (error: AppError) => void }>): JSX.Element {
+}: Readonly<{
+  component: CatalogComponent;
+  busy: boolean;
+  allBusy: boolean;
+  protectedItem: boolean;
+  manualLocked: boolean;
+  onChange: () => Promise<void>;
+  onManualToggle: () => void;
+  onError: (error: AppError) => void;
+}>): JSX.Element {
   const blocked = protectedItem || component.status === "sourceConflict";
   return (
     <div className="component-row">
@@ -149,7 +213,9 @@ function ComponentRow({
           <Text size="2">{component.id}</Text>
           <KindBadge kind={component.kind} />
           {component.status === "available" || component.status === "installed" ? null : <Badge color={statusColor(component.status)}>{statusLabel(component.status)}</Badge>}
-          {component.manualInvocation ? <Badge color="blue">Only when you ask</Badge> : null}
+          {component.kind === "skill" ? (
+            <ManualInvocationToggle manual={component.manualInvocation} disabled={manualLocked || component.status === "sourceConflict"} onToggle={onManualToggle} />
+          ) : null}
         </div>
         <Text as="p" color="gray" size="2">
           {component.description}

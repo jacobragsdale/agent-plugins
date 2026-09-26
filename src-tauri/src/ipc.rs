@@ -1,6 +1,7 @@
 //! Thin Tauri command surface for the desktop UI. Every command rejects with
 //! an [`IpcError`], classified here from the internal message.
 
+use crate::agent_profiles::TargetId;
 use crate::app_state::{AppState, BulkAction, BulkPlan, BulkResult, PreparedSource};
 use crate::application::{self, RuntimeState};
 use crate::install::{OperationOutcome, SourceRemovalPlan};
@@ -104,6 +105,25 @@ pub(crate) async fn replace_item(
 }
 
 #[tauri::command]
+pub(crate) async fn set_manual_invocation(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+    local_id: &str,
+    component_id: Option<String>,
+    manual: bool,
+) -> Result<OperationOutcome, IpcError> {
+    application::set_manual_invocation(
+        runtime.inner(),
+        source_id,
+        local_id,
+        component_id.as_deref(),
+        manual,
+    )
+    .await
+    .map_err(IpcError::from)
+}
+
+#[tauri::command]
 pub(crate) async fn uninstall_item(
     runtime: State<'_, RuntimeState>,
     source_id: &str,
@@ -167,6 +187,20 @@ pub(crate) async fn remove_manifest_source(
 #[tauri::command]
 pub(crate) async fn reset_app(runtime: State<'_, RuntimeState>) -> Result<BulkResult, IpcError> {
     application::reset_app(runtime.inner())
+        .await
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn run_tutorial(target_id: TargetId) -> Result<(), IpcError> {
+    application::run_tutorial(target_id)
+        .await
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn dismiss_tutorial() -> Result<(), IpcError> {
+    application::dismiss_tutorial()
         .await
         .map_err(IpcError::from)
 }

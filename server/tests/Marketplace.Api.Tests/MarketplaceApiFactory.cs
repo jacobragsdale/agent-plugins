@@ -158,7 +158,7 @@ public sealed class PermissiveValidator : IPackageValidator
     {
         var manifest = Path.Combine(sourceDirectory, "agent-plugins.json");
         return Task.FromResult(File.Exists(manifest)
-            ? new ValidationOutcome(true, "fake", 1, [])
+            ? new ValidationOutcome(true, [])
             : ValidationOutcome.Fatal("agent-plugins.json is missing."));
     }
 

@@ -8,9 +8,9 @@ namespace Marketplace.Api.Packages;
 
 public sealed record ValidationError(string Path, string Message);
 
-public sealed record ValidationOutcome(bool Accepted, string? SourceId, int ValidInstalls, IReadOnlyList<ValidationError> Errors)
+public sealed record ValidationOutcome(bool Accepted, IReadOnlyList<ValidationError> Errors)
 {
-    public static ValidationOutcome Fatal(string message) => new(false, null, 0, [new ValidationError("", message)]);
+    public static ValidationOutcome Fatal(string message) => new(false, [new ValidationError("", message)]);
 }
 
 /// <summary>What <c>validate-source stage</c> wraps into a one-package source zip at <see cref="OutputZip"/>.</summary>
@@ -43,7 +43,7 @@ public sealed class ProcessPackageValidator(IOptions<ValidatorOptions> options, 
         }
 
         var errors = report.Errors.Select(error => new ValidationError(error.Path, error.Message)).ToArray();
-        return new ValidationOutcome(errors.Length == 0 && report.ValidInstalls > 0, report.SourceId, report.ValidInstalls, errors);
+        return new ValidationOutcome(errors.Length == 0 && report.ValidInstalls > 0, errors);
     }
 
     public async Task StageAsync(StagingRequest request, CancellationToken cancellationToken)
@@ -152,9 +152,6 @@ public sealed class ProcessPackageValidator(IOptions<ValidatorOptions> options, 
 
     private sealed class ValidatorReport
     {
-        [JsonPropertyName("sourceId")]
-        public string? SourceId { get; init; }
-
         [JsonPropertyName("validInstalls")]
         public int ValidInstalls { get; init; }
 

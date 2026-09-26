@@ -21,6 +21,7 @@ pub(super) fn build_app_state(
     catalog_message: Option<String>,
 ) -> Result<AppState, String> {
     let ledger_state = crate::executor::read_ledger(paths)?;
+    let profiles = crate::planner::current_profiles(paths);
     let mut current_ids = BTreeSet::new();
     let mut items = Vec::new();
     let mut sources = Vec::new();
@@ -61,6 +62,7 @@ pub(super) fn build_app_state(
                 items.push(current_item_state(
                     paths,
                     &ledger_state,
+                    &profiles,
                     &loaded_source.definition,
                     snapshot,
                     item,
@@ -104,6 +106,7 @@ pub(super) fn build_app_state(
             .cmp(&right.name)
             .then_with(|| left.repository_id.cmp(&right.repository_id))
     });
+    let agent_profiles = agent_profiles::states(paths)?;
     Ok(AppState {
         checked_at_epoch_seconds: checked,
         connectivity: Connectivity::Online,
@@ -113,7 +116,8 @@ pub(super) fn build_app_state(
         repositories: repository_states,
         sources,
         items,
-        agent_profiles: agent_profiles::states(paths)?,
+        tutorial: crate::tutorial::offer(paths, &agent_profiles),
+        agent_profiles,
         marketplace_url: None,
         download_url: crate::locator::download_url().map(str::to_string),
         identity: None,
@@ -173,7 +177,7 @@ pub(super) fn write_identity_cache(
         Some(identity) => {
             if let Ok(json) = serde_json::to_vec(identity) {
                 let _ = std::fs::create_dir_all(cache);
-                let _ = std::fs::write(path, json);
+                let _ = crate::fs_retry::replace_file(&path, &json);
             }
         }
         None => {
@@ -246,18 +250,25 @@ pub(super) fn repository_state(
 pub(super) fn current_item_state(
     paths: &SystemPaths,
     ledger_state: &ledger::InstallationLedger,
+    profiles: &[agent_profiles::AgentProfile],
     source: &ConfiguredSource,
     snapshot: &SourceSnapshot,
     item: &CatalogItem,
 ) -> CatalogItemState {
-    let plan = crate::planner::plan(paths, snapshot, item, None, None).ok();
+    let plan = crate::planner::plan(paths, snapshot, item, Some(profiles), None).ok();
     let compatibility = plan
         .as_ref()
         .map(|plan| plan.compatibility.clone())
         .unwrap_or_default();
     let record = ledger_state.items.get(&item.id);
-    let status =
-        super::status::refined_item_status(paths, ledger_state, snapshot, item, plan.as_ref());
+    let status = super::status::refined_item_status(
+        paths,
+        ledger_state,
+        snapshot,
+        item,
+        plan.as_ref(),
+        Some(profiles),
+    );
     let approval = plan.as_ref().map_or_else(
         || (false, Vec::new()),
         |plan| {
@@ -265,6 +276,13 @@ pub(super) fn current_item_state(
             (preview.requires_approval, preview.risk_details)
         },
     );
+    let overrides = crate::invocation::read_or_default(paths);
+    let manual = |component| crate::invocation::effective(&overrides, &item.id, component);
+    let skills = item
+        .components
+        .iter()
+        .filter(|component| component.kind == CatalogComponentKind::Skill)
+        .collect::<Vec<_>>();
     CatalogItemState {
         id: item.id.clone(),
         local_id: item.local_id.clone(),
@@ -274,7 +292,7 @@ pub(super) fn current_item_state(
         source_url: source.url().to_string(),
         name: item.name.clone(),
         description: item.description.clone(),
-        manual_invocation: item.disable_model_invocation,
+        manual_invocation: !skills.is_empty() && skills.iter().all(|component| manual(component)),
         source: item.source.clone(),
         source_is_directory: item.source_is_directory,
         manifest_version: item.manifest_version,
@@ -285,15 +303,15 @@ pub(super) fn current_item_state(
                 id: component.id.clone(),
                 kind: component_kind_label(component.kind).to_string(),
                 description: component.description.clone(),
-                manual_invocation: component.disable_model_invocation,
+                manual_invocation: manual(component),
                 status: super::status::component_status(
                     paths,
                     ledger_state,
                     snapshot,
                     item,
                     &component.id,
-                    record,
                     status,
+                    Some(profiles),
                 ),
                 requires_approval: crate::planner::requires_approval(item, &[component]),
             })
@@ -488,7 +506,7 @@ mod tests {
             checks: vec![crate::preflight::PreflightCheck {
                 id: "auth.identity".to_string(),
                 group: "auth".to_string(),
-                title: "Signed in".to_string(),
+                title: "Marketplace sign-in".to_string(),
                 status: crate::preflight::CheckStatus::Fail,
                 detail: detail.to_string(),
                 remediation: None,
@@ -566,7 +584,14 @@ mod tests {
         };
         let ledger_state = crate::executor::read_ledger(&paths).expect("ledger");
 
-        let state = current_item_state(&paths, &ledger_state, &source, &snapshot, &item);
+        let state = current_item_state(
+            &paths,
+            &ledger_state,
+            &crate::agent_profiles::read(&paths),
+            &source,
+            &snapshot,
+            &item,
+        );
 
         assert!(state.requires_approval);
         assert!(

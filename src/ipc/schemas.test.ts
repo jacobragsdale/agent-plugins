@@ -24,6 +24,8 @@ function withItems(items: readonly unknown[]): unknown {
 describe("AppState contract", () => {
   it("parses a realistic backend payload", () => {
     const state = appStateSchema.parse(payload);
+    // z.object strips unknown keys, so a field the schema forgets would vanish here without this.
+    expect(state).toEqual(fixture);
     expect(state.items.map((item) => item.id)).toEqual(fixture.items.map((item) => item.id));
     expect(state.items.slice(0, 3).map((item) => item.id)).toEqual(["official/publish", "team-data/sql-helper", "team-data/chart-style"]);
     expect(state.sources.map((source) => source.sourceId)).toEqual(["official", "team-data"]);
@@ -34,16 +36,9 @@ describe("AppState contract", () => {
     expect(scheduledSyncSchema.parse({ kind: "updated", state: payload }).kind).toBe("updated");
   });
 
-  it("reads a failed scheduled sync in the old and the typed shape", () => {
-    const typed = { kind: "offline", message: "You're offline." };
-    for (const event of [
-      { kind: "failed", message: "os error 10060" },
-      { kind: "failed", message: typed },
-      { kind: "failed", message: typed.message, error: typed }
-    ]) {
-      const parsed = scheduledSyncSchema.parse(event);
-      expect(parsed.kind === "failed" ? toAppError(parsed.error).summary : null).toBe(typeof event.message === "string" ? event.message : typed.message);
-    }
+  it("reads a failed scheduled sync", () => {
+    const parsed = scheduledSyncSchema.parse({ kind: "failed", error: { kind: "offline", message: "You're offline." } });
+    expect(parsed.kind === "failed" ? toAppError(parsed.error).summary : null).toBe("You're offline.");
   });
 
   it("ignores fields a newer backend adds", () => {

@@ -555,3 +555,13 @@ button {
   gap: 6px;
   margin-left: 12px;
 }
+
+.manual-invocation-toggle {
+  border: 0;
+  cursor: pointer;
+}
+
+.manual-invocation-toggle:disabled {
+  cursor: default;
+  opacity: 0.6;
+}

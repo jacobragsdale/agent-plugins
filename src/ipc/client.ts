@@ -5,7 +5,27 @@ import type { IpcErrorKind } from "./schemas";
 
 export const SCHEDULED_SYNC_EVENT = "scheduled-sync";
 
-export async function invokeParsed<T>(command: string, schema: z.ZodType<T>, args?: Record<string, unknown>): Promise<T> {
+/** The commands `lib.rs` registers with `generate_handler!`; keep the two lists the same. */
+export type IpcCommand =
+  | "load_cached_manifest_state"
+  | "run_preflight"
+  | "sync_manifest_state"
+  | "prepare_source"
+  | "confirm_source"
+  | "cancel_prepared_source"
+  | "install_item"
+  | "replace_item"
+  | "set_manual_invocation"
+  | "uninstall_item"
+  | "plan_bulk_items"
+  | "run_bulk_items"
+  | "plan_source_removal"
+  | "remove_manifest_source"
+  | "reset_app"
+  | "run_tutorial"
+  | "dismiss_tutorial";
+
+export async function invokeParsed<T>(command: IpcCommand, schema: z.ZodType<T>, args?: Record<string, unknown>): Promise<T> {
   const payload = args === undefined ? await invoke<unknown>(command) : await invoke<unknown>(command, args);
   return schema.parse(payload);
 }

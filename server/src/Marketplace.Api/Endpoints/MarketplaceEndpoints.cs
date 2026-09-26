@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using Marketplace.Api.Access;
 using Marketplace.Api.Auth;
@@ -45,8 +46,16 @@ public static class MarketplaceEndpoints
         }).AllowAnonymous().WithName("Health").ProducesProblem(503);
 
         // Every authenticated route settles the caller's identity, personal namespace included, before it runs.
+        // Credentials are ambient (Negotiate), so a browser's cross-site write is refused; the CLI and desktop send no Sec-Fetch-Site.
         var authenticated = api.MapGroup("").RequireAuthorization().AddEndpointFilter(async (invocation, next) =>
         {
+            var request = invocation.HttpContext.Request;
+            if (!HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method)
+                && request.Headers.TryGetValue("Sec-Fetch-Site", out var site) && site.ToString() is not ("same-origin" or "none"))
+            {
+                throw new ProblemException(403, "The marketplace refuses changes sent from another website. Use the marketplace portal, the desktop app, or the CLI.");
+            }
+
             await invocation.HttpContext.ResolveMarketplaceIdentityAsync();
             return await next(invocation);
         });
@@ -65,7 +74,11 @@ public static class MarketplaceEndpoints
 
         authenticated.MapMethods("/sources/{ns}/archive", ["GET", "HEAD"], async (string ns, HttpContext context, MarketplaceDbContext db, AccessService access, CancellationToken cancellationToken) =>
         {
-            var archive = await db.NamespaceArchives.AsNoTracking().SingleOrDefaultAsync(candidate => candidate.Namespace == ns, cancellationToken);
+            // HEAD and a matching If-None-Match are answered from the stored digest; the bytes load only for a body.
+            var archive = await db.NamespaceArchives
+                .Where(candidate => candidate.Namespace == ns)
+                .Select(candidate => new { candidate.Digest, candidate.PackageCount, candidate.GeneratedAt, candidate.Bytes.Length })
+                .SingleOrDefaultAsync(cancellationToken);
             if (archive is null || archive.PackageCount == 0)
             {
                 throw ProblemException.NotFound($"The source {ns}");
@@ -84,15 +97,21 @@ public static class MarketplaceEndpoints
                 throw ProblemException.NotFound($"The source {ns}");
             }
 
+            // A subset's ETag names the full archive and the kept ids, so it is known without building the subset.
+            var filtered = keep.Count != live.Count;
+            var digest = filtered
+                ? Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', keep.Order(StringComparer.Ordinal).Prepend(archive.Digest)))))
+                : archive.Digest;
             context.Response.Headers[HeaderNames.LastModified] = archive.GeneratedAt.ToString("R");
             context.Response.Headers[HeaderNames.ContentDisposition] = $"attachment; filename=\"{ns}-latest.zip\"";
-            if (keep.Count == live.Count)
+            if (Unchanged(context, digest, "application/zip", filtered ? null : archive.Length) is { } answered)
             {
-                return Conditional(context, archive.Bytes, archive.Digest, "application/zip");
+                return answered;
             }
 
-            var variant = NamespaceArchiveBuilder.Filter(archive.Bytes, keep);
-            return Conditional(context, variant.Bytes, variant.Digest, "application/zip");
+            var bytes = await db.NamespaceArchives.Where(candidate => candidate.Namespace == ns).Select(candidate => candidate.Bytes).SingleOrDefaultAsync(cancellationToken)
+                ?? throw ProblemException.NotFound($"The source {ns}");
+            return Results.Bytes(filtered ? NamespaceArchiveBuilder.Filter(bytes, keep).Bytes : bytes, "application/zip");
         }).WithName("SourceArchive").Produces(200, contentType: "application/zip").ProducesProblem(404);
 
         authenticated.MapGet("/index", async (HttpContext context, CatalogService catalog, CancellationToken cancellationToken) =>
@@ -440,7 +459,14 @@ public static class MarketplaceEndpoints
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     /// <summary>Serves bytes with a strong ETag and honors If-None-Match.</summary>
-    private static IResult Conditional(HttpContext context, byte[] bytes, string digest, string contentType)
+    private static IResult Conditional(HttpContext context, byte[] bytes, string digest, string contentType) =>
+        Unchanged(context, digest, contentType, bytes.Length) ?? Results.Bytes(bytes, contentType);
+
+    /// <summary>
+    /// Sets a strong ETag, then answers a matching If-None-Match with 304 and a HEAD with headers only
+    /// (<paramref name="length"/> when known). Null means the caller sends the body.
+    /// </summary>
+    private static IResult? Unchanged(HttpContext context, string digest, string contentType, long? length)
     {
         var etag = $"\"{digest}\"";
         context.Response.Headers[HeaderNames.ETag] = etag;
@@ -452,12 +478,12 @@ public static class MarketplaceEndpoints
 
         if (HttpMethods.IsHead(context.Request.Method))
         {
-            context.Response.ContentLength = bytes.Length;
+            context.Response.ContentLength = length;
             context.Response.ContentType = contentType;
             return Results.Empty;
         }
 
-        return Results.Bytes(bytes, contentType);
+        return null;
     }
 }
 

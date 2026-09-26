@@ -15,14 +15,10 @@ use std::io;
 /// Target IDs of the agents the app currently configures, for usage events.
 pub(super) fn enabled_agent_ids(paths: &SystemPaths) -> Vec<String> {
     crate::agent_profiles::read(paths)
-        .map(|profiles| {
-            profiles
-                .into_iter()
-                .filter(|profile| profile.enabled)
-                .map(|profile| profile.target_id.as_str().to_string())
-                .collect()
-        })
-        .unwrap_or_default()
+        .into_iter()
+        .filter(|profile| profile.enabled)
+        .map(|profile| profile.target_id.as_str().to_string())
+        .collect()
 }
 
 /// Statuses that mean the package is on this machine, for the installed set.
@@ -75,17 +71,14 @@ pub(crate) async fn install_item(
     let _guard = runtime.operation_lock.lock().await;
     let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
     let ids = requested_component_ids(&item, component_id)?;
-    let outcome = match ids.as_deref() {
-        None => install::install_item_approved(&paths, &source, &snapshot, &item, trust_approved),
-        Some(ids) => install::install_item_components_approved(
-            &paths,
-            &source,
-            &snapshot,
-            &item,
-            trust_approved,
-            Some(ids),
-        ),
-    }?;
+    let outcome = install::install_item_components_approved(
+        &paths,
+        &source,
+        &snapshot,
+        &item,
+        trust_approved,
+        ids.as_deref(),
+    )?;
     report_operation(BulkAction::Install, std::slice::from_ref(&item.id));
     Ok(outcome)
 }
@@ -100,19 +93,79 @@ pub(crate) async fn replace_item(
     let _guard = runtime.operation_lock.lock().await;
     let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
     let ids = requested_component_ids(&item, component_id)?;
-    let outcome = match ids.as_deref() {
-        None => install::replace_item_approved(&paths, &source, &snapshot, &item, trust_approved),
-        Some(ids) => install::replace_item_components_approved(
-            &paths,
-            &source,
-            &snapshot,
-            &item,
-            trust_approved,
-            Some(ids),
-        ),
-    }?;
+    let outcome = install::replace_item_components_approved(
+        &paths,
+        &source,
+        &snapshot,
+        &item,
+        trust_approved,
+        ids.as_deref(),
+    )?;
     report_operation(BulkAction::Replace, std::slice::from_ref(&item.id));
     Ok(outcome)
+}
+
+/// Saves whether the package's skills (or one of them) run only when asked,
+/// then reinstalls the installed ones so their SKILL.md carries the choice.
+/// A reinstall that fails puts the previous choice back.
+pub(crate) async fn set_manual_invocation(
+    runtime: &RuntimeState,
+    source_id: &str,
+    local_id: &str,
+    component_id: Option<&str>,
+    manual: bool,
+) -> Result<OperationOutcome, String> {
+    let _guard = runtime.operation_lock.lock().await;
+    let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
+    if let Some(component_id) = component_id {
+        crate::planner::validate_component_id(&item, component_id)?;
+    }
+    let skills = item
+        .components
+        .iter()
+        .filter(|component| {
+            component.kind == CatalogComponentKind::Skill
+                && component_id.is_none_or(|id| component.id == id)
+        })
+        .collect::<Vec<_>>();
+    if skills.is_empty() {
+        return Err(format!("{} has no skill to change.", item.id));
+    }
+    let previous = crate::invocation::read(&paths)?;
+    let mut next = previous.clone();
+    for component in &skills {
+        crate::invocation::set(&mut next, &item.id, component, manual);
+    }
+    if next == previous {
+        return Ok(OperationOutcome::default());
+    }
+    crate::invocation::write(&paths, &next)?;
+    let installed = crate::executor::read_ledger(&paths)?
+        .items
+        .get(&item.id)
+        .map(|record| planner::selected_component_ids(record, &item))
+        .unwrap_or_default();
+    let reinstall = skills
+        .iter()
+        .filter(|component| installed.contains(&component.id))
+        .map(|component| component.id.clone())
+        .collect::<Vec<_>>();
+    if reinstall.is_empty() {
+        return Ok(OperationOutcome::default());
+    }
+    install::install_item_components_approved(
+        &paths,
+        &source,
+        &snapshot,
+        &item,
+        false,
+        Some(&reinstall),
+    )
+    .inspect_err(|_| {
+        if let Err(error) = crate::invocation::write(&paths, &previous) {
+            eprintln!("Could not restore the skill invocation choices: {error}");
+        }
+    })
 }
 
 pub(super) fn requested_component_ids(
@@ -161,26 +214,41 @@ pub(crate) async fn bulk_plan(
     let snapshot = source::load_current(&cache, &source)?
         .ok_or_else(|| format!("{} has no validated revision.", source.source_id))?;
     let ledger_state = crate::executor::read_ledger(&paths)?;
-    let entries = snapshot
+    Ok(BulkPlan {
+        entries: bulk_entries(&paths, &ledger_state, &snapshot, action),
+        source_id: source.source_id,
+        action,
+    })
+}
+
+fn bulk_entries(
+    paths: &SystemPaths,
+    ledger_state: &crate::ledger::InstallationLedger,
+    snapshot: &SourceSnapshot,
+    action: BulkAction,
+) -> Vec<BulkPlanEntry> {
+    snapshot
         .catalog
         .items
         .values()
         .map(|item| {
             let status =
-                super::status::refined_item_status(&paths, &ledger_state, &snapshot, item, None);
+                super::status::refined_item_status(paths, ledger_state, snapshot, item, None, None);
             BulkPlanEntry {
                 id: item.id.clone(),
                 local_id: item.local_id.clone(),
                 status,
                 will_run: match action {
-                    BulkAction::Install => {
-                        matches!(
-                            status,
-                            ItemStatus::Available
-                                | ItemStatus::UpdateAvailable
-                                | ItemStatus::PartiallyInstalled
-                        )
-                    }
+                    BulkAction::Install => match status {
+                        ItemStatus::Available | ItemStatus::UpdateAvailable => true,
+                        // Installing all never adds components the user left
+                        // out, so a partial install with its selection in
+                        // place has nothing to do.
+                        ItemStatus::PartiallyInstalled => {
+                            !selection_satisfied(paths, ledger_state, snapshot, item)
+                        }
+                        _ => false,
+                    },
                     BulkAction::Replace => status == ItemStatus::Conflict,
                     BulkAction::Uninstall => {
                         matches!(
@@ -194,11 +262,21 @@ pub(crate) async fn bulk_plan(
                 },
             }
         })
-        .collect();
-    Ok(BulkPlan {
-        source_id: source.source_id,
-        action,
-        entries,
+        .collect()
+}
+
+/// Whether everything the installed selection of a package writes is already
+/// recorded.
+fn selection_satisfied(
+    paths: &SystemPaths,
+    ledger_state: &crate::ledger::InstallationLedger,
+    snapshot: &SourceSnapshot,
+    item: &CatalogItem,
+) -> bool {
+    ledger_state.items.get(&item.id).is_some_and(|record| {
+        let selected = planner::selected_component_ids(record, item);
+        planner::plan(paths, snapshot, item, None, Some(&selected))
+            .is_ok_and(|plan| crate::executor::plan_satisfied(ledger_state, &plan).unwrap_or(false))
     })
 }
 
@@ -496,7 +574,6 @@ fn repair_in(
                 continue;
             };
             if record.source_key != source.source_key
-                || record.item_digest != item.digest
                 || crate::executor::installation_state(paths, &ledger, &item.id, None)
                     != ContentState::Missing
             {
@@ -506,6 +583,12 @@ fn repair_in(
             let Ok(mut plan) = planner::plan(paths, snapshot, item, None, Some(&selected)) else {
                 continue;
             };
+            // Only the installed version comes back; an update is the sync's.
+            if record.item_digest != item.digest
+                && !super::status::selection_current(&ledger, record, item, &plan)
+            {
+                continue;
+            }
             // An agent found after the install has no approved MCP entry, so
             // put back everything else rather than nothing, as extending does.
             if !mcp_entries_owned(&plan, &ledger) {
@@ -618,9 +701,10 @@ fn extend_in(
                 continue;
             };
             if record.source_key != source.source_key
-                || record.item_digest != item.digest
                 || crate::executor::installation_state(paths, &ledger, &item.id, None)
                     .is_protected()
+                || (record.item_digest != item.digest
+                    && !installed_agents_current(paths, snapshot, item, &ledger, record))
             {
                 continue;
             }
@@ -669,6 +753,31 @@ fn extend_in(
         }
     }
     Ok(extended)
+}
+
+/// Whether the selected components are the published ones for the agents they
+/// are installed for, so following the detected agents does not also update
+/// them.
+fn installed_agents_current(
+    paths: &SystemPaths,
+    snapshot: &SourceSnapshot,
+    item: &CatalogItem,
+    ledger: &crate::ledger::InstallationLedger,
+    record: &crate::ledger::InstallationRecord,
+) -> bool {
+    let targets = record
+        .binding_ids
+        .iter()
+        .filter_map(|binding_id| ledger.bindings.get(binding_id))
+        .map(|binding| binding.target_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let profiles = planner::current_profiles(paths)
+        .into_iter()
+        .filter(|profile| targets.contains(profile.target_id.as_str()))
+        .collect::<Vec<_>>();
+    let selected = planner::selected_component_ids(record, item);
+    planner::plan(paths, snapshot, item, Some(&profiles), Some(&selected))
+        .is_ok_and(|plan| super::status::selection_current(ledger, record, item, &plan))
 }
 
 pub(super) fn item_context(
@@ -744,7 +853,8 @@ mod tests {
         set_enabled(&paths, TargetId::Cursor, true).expect("cursor");
         let (source, snapshot) = skill_source(root.path());
         let item = snapshot.catalog.items["review"].clone();
-        install::install_item_approved(&paths, &source, &snapshot, &item, false).expect("install");
+        install::install_item_components_approved(&paths, &source, &snapshot, &item, false, None)
+            .expect("install");
         let sources = vec![(source, snapshot)];
         let shared = paths.home.join(".agents/skills/acme-review");
         let claude = paths.home.join(".claude/skills/acme-review");
@@ -775,6 +885,94 @@ mod tests {
     }
 
     #[test]
+    fn install_all_skips_a_partial_install_that_is_in_place() {
+        use crate::application::status::tests::{enable_cursor, two_component_snapshot};
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        enable_cursor(&paths);
+        let (source, snapshot) = two_component_snapshot(root.path());
+        let item = snapshot.catalog.items["tools"].clone();
+        install::install_item_components_approved(
+            &paths,
+            &source,
+            &snapshot,
+            &item,
+            false,
+            Some(&["review".to_string()]),
+        )
+        .expect("install review");
+        let ledger = crate::executor::read_ledger(&paths).expect("ledger");
+
+        let entries = bulk_entries(&paths, &ledger, &snapshot, BulkAction::Install);
+        assert_eq!(entries[0].status, ItemStatus::PartiallyInstalled);
+        assert!(!entries[0].will_run);
+    }
+
+    #[test]
+    fn a_partial_install_is_repaired_after_an_unrelated_upstream_change() {
+        use crate::agent_profiles::{set_enabled, TargetId};
+        use crate::application::status::tests::{enable_cursor, reread, two_component_snapshot};
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        enable_cursor(&paths);
+        let (source, snapshot) = two_component_snapshot(root.path());
+        let item = snapshot.catalog.items["tools"].clone();
+        install::install_item_components_approved(
+            &paths,
+            &source,
+            &snapshot,
+            &item,
+            false,
+            Some(&["review".to_string()]),
+        )
+        .expect("install review");
+        let change_docs = |snapshot: &SourceSnapshot, body: &str| {
+            fs::write(
+                snapshot.path.join("skills/docs/SKILL.md"),
+                format!("---\nname: docs\ndescription: docs\nlicense: MIT\n---\n{body}\n"),
+            )
+            .expect("change docs");
+            let snapshot = reread(snapshot);
+            let item = snapshot.catalog.items["tools"].clone();
+            (snapshot, item)
+        };
+
+        let (snapshot, item) = change_docs(&snapshot, "Changed");
+        let sources = vec![(source.clone(), snapshot.clone())];
+        set_enabled(&paths, TargetId::ClaudeCode, true).expect("claude");
+        assert_eq!(
+            extend_in(&paths, &sources).expect("extend"),
+            std::slice::from_ref(&item.name)
+        );
+        assert!(paths
+            .home
+            .join(".claude/skills/skillbook-review/SKILL.md")
+            .is_file());
+
+        let (snapshot, item) = change_docs(&snapshot, "Changed again");
+        let review = paths.home.join(".agents/skills/skillbook-review");
+        fs::remove_dir_all(&review).expect("delete");
+
+        let ledger = crate::executor::read_ledger(&paths).expect("ledger");
+        let status = super::super::status::refined_item_status(
+            &paths, &ledger, &snapshot, &item, None, None,
+        );
+        assert_eq!(status, ItemStatus::Missing);
+        assert_eq!(
+            super::super::status::component_status(
+                &paths, &ledger, &snapshot, &item, "review", status, None,
+            ),
+            ItemStatus::Missing
+        );
+        let sources = vec![(source, snapshot)];
+        assert_eq!(
+            repair_in(&paths, &sources).expect("repair"),
+            std::slice::from_ref(&item.name)
+        );
+        assert!(review.join("SKILL.md").is_file());
+    }
+
+    #[test]
     fn a_restored_package_list_forgets_what_was_uninstalled_after_the_backup() {
         use crate::agent_profiles::{set_enabled, TargetId};
         let root = tempfile::tempdir().expect("root");
@@ -782,7 +980,8 @@ mod tests {
         set_enabled(&paths, TargetId::Cursor, true).expect("cursor");
         let (source, snapshot) = skill_source(root.path());
         let item = snapshot.catalog.items["review"].clone();
-        install::install_item_approved(&paths, &source, &snapshot, &item, false).expect("install");
+        install::install_item_components_approved(&paths, &source, &snapshot, &item, false, None)
+            .expect("install");
         // The backup now holds the install; the uninstall is only in the live file.
         install::uninstall_item(&paths, &source, &item.id, false).expect("uninstall");
         fs::remove_file(paths.app_data().join("installations.json")).expect("lose the live file");

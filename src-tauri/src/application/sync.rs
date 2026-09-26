@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::time::Duration;
 
 pub(crate) async fn load_cached_app_state(
     runtime: &RuntimeState,
@@ -39,7 +40,7 @@ pub(crate) async fn load_cached_app_state(
 /// header and the badges and hide an outage.
 fn cached_app_state(paths: &SystemPaths, cache: &Path, config: &Path) -> Result<AppState, String> {
     retire_unsupported_legacy_installs(paths);
-    agent_profiles::apply_detected_defaults(paths)?;
+    agent_profiles::apply_detected_defaults(paths);
     super::project::cached_state(paths, cache, config)
 }
 
@@ -56,7 +57,7 @@ pub(crate) async fn run_preflight(
             agent_profiles::clear_detection_cache();
             let paths = SystemPaths::from_system()?;
             let state = super::project::cached_state_now()?;
-            let ledger_error = crate::executor::read_ledger(&paths).err();
+            let ledger_error = ledger_problem(&paths);
             Ok((paths, state, ledger_error))
         })
         .await?
@@ -70,6 +71,7 @@ pub(crate) async fn run_preflight(
             items: &state.items,
             catalog_age_seconds: catalog_age(&read_health(&cache)),
             ledger_error,
+            marketplace_unreachable: false,
         });
         report.write_cache(&cache);
         super::project::remember_identity(&cache, &report, findings.identity);
@@ -136,6 +138,7 @@ async fn synchronize(runtime: &RuntimeState) -> Result<AppState, String> {
     let fetched = run_blocking("Source download", move || {
         // A sync is the app looking at the machine again, agents included.
         agent_profiles::clear_detection_cache();
+        crate::marketplace::reset_http_clients();
         Ok(fetch_all(&cache_base_dir()?, config))
     })
     .await?;
@@ -160,6 +163,14 @@ enum Fetch<C> {
 }
 
 impl<C> Fetch<C> {
+    /// The message of a fetch that could not refresh for now.
+    fn failure(&self) -> Option<&str> {
+        match self {
+            Self::Unreachable(message) => Some(message),
+            _ => None,
+        }
+    }
+
     fn from_result(result: Result<C, String>) -> Self {
         match result {
             Ok(candidate) => Self::Ready(candidate),
@@ -225,27 +236,24 @@ struct Fetched {
 }
 
 impl Fetched {
-    /// Online when every fetch reached its server, offline when none did.
+    /// Online when every fetch reached its server, offline when none did. A
+    /// server that answered with an error was reached: its sources show their
+    /// saved copy and the pass counts as failed, but this machine is online.
     fn connectivity(&self) -> Connectivity {
-        fn unreachable<C>(fetch: &Fetch<C>) -> bool {
-            matches!(fetch, Fetch::Unreachable(_))
-        }
-        let outcomes = self
+        let failures = self
             .default_catalog
             .iter()
-            .map(unreachable)
-            .chain(
-                self.repositories
-                    .iter()
-                    .map(|(_, fetch)| unreachable(fetch)),
-            )
-            .chain(self.subscribed.iter().map(|(_, fetch)| unreachable(fetch)))
-            .chain(self.sources.iter().map(|(_, fetch)| unreachable(fetch)))
+            .chain(self.repositories.iter().map(|(_, fetch)| fetch))
+            .map(Fetch::failure)
+            .chain(self.subscribed.iter().map(|(_, fetch)| fetch.failure()))
+            .chain(self.sources.iter().map(|(_, fetch)| fetch.failure()))
             .collect::<Vec<_>>();
-        let unreachable = outcomes.iter().filter(|unreachable| **unreachable).count();
-        if unreachable == 0 {
+        if failures.iter().all(Option::is_none) {
             Connectivity::Online
-        } else if unreachable == outcomes.len() {
+        } else if failures
+            .iter()
+            .all(|failure| failure.is_some_and(|message| !artifact::server_busy(message)))
+        {
             Connectivity::Offline
         } else {
             Connectivity::Degraded
@@ -256,6 +264,7 @@ impl Fetched {
 /// Fetches every catalog and source, a few at a time. Nothing is activated
 /// here, so this runs without `operation_lock`.
 fn fetch_all(cache: &Path, config: SourcesConfig) -> Fetched {
+    sweep_stale_preparing(cache);
     let dead_hosts = DeadHosts::default();
     let (default, catalog_message) = match default_catalog_locator() {
         Ok(locator) => (locator, None),
@@ -321,6 +330,51 @@ fn fetch_all(cache: &Path, config: SourcesConfig) -> Fetched {
         subscribed,
         sources: config.sources.into_iter().zip(sources).collect(),
         dead_hosts,
+    }
+}
+
+/// Why no change can be made to what is installed: a ledger that cannot be
+/// read, or one a newer Agent Plugins wrote and only it may change.
+fn ledger_problem(paths: &SystemPaths) -> Option<String> {
+    match crate::executor::read_ledger(paths) {
+        Ok(ledger) if ledger.read_only => Some(crate::ledger::NEWER_LEDGER_MESSAGE.to_string()),
+        Ok(_) => None,
+        Err(error) => Some(error),
+    }
+}
+
+/// A download staging tree older than this belongs to no running pass.
+const STALE_PREPARING_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Removes the download staging trees a sync leaves behind when the app exits
+/// mid-download; nothing else would ever delete them.
+fn sweep_stale_preparing(cache: &Path) {
+    for (kind, prefix) in [
+        ("sources", ".source-preparing-"),
+        ("repositories", ".repository-preparing-"),
+    ] {
+        let Ok(roots) = std::fs::read_dir(cache.join(kind)) else {
+            continue;
+        };
+        for root in roots.flatten() {
+            let Ok(entries) = std::fs::read_dir(root.path()) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let stale = entry.file_name().to_string_lossy().starts_with(prefix)
+                    && entry
+                        .metadata()
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| modified.elapsed().ok())
+                        .is_some_and(|age| age > STALE_PREPARING_AGE);
+                if stale {
+                    if let Err(error) = crate::fs_retry::remove_dir_all(&entry.path()) {
+                        eprintln!("Could not remove {}: {error}", entry.path().display());
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -510,7 +564,7 @@ fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), Strin
     write_health(&cache, &health);
 
     retire_unsupported_legacy_installs(&paths);
-    agent_profiles::apply_detected_defaults(&paths)?;
+    agent_profiles::apply_detected_defaults(&paths);
     let previous_index = crate::marketplace::read_cached_index(&cache);
     let mut report = reconcile_installed_items(&paths, &loaded_sources)?;
     match repair_missing_installs() {
@@ -549,7 +603,7 @@ fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), Strin
     )?;
     state.connectivity = connectivity;
     let check = MarketplaceCheck {
-        ledger_error: crate::executor::read_ledger(&paths).err(),
+        ledger_error: ledger_problem(&paths),
         agents: super::items::enabled_agent_ids(&paths),
         paths,
         updates,
@@ -566,7 +620,8 @@ const LAST_SYNC_FILE: &str = "last-sync.json";
 /// after every operation, so they read this instead of claiming "just now".
 fn write_last_sync(cache: &Path, checked: u64) {
     let _ = std::fs::create_dir_all(cache);
-    let _ = std::fs::write(cache.join(LAST_SYNC_FILE), checked.to_string());
+    let _ =
+        crate::fs_retry::replace_file(&cache.join(LAST_SYNC_FILE), checked.to_string().as_bytes());
 }
 
 pub(super) fn read_last_sync(cache: &Path) -> Option<u64> {
@@ -662,7 +717,7 @@ pub(super) fn read_health(cache: &Path) -> SyncHealth {
 fn write_health(cache: &Path, health: &SyncHealth) {
     if let Ok(json) = serde_json::to_vec_pretty(health) {
         let _ = std::fs::create_dir_all(cache);
-        let _ = std::fs::write(cache.join(HEALTH_FILE), json);
+        let _ = crate::fs_retry::replace_file(&cache.join(HEALTH_FILE), &json);
     }
 }
 
@@ -681,22 +736,32 @@ fn enrich_with_marketplace(mut state: AppState, check: MarketplaceCheck) -> AppS
         return state;
     };
     state.marketplace_url = Some(base_url.to_string());
-    let index = if check.marketplace_unreachable {
-        crate::marketplace::read_cached_index(&check.cache)
-    } else {
-        crate::marketplace::index_with_cache(&check.cache)
-    };
+    // The preflight never reads the index's metadata, so both requests run at once.
+    let (index, (report, findings)) = std::thread::scope(|scope| {
+        let index = scope.spawn(|| {
+            if check.marketplace_unreachable {
+                crate::marketplace::read_cached_index(&check.cache)
+            } else {
+                crate::marketplace::index_with_cache(&check.cache)
+            }
+        });
+        let preflight = crate::preflight::run(&crate::preflight::PreflightInput {
+            paths: &check.paths,
+            startup: crate::STARTUP_REPORT.get(),
+            profiles: &state.agent_profiles,
+            items: &state.items,
+            catalog_age_seconds: check.catalog_age_seconds,
+            ledger_error: check.ledger_error,
+            marketplace_unreachable: check.marketplace_unreachable,
+        });
+        let index = index
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (index, preflight)
+    });
     if let Some(index) = &index {
         super::project::apply_index(&mut state.items, index);
     }
-    let (report, findings) = crate::preflight::run(&crate::preflight::PreflightInput {
-        paths: &check.paths,
-        startup: crate::STARTUP_REPORT.get(),
-        profiles: &state.agent_profiles,
-        items: &state.items,
-        catalog_age_seconds: check.catalog_age_seconds,
-        ledger_error: check.ledger_error,
-    });
     report.write_cache(&check.cache);
     state.identity = super::project::remember_identity(&check.cache, &report, findings.identity);
     let checks = report.status_map();
@@ -1059,7 +1124,7 @@ pub(super) fn reconcile_installed_items(
     loaded: &[LoadedSource],
 ) -> Result<AutoUpdateReport, String> {
     let mut report = AutoUpdateReport::default();
-    let agents_enabled = agent_profiles::read(paths)?
+    let agents_enabled = agent_profiles::read(paths)
         .iter()
         .any(|profile| profile.enabled);
     for source in loaded {
@@ -1072,23 +1137,33 @@ pub(super) fn reconcile_installed_items(
             if item.manifest_version == 2 && !agents_enabled {
                 continue;
             }
-            if super::status::refined_item_status(paths, &ledger_state, snapshot, item, None)
+            if super::status::refined_item_status(paths, &ledger_state, snapshot, item, None, None)
                 != ItemStatus::UpdateAvailable
             {
                 continue;
             }
-            let selected = ledger_state
-                .items
-                .get(&item.id)
-                .map(|record| crate::planner::selected_component_ids(record, item));
-            let identities = crate::planner::plan(paths, snapshot, item, None, selected.as_deref())
-                .map(|plan| {
-                    plan.resources
+            let record = ledger_state.items.get(&item.id);
+            let selected =
+                record.map(|record| crate::planner::selected_component_ids(record, item));
+            // Every chosen component was renamed away; an empty selection
+            // would install the whole package, so the user decides.
+            if record.is_some_and(|record| !record.selected_component_ids.is_empty())
+                && selected.as_ref().is_some_and(Vec::is_empty)
+            {
+                continue;
+            }
+            let identities =
+                match crate::planner::plan(paths, snapshot, item, None, selected.as_deref()) {
+                    // An MCP server needs the user's approval; the card keeps
+                    // offering the update.
+                    Ok(plan) if crate::planner::preview(item, &plan).requires_approval => continue,
+                    Ok(plan) => plan
+                        .resources
                         .values()
                         .map(|resource| resource.desired.identity())
-                        .collect()
-                })
-                .unwrap_or_else(|_| BTreeSet::from([format!("item:{}", item.id)]));
+                        .collect(),
+                    Err(_) => BTreeSet::from([format!("item:{}", item.id)]),
+                };
             candidates.push(UpdateCandidate { item, identities });
         }
 
@@ -1397,6 +1472,44 @@ mod retire_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ledger_from_a_newer_version_blocks_changes_up_front() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        fs::create_dir_all(paths.app_data()).expect("data");
+        assert_eq!(ledger_problem(&paths), None);
+        fs::write(
+            paths.app_data().join("installations.json"),
+            r#"{"version":99,"items":{},"bindings":{},"resources":{}}"#,
+        )
+        .expect("ledger");
+        assert_eq!(
+            ledger_problem(&paths).as_deref(),
+            Some(crate::ledger::NEWER_LEDGER_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn a_failing_server_is_not_being_offline() {
+        let fetched = |message: &str| Fetched {
+            cache: std::path::PathBuf::new(),
+            catalog_message: None,
+            default_catalog: None,
+            repositories: Vec::new(),
+            subscribed: vec![("a".to_string(), Fetch::Unreachable(message.to_string()))],
+            sources: Vec::new(),
+            dead_hosts: DeadHosts::default(),
+        };
+        assert_eq!(
+            fetched("Could not download the artifact (HTTP 503): busy").connectivity(),
+            Connectivity::Degraded
+        );
+        assert_eq!(
+            fetched("Could not connect to https://x.example/a.zip: refused").connectivity(),
+            Connectivity::Offline
+        );
+    }
     use crate::catalog::read_manifest_catalog;
     use crate::source::{ConfiguredSource, SourceSnapshot, TEST_SOURCE_KEY};
     use std::fs;
@@ -1590,5 +1703,150 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// A source whose single package `tools` has the given components, drawn
+    /// from the skills `alpha`, `alpha-two`, `beta` and the MCP server `database`.
+    fn tools_source(root: &Path, commit: char, components: &str) -> LoadedSource {
+        let source_root = root.join(format!("tools-{commit}"));
+        for name in ["alpha", "alpha-two", "beta"] {
+            let skill = source_root.join("skills").join(name);
+            fs::create_dir_all(&skill).expect("skill directory");
+            fs::write(
+                skill.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {name}\n---\nBody\n"),
+            )
+            .expect("skill");
+        }
+        fs::create_dir_all(source_root.join("mcp")).expect("mcp");
+        fs::write(
+            source_root.join("mcp/database.json"),
+            r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"database":{"type":"stdio","command":"node","args":["server.js"]}}}"#,
+        )
+        .expect("mcp");
+        fs::write(
+            source_root.join("agent-plugins.json"),
+            format!(
+                r#"{{"version":2,"source":{{"id":"acme","name":"Acme","description":"Tools"}},
+                   "packages":[{{"id":"tools","components":[{components}]}}]}}"#
+            ),
+        )
+        .expect("manifest");
+        let catalog = read_manifest_catalog(&source_root, TEST_SOURCE_KEY).expect("catalog");
+        let mut definition = ConfiguredSource::test_fixture(
+            "acme",
+            "https://nexus.example.com/repository/raw/sources/acme-latest.zip",
+        );
+        definition.source_key = TEST_SOURCE_KEY.to_string();
+        LoadedSource {
+            definition: definition.clone(),
+            snapshot: Some(SourceSnapshot {
+                definition,
+                commit: commit.to_string().repeat(40),
+                path: source_root,
+                catalog,
+            }),
+            status: SourceStatus::Fresh,
+            refresh_failed: false,
+            message: None,
+            last_success_at: None,
+        }
+    }
+
+    /// Installs `tools` from `original` with `selection`, then reconciles
+    /// against `update`, returning the report and the digest before and after.
+    fn reconcile_update(
+        original: &str,
+        selection: Option<&[String]>,
+        update: &str,
+    ) -> (AutoUpdateReport, String, String) {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(
+            &paths,
+            crate::agent_profiles::TargetId::ClaudeCode,
+            true,
+        )
+        .expect("enable Claude");
+        let original = tools_source(root.path(), 'a', original);
+        let snapshot = original.snapshot.as_ref().expect("snapshot");
+        install::install_item_components_approved(
+            &paths,
+            &original.definition,
+            snapshot,
+            &snapshot.catalog.items["tools"],
+            false,
+            selection,
+        )
+        .expect("initial install");
+        let digest = |paths: &SystemPaths| {
+            let ledger = crate::executor::read_ledger(paths).expect("ledger");
+            let record = ledger.items.values().next().expect("installed");
+            record.item_digest.clone()
+        };
+        let before = digest(&paths);
+
+        let report = reconcile_installed_items(&paths, &[tools_source(root.path(), 'b', update)])
+            .expect("reconcile");
+        (report, before, digest(&paths))
+    }
+
+    #[test]
+    fn background_update_leaves_an_mcp_server_for_the_user_to_approve() {
+        let skill = r#"{"kind":"skill","id":"alpha","path":"skills/alpha"}"#;
+        let mcp = r#"{"kind":"mcpServer","id":"database","path":"mcp/database.json"}"#;
+        let (report, before, after) = reconcile_update(skill, None, &format!("{skill},{mcp}"));
+
+        assert!(report.updated_items.is_empty());
+        assert!(
+            report.failed_items.is_empty(),
+            "an update awaiting approval is not a failure: {:?}",
+            report.failed_items
+        );
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn background_update_skips_a_selection_the_update_renamed_away() {
+        let (report, before, after) = reconcile_update(
+            r#"{"kind":"skill","id":"alpha","path":"skills/alpha"},{"kind":"skill","id":"beta","path":"skills/beta"}"#,
+            Some(&["alpha".to_string()]),
+            r#"{"kind":"skill","id":"alpha-two","path":"skills/alpha-two"},{"kind":"skill","id":"beta","path":"skills/beta"}"#,
+        );
+
+        assert!(report.updated_items.is_empty());
+        assert!(report.failed_items.is_empty());
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_sync_sweeps_only_stale_download_staging() {
+        let cache = tempfile::tempdir().expect("cache");
+        let root = cache.path().join("sources/key");
+        let stale = root.join(".source-preparing-1-1");
+        let fresh = root.join(".source-preparing-1-2");
+        for directory in [&stale, &fresh] {
+            fs::create_dir_all(directory).expect("staging");
+        }
+        let mut options = fs::File::options();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            // FILE_FLAG_BACKUP_SEMANTICS opens a directory handle.
+            options.write(true).custom_flags(0x0200_0000);
+        }
+        #[cfg(not(windows))]
+        options.read(true);
+        options
+            .open(&stale)
+            .and_then(|directory| {
+                directory.set_modified(std::time::SystemTime::now() - 2 * STALE_PREPARING_AGE)
+            })
+            .expect("age");
+
+        sweep_stale_preparing(cache.path());
+
+        assert!(!stale.exists());
+        assert!(fresh.exists());
     }
 }

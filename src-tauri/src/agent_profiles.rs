@@ -25,7 +25,9 @@ const CHATGPT_MSIX: [&str; 2] = [
     "OpenAI.Codex_2p2nqsd0c76g0",
 ];
 /// Where Microsoft 365 Copilot Cowork keeps its files inside OneDrive.
-pub(crate) const COWORK_RELATIVE: &str = "Documents/Cowork";
+pub(crate) fn cowork_dir(onedrive: &Path) -> PathBuf {
+    onedrive.join("Documents").join("Cowork")
+}
 const NOT_DETECTED: Detection = Detection {
     detected: false,
     version: None,
@@ -170,16 +172,16 @@ fn profiles_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// Never fails: an unusable profiles file falls back to the previous copy,
 /// then to nothing, which the next detection pass fills in again.
-pub(crate) fn read(paths: &SystemPaths) -> Result<Vec<AgentProfile>, String> {
+pub(crate) fn read(paths: &SystemPaths) -> Vec<AgentProfile> {
     let (configured, _) = read_configured(paths);
-    Ok(materialize(&configured))
+    materialize(&configured)
 }
 
 /// Enables what detection finds and disables what it no longer finds. A probe
 /// that timed out or failed keeps the agent as it was. Never fails: a profile
 /// file that cannot be written is logged and retried on the next pass.
-pub(crate) fn apply_detected_defaults(paths: &SystemPaths) -> Result<Vec<AgentProfile>, String> {
-    Ok(apply_detections(paths, &detect_all()).0)
+pub(crate) fn apply_detected_defaults(paths: &SystemPaths) {
+    apply_detections(paths, &detect_all());
 }
 
 /// Looks at the machine again: forgets cached detection, then applies what it
@@ -260,7 +262,7 @@ pub(crate) fn set_enabled(
 
 pub(crate) fn states(paths: &SystemPaths) -> Result<Vec<AgentProfileState>, String> {
     let mut detections = detect_all();
-    read(paths)?
+    read(paths)
         .into_iter()
         .map(|profile| {
             let detection = detections
@@ -274,7 +276,11 @@ pub(crate) fn states(paths: &SystemPaths) -> Result<Vec<AgentProfileState>, Stri
                 dialect_id: profile.dialect_id,
                 detected: detection.detected,
                 detected_version: detection.version,
-                detection_message: detection.message,
+                // A probe that timed out says nothing about an app that was
+                // never set up here; only a configured one "couldn't be checked".
+                detection_message: detection
+                    .message
+                    .filter(|_| profile.enabled || !detection.inconclusive),
                 verification_guidance: verification_guidance(profile.target_id).to_string(),
                 reload_guidance: reload_guidance(profile.target_id).to_string(),
                 skill_directory: crate::adapters::skill_display_root(profile.target_id).to_string(),
@@ -414,7 +420,7 @@ fn detect_m365_copilot() -> Detection {
 /// is the signal that this person actually uses Microsoft 365 Copilot.
 fn detect_m365_copilot_from(onedrive: Option<&Path>) -> Detection {
     match onedrive {
-        Some(root) if root.join(COWORK_RELATIVE).is_dir() => Detection {
+        Some(root) if cowork_dir(root).is_dir() => Detection {
             detected: true,
             version: None,
             message: None,
@@ -521,7 +527,8 @@ fn detect_cursor_application_from(roots: &[PathBuf]) -> Option<Detection> {
     })
 }
 
-fn cursor_install_roots() -> Vec<PathBuf> {
+/// Folders Cursor may be installed in, most likely first.
+pub(crate) fn cursor_install_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     #[cfg(target_os = "macos")]
     {
@@ -541,6 +548,15 @@ fn cursor_install_roots() -> Vec<PathBuf> {
         if let Some(program_files) = std::env::var_os("ProgramFiles(x86)") {
             roots.push(PathBuf::from(program_files).join("Cursor"));
         }
+        roots.extend(registered_install_roots("Cursor", "cursor"));
+        // The `cursor` command on PATH is `<install>\resources\app\bin\cursor.cmd`.
+        if let Some(path) = std::env::var_os("PATH") {
+            roots.extend(
+                std::env::split_paths(&path)
+                    .filter(|dir| dir.join("cursor.cmd").is_file())
+                    .filter_map(|bin| bin.ancestors().nth(3).map(Path::to_path_buf)),
+            );
+        }
     }
     #[cfg(target_os = "linux")]
     {
@@ -548,6 +564,64 @@ fn cursor_install_roots() -> Vec<PathBuf> {
         roots.push(PathBuf::from("/opt/Cursor"));
         if let Some(home) = dirs::home_dir() {
             roots.push(home.join(".local/share/cursor"));
+        }
+    }
+    roots
+}
+
+/// Where Windows records an app outside its default folders: its uninstall
+/// entries, per user and per machine (`Cursor (User)` for a per-user install),
+/// and the program registered for its link scheme, which a portable copy sets
+/// on first launch.
+#[cfg(windows)]
+fn registered_install_roots(display_name: &str, scheme: &str) -> Vec<PathBuf> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use winreg::RegKey;
+    let mut roots = Vec::new();
+    for (hive, uninstall) in [
+        (
+            HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        ),
+        (
+            HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        ),
+        (
+            HKEY_LOCAL_MACHINE,
+            r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        ),
+    ] {
+        let Ok(uninstall) = RegKey::predef(hive).open_subkey(uninstall) else {
+            continue;
+        };
+        for entry in uninstall
+            .enum_keys()
+            .flatten()
+            .filter_map(|name| uninstall.open_subkey(name).ok())
+        {
+            let name: String = entry.get_value("DisplayName").unwrap_or_default();
+            if name == display_name || name.starts_with(&format!("{display_name} (")) {
+                if let Ok(location) = entry.get_value::<String, _>("InstallLocation") {
+                    roots.push(PathBuf::from(location));
+                }
+            }
+        }
+    }
+    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        // Such as `"C:\...\Cursor.exe" --open-url -- "%1"`.
+        let Ok(command) = RegKey::predef(hive)
+            .open_subkey(format!(r"Software\Classes\{scheme}\shell\open\command"))
+            .and_then(|key| key.get_value::<String, _>(""))
+        else {
+            continue;
+        };
+        let program = match command.strip_prefix('"') {
+            Some(quoted) => quoted.split('"').next(),
+            None => command.split_whitespace().next(),
+        };
+        if let Some(folder) = program.and_then(|program| Path::new(program).parent()) {
+            roots.push(folder.to_path_buf());
         }
     }
     roots
@@ -1053,11 +1127,11 @@ mod tests {
     fn profiles_default_disabled_and_persist_explicit_selection() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
-        let initial = read(&paths).expect("initial");
+        let initial = read(&paths);
         assert_eq!(initial.len(), TargetId::ALL.len());
         assert!(initial.iter().all(|profile| !profile.enabled));
         set_enabled(&paths, TargetId::Codex, true).expect("enable");
-        let reloaded = read(&paths).expect("reloaded");
+        let reloaded = read(&paths);
         assert!(reloaded
             .iter()
             .any(|profile| profile.target_id == TargetId::Codex && profile.enabled));
@@ -1136,7 +1210,6 @@ mod tests {
         let previous = paths.app_data().join(PROFILES_BACKUP_FILE);
         let enabled = |paths: &SystemPaths| {
             read(paths)
-                .expect("read never fails")
                 .into_iter()
                 .filter(|profile| profile.enabled)
                 .map(|profile| profile.target_id)
@@ -1342,7 +1415,7 @@ mod tests {
         let without = detect_m365_copilot_from(Some(root.path()));
         assert!(!without.detected);
         assert!(without.message.is_some());
-        fs::create_dir_all(root.path().join(COWORK_RELATIVE)).expect("cowork");
+        fs::create_dir_all(cowork_dir(root.path())).expect("cowork");
         assert!(detect_m365_copilot_from(Some(root.path())).detected);
     }
 

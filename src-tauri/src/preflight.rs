@@ -91,7 +91,7 @@ impl PreflightReport {
     pub(crate) fn write_cache(&self, cache_base: &Path) {
         if let Ok(json) = serde_json::to_vec(self) {
             let _ = std::fs::create_dir_all(cache_base);
-            let _ = std::fs::write(cache_base.join(PREFLIGHT_CACHE_FILE), json);
+            let _ = crate::fs_retry::replace_file(&cache_base.join(PREFLIGHT_CACHE_FILE), &json);
         }
     }
 
@@ -110,6 +110,9 @@ pub(crate) struct PreflightInput<'a> {
     /// Age of the marketplace catalog snapshot, when one exists.
     pub(crate) catalog_age_seconds: Option<u64>,
     pub(crate) ledger_error: Option<String>,
+    /// This sync could not connect to the marketplace, so the server is not
+    /// probed again.
+    pub(crate) marketplace_unreachable: bool,
 }
 
 /// What the preflight learned that the rest of the sync wants to reuse.
@@ -171,7 +174,7 @@ pub(crate) fn run(input: &PreflightInput<'_>) -> (PreflightReport, PreflightFind
     let base_url = locator::marketplace_base_url();
 
     host_checks(&mut out, input, &identity, base_url);
-    let health = server_checks(&mut out, base_url);
+    let health = server_checks(&mut out, base_url, input.marketplace_unreachable);
     findings.health = health.as_ref().map(|probe| probe.health.clone());
     auth_checks(
         &mut out,
@@ -578,7 +581,11 @@ fn proxy_check(out: &mut Collector, startup: Option<&StartupReport>) {
     }
 }
 
-fn server_checks(out: &mut Collector, base_url: Option<&str>) -> Option<marketplace::HealthProbe> {
+fn server_checks(
+    out: &mut Collector,
+    base_url: Option<&str>,
+    unreachable: bool,
+) -> Option<marketplace::HealthProbe> {
     let started = Instant::now();
     let Some(url) = base_url else {
         out.push(
@@ -619,7 +626,13 @@ fn server_checks(out: &mut Collector, base_url: Option<&str>) -> Option<marketpl
         );
         return None;
     };
-    match marketplace::fetch_health() {
+    // Probing again would wait out the same connect retries the sync just did.
+    let probe = if unreachable {
+        Err("The marketplace was not reached during this sync.".to_string())
+    } else {
+        marketplace::fetch_health()
+    };
+    match probe {
         Ok(probe) => {
             out.push(
                 started,
@@ -822,7 +835,7 @@ fn auth_checks(
         out.push(
             started,
             "auth.identity",
-            "Signed in",
+            "Marketplace sign-in",
             CheckStatus::Skipped,
             "The server was not reached.",
             None,
@@ -847,7 +860,7 @@ fn auth_checks(
             out.push(
                 started,
                 "auth.identity",
-                "Signed in",
+                "Marketplace sign-in",
                 status,
                 detail,
                 None,
@@ -857,15 +870,15 @@ fn auth_checks(
         }
         Err(error) => {
             let remediation = match auth_mode {
-                AuthMode::DevHeader(_) if !dev_header_offered => manual("This server accepts Windows authentication only; use a domain-joined machine."),
-                _ => manual("Ask the marketplace administrator to check the account and the server's Kerberos configuration."),
+                AuthMode::DevHeader(_) if !dev_header_offered => manual("This marketplace accepts only computers joined to the corporate domain."),
+                _ => manual("Sign in to Windows on the corporate network or VPN, then select Refresh. If it keeps failing, ask the marketplace administrator to check the account and the server's Kerberos setup (service principal name and keytab)."),
             };
             out.push(
                 started,
                 "auth.identity",
-                "Signed in",
+                "Marketplace sign-in",
                 CheckStatus::Fail,
-                format!("{error} (host account {}).", identity.account),
+                format!("{error} Windows account: {}.", identity.account),
                 remediation,
                 false,
             );
@@ -953,7 +966,11 @@ fn agent_checks(out: &mut Collector, input: &PreflightInput<'_>) {
             "Installation ledger",
             CheckStatus::Fail,
             error.clone(),
-            manual("Reset the app from the header, or restore the ledger from a backup."),
+            if error == crate::ledger::NEWER_LEDGER_MESSAGE {
+                action("update")
+            } else {
+                manual("Reset the app from the header, or restore the ledger from a backup.")
+            },
             true,
         ),
     }
@@ -1312,7 +1329,7 @@ mod tests {
             checks: vec![PreflightCheck {
                 id: "auth.identity".to_string(),
                 group: "auth".to_string(),
-                title: "Signed in".to_string(),
+                title: "Marketplace sign-in".to_string(),
                 status: CheckStatus::Warn,
                 detail: String::new(),
                 remediation: None,
@@ -1394,10 +1411,25 @@ mod tests {
             items: &[],
             catalog_age_seconds: None,
             ledger_error: None,
+            marketplace_unreachable: false,
         };
         assert_eq!(
             agent_skill_directories(&input),
             [paths.home.join(".agents/skills")]
         );
+    }
+
+    #[test]
+    fn a_marketplace_the_sync_could_not_reach_is_not_probed_again() {
+        let mut out = Collector { checks: Vec::new() };
+        let probe = server_checks(&mut out, Some("https://marketplace.invalid"), true);
+        assert!(probe.is_none());
+        let health = out
+            .checks
+            .iter()
+            .find(|check| check.id == "server.health")
+            .expect("server.health");
+        assert_eq!(health.status, CheckStatus::Fail);
+        assert!(health.detail.contains("not reached during this sync"));
     }
 }

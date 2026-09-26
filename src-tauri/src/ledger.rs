@@ -2,10 +2,9 @@
 
 use crate::digest::directory_digest;
 use crate::fs_retry;
-use crate::resource::{stable_id, CapabilityResult, StructuredFormat};
+use crate::resource::{normalized_path, stable_id, CapabilityResult, StructuredFormat};
 use crate::sources::{sync_directory, temporary_path};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -399,7 +398,7 @@ fn migrate_v3(
         let binding_id = stable_id("binding", &format!("{installation_id}:legacy-v1"));
         let identity = format!(
             "path:{}",
-            normalize_path(Path::new(&legacy.destination.path))
+            normalized_path(Path::new(&legacy.destination.path))
         );
         let resource_id = stable_id("resource", &identity);
         ledger.resources.insert(
@@ -432,14 +431,21 @@ fn migrate_v3(
             for (target_id, path, dialect_id) in [
                 (
                     "cursor",
-                    roots.home.join(".cursor/plugins/local").join(&legacy.name),
+                    roots
+                        .home
+                        .join(".cursor")
+                        .join("plugins")
+                        .join("local")
+                        .join(&legacy.name),
                     "cursor-local-plugin-2026-08",
                 ),
                 (
                     "github-copilot",
                     roots
                         .home
-                        .join(".copilot/installed-plugins/_direct")
+                        .join(".copilot")
+                        .join("installed-plugins")
+                        .join("_direct")
                         .join(&legacy.name),
                     "copilot-direct-plugin-2026-08",
                 ),
@@ -454,7 +460,7 @@ fn migrate_v3(
                     "binding",
                     &format!("{installation_id}:{target_id}:legacy-plugin"),
                 );
-                let identity = format!("path:{}", normalize_path(&path));
+                let identity = format!("path:{}", normalized_path(&path));
                 let resource_id = stable_id("resource", &identity);
                 ledger.resources.insert(
                     resource_id.clone(),
@@ -692,14 +698,12 @@ pub(crate) fn path_digest(path: &Path, kind: OwnedPathKind) -> Result<String, St
         OwnedPathKind::File => {
             let bytes = fs::read(path)
                 .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
-            Ok(hex_digest(Sha256::digest(bytes)))
+            Ok(bytes_digest(&bytes))
         }
     }
 }
 
-pub(crate) fn bytes_digest(bytes: &[u8]) -> String {
-    hex_digest(Sha256::digest(bytes))
-}
+pub(crate) use crate::locator::sha256_hex as bytes_digest;
 
 fn valid_digest(value: &str) -> bool {
     value.len() == 64
@@ -796,23 +800,6 @@ fn manifest_v1() -> u8 {
 
 fn legacy_component_kind() -> String {
     "legacyFileTree".to_string()
-}
-
-fn normalize_path(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-        .to_lowercase()
-}
-
-fn hex_digest(digest: impl AsRef<[u8]>) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in digest.as_ref() {
-        use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    output
 }
 
 #[cfg(test)]
@@ -943,7 +930,7 @@ mod tests {
         let binding_id = record.binding_ids[0].clone();
         let identity = format!(
             "path:{}",
-            normalize_path(Path::new(&record.destination.path))
+            normalized_path(Path::new(&record.destination.path))
         );
         let resource_id = stable_id("resource", &identity);
         ledger.items.insert(installation_id.clone(), record.clone());

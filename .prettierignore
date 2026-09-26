@@ -4,3 +4,5 @@ pnpm-lock.yaml
 src-tauri/gen
 src-tauri/target
 .angular
+# WiX source, which Prettier would parse as JavaScript.
+*.wxs

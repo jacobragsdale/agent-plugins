@@ -10,14 +10,14 @@ use crate::app_state::SourceStatus;
 use crate::source::SourceCandidate;
 use crate::source::{ConfiguredRepository, ConfiguredSource, RepositorySnapshot, SourceSnapshot};
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 #[cfg(feature = "app")]
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::sync::Mutex;
 
 pub(crate) use items::{
     bulk_plan, bulk_run, install_item, plan_source_removal, remove_source, replace_item, reset_app,
-    uninstall_item,
+    set_manual_invocation, uninstall_item,
 };
 pub(crate) use sources::{cancel_prepared_source, confirm_source, prepare_source};
 pub(crate) use sync::{load_cached_app_state, run_preflight, sync_app_state};
@@ -43,12 +43,12 @@ pub(crate) struct RuntimeState {
 }
 
 impl RuntimeState {
-    pub(crate) fn new() -> Result<Self, String> {
-        Ok(Self {
+    pub(crate) fn new() -> Self {
+        Self {
             operation_lock: Mutex::new(()),
             sync_lock: Mutex::new(()),
             pending_sources: Mutex::new(BTreeMap::new()),
-        })
+        }
     }
 }
 
@@ -83,11 +83,24 @@ where
         .map_err(|error| format!("{context} {WORKER_FAILED}: {error}"))?
 }
 
-pub(super) fn current_epoch_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+pub(super) use crate::marketplace::epoch_seconds_now as current_epoch_seconds;
+
+/// Closes the app, gives it the tutorial skill, and reopens it with the tutorial prompt.
+#[cfg(feature = "app")]
+pub(crate) async fn run_tutorial(target: crate::agent_profiles::TargetId) -> Result<(), String> {
+    run_blocking("Tutorial", move || {
+        crate::tutorial::run(&crate::paths::SystemPaths::from_system()?, target)
+    })
+    .await
+}
+
+/// Stops offering the skill tutorial.
+#[cfg(feature = "app")]
+pub(crate) async fn dismiss_tutorial() -> Result<(), String> {
+    run_blocking("Tutorial", move || {
+        crate::tutorial::dismiss(&crate::paths::SystemPaths::from_system()?)
+    })
+    .await
 }
 
 /// Seconds to wait after a sync before the next scheduled one: 15 minutes
@@ -227,7 +240,7 @@ mod live_nexus_tests {
         );
         let tokio_runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
         tokio_runtime.block_on(async {
-            let runtime = RuntimeState::new().expect("runtime");
+            let runtime = RuntimeState::new();
             match live_step().as_str() {
                 "sync" => {
                     print_live_state(&sync_app_state(&runtime).await.expect("sync"));

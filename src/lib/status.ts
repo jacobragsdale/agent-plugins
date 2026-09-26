@@ -1,6 +1,6 @@
 import { confirm } from "@tauri-apps/plugin-dialog";
 import type { AppError } from "../ipc/client";
-import type { AgentProfile, AppState, BulkAction, BulkPlan, CatalogItem, ItemStatus, OperationOutcome, SourceRemovalPlan, SourceState } from "../ipc/schemas";
+import type { AgentProfile, AppState, BulkAction, BulkPlan, CatalogItem, ItemStatus, OperationOutcome, RepositoryState, SourceRemovalPlan, SourceState } from "../ipc/schemas";
 import type { InfoNotice } from "../components/Notice";
 
 export type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
@@ -87,14 +87,15 @@ export function primaryActionColor(status: ItemStatus): AccentColor {
   }
 }
 
-export function componentLabel(kind: string): string {
+/** The badge for a component kind, or null for one a person has no word for (a package no longer offered records none). */
+export function componentLabel(kind: string): string | null {
   switch (kind) {
     case "skill":
       return "Skill";
     case "mcpServer":
       return "Connector";
     default:
-      return kind;
+      return null;
   }
 }
 
@@ -132,6 +133,8 @@ export function itemCommand(item: CatalogItem, componentId: string | undefined):
   let review: ItemCommand["review"] = null;
   if (command === "replace_item") {
     review = restoring ? async () => reviewRestore(item.name) : reviewReplace;
+  } else if (component.status === "removed") {
+    review = async () => reviewRemovedUninstall(item.name);
   }
   return {
     command,
@@ -147,6 +150,16 @@ export async function reviewRestore(name: string): Promise<boolean> {
     title: "Restore original",
     kind: "warning",
     okLabel: "Back up and restore",
+    cancelLabel: "Cancel"
+  });
+}
+
+// Nothing offers a "no longer offered" package any more, so once uninstalled it cannot come back.
+export async function reviewRemovedUninstall(name: string): Promise<boolean> {
+  return confirm(`${name} is no longer offered by its source, so you won't be able to install it again. Uninstall?`, {
+    title: "Uninstall",
+    kind: "warning",
+    okLabel: "Uninstall",
     cancelLabel: "Cancel"
   });
 }
@@ -171,11 +184,11 @@ export function bulkLabels(action: BulkAction): Readonly<{ action: string; title
   }
 }
 
-// A package with a connector (an MCP server) starts a program on this machine
-// whenever an AI app loads it, so the app asks before it installs one.
+// A connector (an MCP server) is a program an AI app starts on this machine, or
+// an online service it sends requests to, so the app asks before it installs one.
 export async function reviewApproval(name: string, riskDetails: readonly string[]): Promise<boolean> {
   const detail = riskDetails.length === 0 ? "" : `\n\n${riskDetails.join("\n")}`;
-  return confirm(`${name} includes a connector that runs a program on this computer. Every AI app found here will run it.${detail}`, {
+  return confirm(`${name} includes a connector, a program or online service that AI apps use. Every AI app found here will use it.${detail}`, {
     title: "Allow connector",
     kind: "warning",
     okLabel: "Allow and install",
@@ -183,8 +196,9 @@ export async function reviewApproval(name: string, riskDetails: readonly string[
   });
 }
 
-export async function reviewBulkApproval(names: readonly string[]): Promise<boolean> {
-  return confirm(`${names.join(", ")} include connectors that run programs on this computer. Every AI app found here will run them.`, {
+export async function reviewBulkApproval(names: readonly string[], riskDetails: readonly string[]): Promise<boolean> {
+  const detail = riskDetails.length === 0 ? "" : `\n\n${riskDetails.join("\n")}`;
+  return confirm(`${names.join(", ")} include connectors, programs or online services that AI apps use. Every AI app found here will use them.${detail}`, {
     title: "Allow connectors",
     kind: "warning",
     okLabel: "Allow and install",
@@ -192,23 +206,37 @@ export async function reviewBulkApproval(names: readonly string[]): Promise<bool
   });
 }
 
-export async function reviewSourceRemoval(source: SourceState, plan: SourceRemovalPlan): Promise<boolean> {
+// Each sync adds back every source the catalog lists (the app only ever adds the default catalog), but not its packages.
+export async function reviewSourceRemoval(source: SourceState, plan: SourceRemovalPlan, repositories: readonly RepositoryState[]): Promise<boolean> {
   const count = plan.items.length;
   const modified = plan.items.flatMap((item) => item.paths).filter((path) => path.modified);
   const warning =
     modified.length === 0
       ? ""
       : ` ${String(modified.length)} file${modified.length === 1 ? " has" : "s have"} local changes that were not made by Agent Plugins: ${modified.map((path) => path.path).join(", ")}.`;
-  return confirm(`Remove ${source.name} and uninstall ${String(count)} package${count === 1 ? "" : "s"} it installed?${warning}`, {
-    title: "Remove source",
+  const listed = repositories.some((repository) => repository.sources.some((entry) => entry.url === source.url || entry.sourceId === source.sourceId));
+  const returns = listed ? " The catalog still lists it, so it will be added back on the next check. Its packages will not be reinstalled." : "";
+  const question = count === 0 ? `Remove ${source.name}?` : `Remove ${source.name} and uninstall ${String(count)} package${count === 1 ? "" : "s"} it installed?`;
+  return confirm(`${question}${warning}${returns}`, { title: "Remove source", kind: "warning", okLabel: modified.length === 0 ? "Remove" : "Remove and discard changes", cancelLabel: "Cancel" });
+}
+
+export async function reviewReset(): Promise<boolean> {
+  return confirm("Uninstall every package and delete all Agent Plugins data? Sources from the catalog are added back automatically.", {
+    title: "Reset",
     kind: "warning",
-    okLabel: modified.length === 0 ? "Remove" : "Remove and discard changes",
+    okLabel: "Reset",
     cancelLabel: "Cancel"
   });
 }
 
-export async function reviewReset(): Promise<boolean> {
-  return confirm("Uninstall every package and delete all Agent Plugins data? You will need to add sources again.", { title: "Reset", kind: "warning", okLabel: "Reset", cancelLabel: "Cancel" });
+// Closing the app is the one thing here that can cost the person work, so they agree to it first.
+export async function reviewTutorial(app: string): Promise<boolean> {
+  return confirm(`This closes ${app} if it's open, adds a small tutorial skill, then reopens ${app} with a prompt that uses it. Save your work in ${app} first.`, {
+    title: "Try a skill",
+    kind: "info",
+    okLabel: `Close and reopen ${app}`,
+    cancelLabel: "Cancel"
+  });
 }
 
 export async function reviewBulk(source: SourceState, action: BulkAction, plan: BulkPlan): Promise<boolean> {
@@ -248,29 +276,16 @@ export function packageName(items: readonly CatalogItem[], id: string): string {
   return items.find((item) => item.id === id)?.name ?? id;
 }
 
-/** The background-update report as one notice: what updated, and what could not, by name. */
-export type ReportNotice = Readonly<{ text: string; failed: boolean; detail: string | null }>;
+/**
+ * What a background sync did that is worth a line: the packages it updated.
+ * Files it put back, apps it added packages to, and updates it will retry
+ * happen quietly; a person has nothing to do about them.
+ */
+export type ReportNotice = Readonly<{ text: string }>;
 
 export function reportNotice(state: AppState): ReportNotice | null {
-  const { updatedItems, failedItems, repairedItems, extendedItems } = state.autoUpdateReport;
-  const parts: string[] = [];
-  if (updatedItems.length > 0) {
-    parts.push(`Updated ${updatedItems.map((item) => packageName(state.items, item.id)).join(", ")}.`);
-  }
-  if (repairedItems.length > 0) {
-    parts.push(`Restored: ${repairedItems.join(", ")}.`);
-  }
-  if (extendedItems.length > 0) {
-    parts.push(`Added to newly found apps: ${extendedItems.join(", ")}.`);
-  }
-  if (failedItems.length > 0) {
-    parts.push(`Couldn't update ${failedItems.map((item) => packageName(state.items, item.id)).join(", ")}. Agent Plugins will try again later.`);
-  }
-  if (parts.length === 0) {
-    return null;
-  }
-  const detail = failedItems.length === 0 ? null : failedItems.map((item) => `${item.id}: ${item.message}`).join("\n");
-  return { text: parts.join(" "), failed: failedItems.length > 0, detail };
+  const { updatedItems } = state.autoUpdateReport;
+  return updatedItems.length === 0 ? null : { text: `Updated ${updatedItems.map((item) => packageName(state.items, item.id)).join(", ")}.` };
 }
 
 /** A batch that partly failed, summarized by package name with each raw reason behind "Details". */

@@ -97,8 +97,8 @@ export function Notices({
         </NoticeCallout>
       )}
       {report === null ? null : (
-        <NoticeCallout color={report.failed ? "amber" : "green"} role="status" actions={<DismissButton onClick={onDismissReport} />}>
-          <ErrorMessage summary={report.text} detail={report.detail} />
+        <NoticeCallout color="green" role="status" actions={<DismissButton onClick={onDismissReport} />}>
+          <Callout.Text>{report.text}</Callout.Text>
         </NoticeCallout>
       )}
     </>

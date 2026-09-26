@@ -1,6 +1,7 @@
 //! Declarative resources shared by target adapters and the central executor.
 
 use crate::ledger::OwnedPathKind;
+use crate::locator::hex_encode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -49,6 +50,8 @@ pub(crate) enum PathMaterialization {
     Copy,
     AgentSkill {
         effective_name: String,
+        /// The person's `disable-model-invocation`, only when it differs from the source's.
+        disable_model_invocation: Option<bool>,
     },
 }
 
@@ -109,9 +112,16 @@ impl DesiredResource {
                 hash_field(&mut hasher, resource.source_digest.as_bytes());
                 match &resource.materialization {
                     PathMaterialization::Copy => hash_field(&mut hasher, b"copy"),
-                    PathMaterialization::AgentSkill { effective_name } => {
+                    PathMaterialization::AgentSkill {
+                        effective_name,
+                        disable_model_invocation,
+                    } => {
                         hash_field(&mut hasher, b"skill");
                         hash_field(&mut hasher, effective_name.as_bytes());
+                        // Absent keeps the digest of installs made before the choice existed.
+                        if let Some(manual) = disable_model_invocation {
+                            hash_field(&mut hasher, if *manual { b"manual" } else { b"auto" });
+                        }
                     }
                 }
             }
@@ -123,7 +133,7 @@ impl DesiredResource {
             }
             Self::TextBlock(resource) => hash_field(&mut hasher, resource.body.as_bytes()),
         }
-        Ok(hex_digest(hasher.finalize()))
+        Ok(hex_encode(&hasher.finalize()))
     }
 }
 
@@ -216,7 +226,7 @@ impl OperationPlan {
 
 pub(crate) fn stable_id(prefix: &str, value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
-    format!("{prefix}-{}", &hex_digest(digest)[..24])
+    format!("{prefix}-{}", &hex_encode(&digest)[..24])
 }
 
 fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
@@ -224,21 +234,12 @@ fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-fn normalized_path(path: &std::path::Path) -> String {
+pub(crate) fn normalized_path(path: &std::path::Path) -> String {
     path.components()
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
         .to_lowercase()
-}
-
-fn hex_digest(digest: impl AsRef<[u8]>) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in digest.as_ref() {
-        use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    output
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { confirm } from "@tauri-apps/plugin-dialog";
+import { describe, expect, it, vi } from "vitest";
 import fixture from "../ipc/fixtures/app-state.json";
 import { appStateSchema, itemStatusSchema } from "../ipc/schemas";
 import {
@@ -13,10 +14,14 @@ import {
   primaryActionColor,
   primaryActionLabel,
   reportNotice,
+  reviewReset,
+  reviewSourceRemoval,
   statusColor,
   statusLabel,
   supportsBulkAction
 } from "./status";
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({ confirm: vi.fn(() => Promise.resolve(true)) }));
 
 const state = appStateSchema.parse(fixture);
 const statuses = itemStatusSchema.options;
@@ -90,30 +95,20 @@ describe("names instead of ids", () => {
     expect(packageName(state.items, "gone/package")).toBe("gone/package");
   });
 
-  it("summarizes background updates by name, raw reasons behind details", () => {
+  it("reports the packages a background sync updated", () => {
     const autoUpdateReport = {
       updatedItems: [{ id: "official/publish", sourceId: "official", localId: "publish" }],
       failedItems: [{ id: "team-data/sql-helper", message: "The process cannot access the file because it is being used by another process. (os error 32)" }],
       repairedItems: [],
       extendedItems: []
     };
-    expect(reportNotice({ ...state, autoUpdateReport })).toEqual({
-      text: "Updated Publish. Couldn't update SQL helper. Agent Plugins will try again later.",
-      failed: true,
-      detail: "team-data/sql-helper: The process cannot access the file because it is being used by another process. (os error 32)"
-    });
+    expect(reportNotice({ ...state, autoUpdateReport })).toEqual({ text: "Updated Publish." });
   });
 
-  it("reports nothing when no background update ran", () => {
+  it("stays quiet about repairs and updates the next sync retries", () => {
     expect(reportNotice({ ...state, autoUpdateReport: { updatedItems: [], failedItems: [], repairedItems: [], extendedItems: [] } })).toBeNull();
-  });
-
-  it("folds restored and newly extended packages into the background notice", () => {
-    expect(reportNotice({ ...state, autoUpdateReport: { updatedItems: [], failedItems: [], repairedItems: ["Publish"], extendedItems: ["SQL helper", "Chart style"] } })).toEqual({
-      text: "Restored: Publish. Added to newly found apps: SQL helper, Chart style.",
-      failed: false,
-      detail: null
-    });
+    const quiet = { updatedItems: [], failedItems: [{ id: "team-data/sql-helper", message: "locked" }], repairedItems: ["Publish"], extendedItems: ["SQL helper"] };
+    expect(reportNotice({ ...state, autoUpdateReport: quiet })).toBeNull();
   });
 
   it("summarizes bulk failures by name and source", () => {
@@ -168,7 +163,35 @@ describe("itemCommand", () => {
     expect(missing === undefined ? null : itemCommand(missing, undefined)).toMatchObject({ command: "uninstall_item", review: null, trustApproved: false });
   });
 
+  it("asks before uninstalling a package that can never be installed again", () => {
+    const removed = state.items.find((item) => item.status === "removed");
+    const installed = state.items.find((item) => item.status === "installed");
+    expect(removed === undefined ? null : itemCommand(removed, undefined)?.review).not.toBeNull();
+    expect(installed === undefined ? "none" : itemCommand(installed, undefined)?.review).toBeNull();
+  });
+
   it("ignores a part the package does not have", () => {
     expect(tone === undefined ? "none" : itemCommand(tone, "no-such-part")).toBeNull();
+  });
+});
+
+describe("removal prompts", () => {
+  const prompt = (): string => String(vi.mocked(confirm).mock.lastCall?.[0]);
+  const plan = { sourceId: "official", items: [] };
+  const [official] = state.sources;
+
+  it("says a source the catalog lists comes back without its packages", async () => {
+    if (official === undefined) {
+      throw new Error("fixture has no source");
+    }
+    await reviewSourceRemoval(official, plan, state.repositories);
+    expect(prompt()).toContain("it will be added back on the next check. Its packages will not be reinstalled.");
+    await reviewSourceRemoval(official, plan, []);
+    expect(prompt()).not.toContain("added back");
+  });
+
+  it("says a reset keeps the catalog's sources", async () => {
+    await reviewReset();
+    expect(prompt()).toContain("Sources from the catalog are added back automatically.");
   });
 });

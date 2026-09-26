@@ -17,7 +17,7 @@ The .NET 10 API that the Agent Plugins app and CLI talk to. It keeps the package
 ## Run locally
 
 ```bash
-cargo build --manifest-path ../src-tauri/Cargo.toml --no-default-features --bin validate-source
+cargo build --manifest-path ../src-tauri/Cargo.toml --no-default-features --features tools --bin validate-source
 dotnet run --project src/Marketplace.Api      # Development: DevHeader enabled, PostgreSQL on localhost
 curl -H 'X-Dev-User: CORP\jacob' http://localhost:8080/api/me
 ```

@@ -49,6 +49,8 @@ The notice's first line says what failed; the reason is under **Details**. Match
 | `A newer version of Agent Plugins manages the packages on this computer.` | A newer build wrote the ledger. This build shows it but will not change it.          | Update Agent Plugins.                                                                                         |
 | `… is owned by a different source`                                        | Another source already installed a package with this ID.                             | Uninstall the other copy, or remove the source that owns it, then install again.                              |
 | `… conflicts with another package in this batch`                          | Two packages in one **Install all** declare `conflictsWith` each other.              | Install them individually and keep only one.                                                                  |
+| `… can't be installed while … is installed; uninstall … first.`           | The two packages declare `conflictsWith`.                                            | Uninstall the named package, then install again.                                                              |
+| `None of the AI apps on this computer can use …`                          | Every detected app reports the component unsupported; the reasons follow.            | Follow the reason, for example add a remote connector in the app's own settings.                              |
 | `Configuration entry … is unmanaged` / `Instruction block … is unmanaged` | An agent's config file already has an entry at the key this package wants.           | Remove that entry from the agent's own config file by hand, then install again.                               |
 | `… is already managed; use the normal update operation`                   | A replace was requested for a package the app already owns.                          | Use **Update** instead.                                                                                       |
 
@@ -58,20 +60,20 @@ Each of these leaves your machine unchanged: the operation either fails before a
 
 The package installed for every other app; the amber result notice names the app and its settings file.
 
-| Notice                                                                       | Fix                                                                                                                                                                              |
-| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `<App> is using its settings file …, so the package was not added to <App>.` | Close that app. The next sync adds the package to it, as long as Agent Plugins stays open until then.                                                                            |
-| `<App> uses a settings file that Agent Plugins could not read: <path>.`      | Fix the error the message quotes, or remove the file if you do not use it, then select **Refresh**. The sync adds the package to that app, as long as Agent Plugins stayed open. |
+| Notice                                                                             | Fix                                                                                                                                                                              |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<App> uses a settings file that Agent Plugins could not read: <path>.`            | Fix the error the message quotes, or remove the file if you do not use it, then select **Refresh**. The sync adds the package to that app, as long as Agent Plugins stayed open. |
+| `<App> did not get the package: Agent Plugins isn't allowed to write to <folder>.` | Get write access to that folder — for Microsoft 365 Copilot it is in OneDrive — then select **Refresh**, or install the package again.                                           |
 
-## Background updates failed
+An app that merely had its settings file open is skipped without a notice; the next sync adds the package to it, as long as Agent Plugins stays open until then.
 
-The background report above the catalog says `Couldn't update <packages>. Agent Plugins will try again later.`, with each reason under **Details**. The usual cause is an update that would add or change an MCP server: sync never grants Tier 3 approval on your behalf, so it leaves the package pending.
+## A package stays Update available
 
-Select **Update** on the package and approve it. Anything else under **Details** is an ordinary install failure — look it up in the table above.
+Background updates that fail are retried on later syncs without a notice. A package that keeps its **Update available** badge either failed every time or includes an MCP server: select **Update** to apply it, and approve the connector if asked. If it fails, the error says why — look it up in the table above.
 
 ## The window says Offline
 
-The amber notice `Offline — showing packages as of <time>` means the last sync reached no server; `Couldn't reach <names>` means some sources answered and the named ones did not, and those show **Saved copy from <time>**. Installed packages keep working, and Agent Plugins retries within minutes on its own.
+The amber notice `Offline — showing packages as of <time>` means the last sync reached no server. Installed packages keep working, and Agent Plugins retries within minutes on its own. A source that alone could not be refreshed — its server was down, or answered with an error — shows a grey **Saved copy from <time>** badge instead, whose tooltip gives the reason.
 
 If it persists, connect to the corporate network or VPN and select **Try now**. If one server stays unreachable while others answer, open **System status** and read the **Marketplace server** row.
 
@@ -79,12 +81,13 @@ If it persists, connect to the corporate network or VPN and select **Try now**. 
 
 Open it. The panel leads with three rows — Windows sign-in, marketplace server, agents — and shows the failing check's detail and its remediation. Select **Run diagnostics** to re-run every check against the machine as it is now.
 
-| Row                | Common failure                                           | What to do                                                                                                                                                                        |
-| ------------------ | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows sign-in    | Not domain-joined, or no Kerberos ticket for the server. | Connect to the corporate network or VPN and sign in again. `klist` should show a ticket-granting ticket.                                                                          |
-| Marketplace server | DNS, TLS, or the server itself is unreachable.           | Check the URL in the row resolves and answers. A failed server leaves the app offline, on the last snapshot it validated.                                                         |
-| Marketplace server | The client is older than the server's minimum.           | Select **Update Agent Plugins**, which opens the download site when this build configures one and otherwise tells you to ask your administrator.                                  |
-| Agents             | No supported AI app found.                               | Install Claude Desktop, ChatGPT, or Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then select **Refresh**. |
+| Row                | Common failure                                                         | What to do                                                                                                                                                                        |
+| ------------------ | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows sign-in    | Not domain-joined, or no Kerberos ticket for the server.               | Connect to the corporate network or VPN and sign in again. `klist` should show a ticket-granting ticket.                                                                          |
+| Marketplace server | `The security certificate of <server> isn't trusted by this computer`. | Check the computer's date and time. Otherwise your network inspects secure connections: ask IT to add its certificate authority to Windows.                                       |
+| Marketplace server | DNS, TLS, or the server itself is unreachable.                         | Check the URL in the row resolves and answers. A failed server leaves the app offline, on the last snapshot it validated.                                                         |
+| Marketplace server | The client is older than the server's minimum.                         | Select **Update Agent Plugins**, which opens the download site when this build configures one and otherwise tells you to ask your administrator.                                  |
+| Agents             | No supported AI app found.                                             | Install Claude Desktop, ChatGPT, or Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then select **Refresh**. |
 
 An agent listed as `couldn't check just now` is not a failure: its detection timed out, and Agent Plugins keeps configuring it and checks again.
 
@@ -96,16 +99,17 @@ If a check fails and the message tells you nothing you can act on, the check's I
 
 Two checks mean every install and update will fail until they are fixed. The catalog still loads and syncs.
 
-| Check           | Meaning                                                                                           | Fix                                                                                                                                                                                        |
-| --------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `host.homeDirs` | Agent Plugins' own data or cache directory is unwritable.                                         | Get write access to `%APPDATA%\agent-plugins` and `%LOCALAPPDATA%\agent-plugins`. An unwritable agent skill directory is only a warning: skills cannot go to that agent.                   |
-| `agents.ledger` | `installations.json` exists but cannot be read, for example because of its permissions or a lock. | Close anything that has the file open and check you can read it. Otherwise select **Reset**, which works without a readable ledger: it removes what it can find and clears the app's data. |
+| Check           | Meaning                                                                                                                    | Fix                                                                                                                                                                                        |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `host.homeDirs` | Agent Plugins' own data or cache directory is unwritable.                                                                  | Get write access to `%APPDATA%\agent-plugins` and `%LOCALAPPDATA%\agent-plugins`. An unwritable agent skill directory is only a warning: skills cannot go to that agent.                   |
+| `agents.ledger` | `installations.json` exists but cannot be read, for example because of its permissions or a lock.                          | Close anything that has the file open and check you can read it. Otherwise select **Reset**, which works without a readable ledger: it removes what it can find and clears the app's data. |
+| `agents.ledger` | A newer version of Agent Plugins wrote `installations.json`, for example on another computer sharing your roaming profile. | Select **Update Agent Plugins** and install the newer version.                                                                                                                             |
 
 A ledger that is merely damaged does not fail this check: Agent Plugins sets it aside as `installations.json.corrupt-<timestamp>` and falls back to `installations.json.previous` on its own. The same applies to `sources.json` and `agent-profiles.json`.
 
-## A source shows a not-found message
+## A source was not found on the server
 
-`<name> was not found on the server (first noticed <date>)` means the source's archive answers 404: it was unpublished, or you may no longer see it. Its saved copy stays usable. Agent Plugins retires it only after 3 not-found results spanning at least 3 days; a successful fetch in between starts the count over. The default catalog is never retired.
+A source whose **Saved copy** badge's tooltip reads `<name> was not found on the server (first noticed <date>)` answers 404: it was unpublished, or you may no longer see it. Its saved copy stays usable. Agent Plugins retires it only after 3 not-found results spanning at least 3 days; a successful fetch in between starts the count over. The default catalog is never retired.
 
 If you expected to keep access, see [A package or source you expected is missing](#a-package-or-source-you-expected-is-missing) before the grace period ends.
 

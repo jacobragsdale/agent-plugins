@@ -168,6 +168,8 @@ pub(crate) struct AppState {
     pub(crate) sources: Vec<SourceState>,
     pub(crate) items: Vec<CatalogItemState>,
     pub(crate) agent_profiles: Vec<AgentProfileState>,
+    /// The detected app the skill tutorial can demonstrate, until it has run.
+    pub(crate) tutorial: Option<crate::agent_profiles::TargetId>,
     pub(crate) marketplace_url: Option<String>,
     /// Where a person downloads a newer client, when the build configures one.
     pub(crate) download_url: Option<String>,
@@ -259,14 +261,8 @@ pub(crate) struct BulkResult {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub(crate) enum ScheduledSync {
-    Updated {
-        state: Box<AppState>,
-    },
-    /// `message` is the raw text, kept for older windows; `error` is typed.
-    Failed {
-        message: String,
-        error: crate::ipc_error::IpcError,
-    },
+    Updated { state: Box<AppState> },
+    Failed { error: crate::ipc_error::IpcError },
 }
 
 impl ScheduledSync {
@@ -276,8 +272,7 @@ impl ScheduledSync {
                 state: Box::new(state),
             },
             Err(message) => Self::Failed {
-                error: message.clone().into(),
-                message,
+                error: message.into(),
             },
         }
     }
@@ -566,6 +561,7 @@ mod tests {
                     false,
                 ),
             ],
+            tutorial: Some(TargetId::Cursor),
             marketplace_url: Some(text("https://marketplace.ragsdale.dev")),
             download_url: None,
             identity: Some(MarketplaceIdentity {
@@ -687,6 +683,7 @@ mod tests {
                 marketplace: None,
             }],
             agent_profiles: Vec::new(),
+            tutorial: None,
             marketplace_url: None,
             download_url: None,
             identity: None,

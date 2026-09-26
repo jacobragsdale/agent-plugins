@@ -1,6 +1,7 @@
 //! Manifest normalization and Agent Skill name materialization.
 
 use crate::digest::directory_digest;
+use crate::locator::{hex_encode, sha256_hex};
 use crate::manifest::{ManifestComponent, ManifestPackage, SourceManifest, SOURCE_MANIFEST_FILE};
 use crate::mcp::{McpConfig, McpServer};
 use crate::sources::copy_directory;
@@ -130,12 +131,13 @@ pub(crate) fn materialize_agent_skill(
     source: &Path,
     target: &Path,
     effective_name: &str,
+    disable_model_invocation: Option<bool>,
 ) -> Result<(), String> {
     copy_directory(source, target)?;
     let skill_file = target.join("SKILL.md");
     let original = fs::read_to_string(&skill_file)
         .map_err(|error| format!("Could not read {}: {error}", skill_file.display()))?;
-    let rendered = render_skill_markdown(&original, effective_name)?;
+    let rendered = render_skill_markdown(&original, effective_name, disable_model_invocation)?;
     fs::write(&skill_file, rendered)
         .map_err(|error| format!("Could not materialize {}: {error}", skill_file.display()))
 }
@@ -173,7 +175,7 @@ fn normalize_package(
         hash_field(&mut hasher, component.id.as_bytes());
         hash_field(&mut hasher, component.digest.as_bytes());
     }
-    let digest = hex_digest(hasher.finalize());
+    let digest = hex_encode(&hasher.finalize());
     let destination = destination_home()?
         .join(".agents")
         .join("packages")
@@ -274,7 +276,7 @@ fn normalize_component(
                     kind: CatalogComponentKind::McpServer,
                     source: component.path().to_string(),
                     source_is_directory: false,
-                    digest: digest_bytes(&serde_json::to_vec(&server).map_err(|error| {
+                    digest: sha256_hex(&serde_json::to_vec(&server).map_err(|error| {
                         format!("Could not serialize MCP server {server_name}: {error}")
                     })?),
                     effective_name: format!("{source_id}-{server_name}"),
@@ -286,10 +288,6 @@ fn normalize_component(
         }
     }
     Ok(())
-}
-
-fn digest_bytes(bytes: &[u8]) -> String {
-    hex_digest(Sha256::digest(bytes))
 }
 
 fn validate_repository_tree(root: &Path) -> Result<(), String> {
@@ -462,15 +460,6 @@ fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-fn hex_digest(digest: impl AsRef<[u8]>) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in digest.as_ref() {
-        use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    output
-}
-
 fn parse_skill(path: &Path) -> Result<SkillFrontmatter, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
@@ -528,7 +517,11 @@ fn split_skill_markdown(contents: &str) -> Result<(&str, &str), String> {
     Err("SKILL.md has unterminated YAML frontmatter.".to_string())
 }
 
-fn render_skill_markdown(contents: &str, effective_name: &str) -> Result<String, String> {
+fn render_skill_markdown(
+    contents: &str,
+    effective_name: &str,
+    disable_model_invocation: Option<bool>,
+) -> Result<String, String> {
     let (frontmatter, body) = split_skill_markdown(contents)?;
     let mut mapping = serde_yaml_ng::from_str::<Mapping>(frontmatter)
         .map_err(|error| format!("SKILL.md frontmatter is invalid YAML: {error}"))?;
@@ -536,6 +529,12 @@ fn render_skill_markdown(contents: &str, effective_name: &str) -> Result<String,
         Value::String("name".to_string()),
         Value::String(effective_name.to_string()),
     );
+    if let Some(manual) = disable_model_invocation {
+        mapping.insert(
+            Value::String("disable-model-invocation".to_string()),
+            Value::Bool(manual),
+        );
+    }
     let yaml = serde_yaml_ng::to_string(&mapping)
         .map_err(|error| format!("Could not render SKILL.md frontmatter: {error}"))?;
     Ok(format!("---\n{yaml}---\n{body}"))
@@ -733,11 +732,34 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         write_skill(root.path(), "review", "license: MIT\n");
         let target = root.path().join("installed");
-        materialize_agent_skill(&root.path().join("skills/review"), &target, "acme-review")
-            .expect("materialize");
+        materialize_agent_skill(
+            &root.path().join("skills/review"),
+            &target,
+            "acme-review",
+            None,
+        )
+        .expect("materialize");
         let rendered = fs::read_to_string(target.join("SKILL.md")).expect("rendered");
         assert!(rendered.contains("name: acme-review"));
         assert!(rendered.contains("license: MIT"));
+        assert!(!rendered.contains("disable-model-invocation"));
+        assert!(rendered.ends_with("# Body\n"));
+    }
+
+    #[test]
+    fn materialization_writes_the_chosen_invocation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_skill(root.path(), "review", "disable-model-invocation: true\n");
+        let target = root.path().join("installed");
+        materialize_agent_skill(
+            &root.path().join("skills/review"),
+            &target,
+            "acme-review",
+            Some(false),
+        )
+        .expect("materialize");
+        let rendered = fs::read_to_string(target.join("SKILL.md")).expect("rendered");
+        assert!(rendered.contains("disable-model-invocation: false"));
         assert!(rendered.ends_with("# Body\n"));
     }
 

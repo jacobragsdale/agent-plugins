@@ -304,6 +304,7 @@
       "skillDirectoryShared": false
     }
   ],
+  "tutorial": "cursor",
   "marketplaceUrl": "https://marketplace.ragsdale.dev",
   "downloadUrl": null,
   "identity": { "account": "CORP\\sam", "namespace": "sam", "displayName": "Sam Lee", "admin": false, "authMode": "Windows sign-in (Kerberos)" },

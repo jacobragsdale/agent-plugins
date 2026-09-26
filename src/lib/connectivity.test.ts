@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import fixture from "../ipc/fixtures/app-state.json";
 import { appStateSchema } from "../ipc/schemas";
-import type { AppState } from "../ipc/schemas";
-import { catalogBody, formatEpoch, lastCheckedLabel, NOTHING_PUBLISHED, OFFLINE_EMPTY, offlineBanner, savedCopyLabel } from "./connectivity";
+import type { AppState, PreflightCheck } from "../ipc/schemas";
+import { catalogBody, formatEpoch, headerProblems, lastCheckedLabel, noMatchesText, NOTHING_PUBLISHED, OFFLINE_EMPTY, offlineBanner, savedCopyLabel } from "./connectivity";
 
 const base = appStateSchema.parse(fixture);
 const online: AppState = {
@@ -29,19 +29,31 @@ describe("offlineBanner", () => {
     expect(offlineBanner(online, true)).toContain("Offline — showing packages as of");
   });
 
-  it("names the sources a degraded check couldn't reach", () => {
+  it("stays hidden while some servers answer; the unreachable sources carry their own badge", () => {
     const [first, ...rest] = online.sources;
     if (first === undefined) {
       throw new Error("The fixture needs a source.");
     }
-    const degraded: AppState = { ...online, connectivity: "degraded", sources: [{ ...first, status: "stale" }, ...rest] };
-    expect(offlineBanner(degraded, false)).toBe(`Couldn't reach ${first.name}, so their saved copy is shown. Agent Plugins will retry automatically.`);
-    expect(offlineBanner({ ...degraded, sources: online.sources }, false)).toContain("Couldn't reach some sources");
+    expect(offlineBanner({ ...online, connectivity: "degraded", sources: [{ ...first, status: "stale" }, ...rest] }, false)).toBeNull();
   });
 
   it("leaves an empty page to say it is offline itself", () => {
     expect(offlineBanner({ ...empty, connectivity: "offline" }, false)).toBeNull();
     expect(offlineBanner(null, true)).toBeNull();
+  });
+});
+
+describe("headerProblems", () => {
+  const check = (id: string): PreflightCheck => ({ id, group: id.split(".")[0] ?? "", title: id, status: "fail", detail: "", remediation: null, blocking: false, durationMillis: 0 });
+
+  it("leaves being offline to the offline banner", () => {
+    const problems = [check("server.health"), check("host.dns"), check("agents.ledger")];
+    expect(headerProblems(problems, true).map((problem) => problem.id)).toEqual(["agents.ledger"]);
+    expect(headerProblems(problems, false)).toHaveLength(3);
+  });
+
+  it("counts an untrusted certificate once", () => {
+    expect(headerProblems([check("server.health"), check("host.tls")], false).map((problem) => problem.id)).toEqual(["host.tls"]);
   });
 });
 
@@ -60,6 +72,19 @@ describe("catalogBody", () => {
     expect(catalogBody(empty, false, false)).toEqual({ kind: "empty", text: NOTHING_PUBLISHED, offline: false });
     expect(catalogBody({ ...empty, syncInProgress: true }, false, false)).toEqual({ kind: "loading" });
     expect(catalogBody(null, false, false)).toEqual({ kind: "loading" });
+  });
+});
+
+describe("noMatchesText", () => {
+  it("names the search, the local-changes filter, or both", () => {
+    expect(noMatchesText(" sql ", false, 0)).toBe("No packages match “sql”.");
+    expect(noMatchesText("", true, 0)).toBe("No packages have local changes.");
+    expect(noMatchesText("sql", true, 0)).toBe("No packages with local changes match “sql”.");
+  });
+
+  it("says nothing while something matches or no filter is on", () => {
+    expect(noMatchesText("sql", false, 1)).toBeNull();
+    expect(noMatchesText(" ", false, 0)).toBeNull();
   });
 });
 

@@ -1,35 +1,46 @@
 import type { JSX } from "react";
-import { Badge, Button, Callout, Heading, Text } from "@radix-ui/themes";
+import { Badge, Button, Heading, Text } from "@radix-ui/themes";
 import { toAppError } from "../ipc/client";
 import type { AppError } from "../ipc/client";
 import type { BulkAction, CatalogItem, SourceState, SourceStatus } from "../ipc/schemas";
 import { savedCopyLabel } from "../lib/connectivity";
 import { supportsBulkAction } from "../lib/status";
 import { ItemCard } from "./ItemCard";
-import { ErrorMessage } from "./Notice";
 
 /**
- * A source or catalog the last check couldn't reach shows its saved copy: a
- * neutral badge, never red. Red stays for a real error.
+ * A source or catalog the last check couldn't refresh keeps showing its last
+ * good copy. A grey badge says so, never red: the next check retries it on its
+ * own and there is nothing for a person to do. The reason stays in the
+ * tooltip for whoever is asked to look into it.
  */
-export function FreshnessBadge({ status, refreshFailed, lastSuccessAt }: Readonly<{ status: SourceStatus; refreshFailed: boolean; lastSuccessAt: number | null }>): JSX.Element | null {
-  if (status === "stale") {
-    return (
-      <Badge color="gray" title="Agent Plugins couldn't reach the server and will retry automatically.">
-        {savedCopyLabel(lastSuccessAt)}
-      </Badge>
-    );
+export function FreshnessBadge({
+  status,
+  refreshFailed,
+  lastSuccessAt,
+  message
+}: Readonly<{ status: SourceStatus; refreshFailed: boolean; lastSuccessAt: number | null; message: string | null }>): JSX.Element | null {
+  if (status !== "stale" && !refreshFailed) {
+    return null;
   }
-  return refreshFailed ? <Badge color="red">Refresh failed</Badge> : null;
+  return (
+    <Badge color="gray" title={message ?? "Agent Plugins will try again automatically."}>
+      {savedCopyLabel(lastSuccessAt)}
+    </Badge>
+  );
 }
+
+/** What a source is busy with: a bulk action, or being removed. */
+export type SourceAction = BulkAction | "remove";
 
 export function SourceGroup({
   source,
   items,
   busyIds,
   allBusy,
+  running,
   filtering,
   onItemChange,
+  onManualChange,
   onBulk,
   onError
 }: Readonly<{
@@ -37,8 +48,11 @@ export function SourceGroup({
   items: readonly CatalogItem[];
   busyIds: ReadonlySet<string>;
   allBusy: boolean;
+  /** The source-wide action in progress, whose button spins. */
+  running: SourceAction | null;
   filtering: boolean;
   onItemChange: (item: CatalogItem, componentId?: string) => Promise<void>;
+  onManualChange: (item: CatalogItem, manual: boolean, componentId?: string) => Promise<void>;
   onBulk: (source: SourceState, action: BulkAction) => Promise<void>;
   onError: (error: AppError) => void;
 }>): JSX.Element {
@@ -56,7 +70,7 @@ export function SourceGroup({
             <Heading as="h2" size="4">
               {source.name}
             </Heading>
-            <FreshnessBadge status={source.status} refreshFailed={source.refreshFailed} lastSuccessAt={source.lastSuccessAtEpochSeconds} />
+            {items.length === 0 ? null : <FreshnessBadge status={source.status} refreshFailed={source.refreshFailed} lastSuccessAt={source.lastSuccessAtEpochSeconds} message={source.message} />}
           </div>
           <Text as="p" color="gray" size="2">
             {source.description}
@@ -69,6 +83,7 @@ export function SourceGroup({
               variant="soft"
               color="green"
               disabled={allBusy}
+              loading={running === "install"}
               onClick={() => {
                 onBulk(source, "install").catch((reason: unknown) => {
                   onError(toAppError(reason));
@@ -84,6 +99,7 @@ export function SourceGroup({
               variant="soft"
               color="amber"
               disabled={allBusy}
+              loading={running === "replace"}
               onClick={() => {
                 onBulk(source, "replace").catch((reason: unknown) => {
                   onError(toAppError(reason));
@@ -99,6 +115,7 @@ export function SourceGroup({
               variant="soft"
               color="red"
               disabled={allBusy}
+              loading={running === "uninstall"}
               onClick={() => {
                 onBulk(source, "uninstall").catch((reason: unknown) => {
                   onError(toAppError(reason));
@@ -110,23 +127,9 @@ export function SourceGroup({
           ) : null}
         </div>
       </div>
-      {/* A stale source's message is the unreachable server; the offline banner already says that. */}
-      {source.message === null || source.status === "stale" ? null : (
-        <Callout.Root className="app-callout" color="red">
-          <Callout.Text>{source.message}</Callout.Text>
-        </Callout.Root>
-      )}
-      {source.catalogErrors.length === 0 ? null : (
-        <Callout.Root className="app-callout" color="amber">
-          <ErrorMessage
-            summary={`${String(source.catalogErrors.length)} package${source.catalogErrors.length === 1 ? "" : "s"} in this source couldn't be read and ${source.catalogErrors.length === 1 ? "is" : "are"} not shown.`}
-            detail={source.catalogErrors.map((catalogError) => `${catalogError.path}: ${catalogError.message}`).join("\n")}
-          />
-        </Callout.Root>
-      )}
       <div className="skills-list">
         {items.map((item) => (
-          <ItemCard key={item.id} item={item} busy={busyIds.has(item.id)} allBusy={allBusy} onChange={onItemChange} onError={onError} />
+          <ItemCard key={item.id} item={item} busy={busyIds.has(item.id)} allBusy={allBusy} onChange={onItemChange} onManualChange={onManualChange} onError={onError} />
         ))}
         {items.length === 0 ? <Text color="gray">This source has no packages right now.</Text> : null}
       </div>

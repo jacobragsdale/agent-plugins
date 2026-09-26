@@ -39,6 +39,10 @@ fn account_name() -> String {
     }
 }
 
+/// The sentence for an SSPI sign-in that could not reach a domain controller:
+/// the network is down, so sync treats it like any unreachable server.
+pub(crate) const NO_DOMAIN_CONTROLLER: &str = "Could not reach a domain controller to sign in. Connect to the corporate network or VPN, then try again.";
+
 /// A plain sentence for the SSPI status codes people actually hit when
 /// Windows cannot get a Kerberos ticket for the marketplace.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -48,7 +52,7 @@ fn sspi_sentence(status: i32) -> Option<&'static str> {
         0x8009_030C => "The domain refused this Windows account's sign-in. Sign out of Windows and back in, then try again.",
         0x8009_030E => "Windows has no Kerberos sign-in for this account. Lock and unlock the PC, or connect to the corporate network or VPN, then try again.",
         0x8009_0303 | 0x8009_0322 => "Windows does not recognize the marketplace server's name (HTTP service principal). Ask the marketplace administrator to check its registration.",
-        0x8009_0311 => "Could not reach a domain controller to sign in. Connect to the corporate network or VPN, then try again.",
+        0x8009_0311 => NO_DOMAIN_CONTROLLER,
         0x8009_0324 => "This PC's clock is too far from the domain's. Turn on \"Set time automatically\" in Windows Settings, then try again.",
         _ => return None,
     })

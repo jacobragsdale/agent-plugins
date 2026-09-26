@@ -2,6 +2,9 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Marketplace.Api.Auth;
+using Marketplace.Api.Data;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace Marketplace.Api.Tests;
@@ -59,7 +62,9 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
         Assert.Equal(HttpStatusCode.OK, download.StatusCode);
         var etag = download.Headers.ETag?.Tag;
         Assert.NotNull(etag);
-        using var zip = new ZipArchive(new MemoryStream(await download.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken)));
+        var downloaded = await download.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken);
+        await AssertHeadThenNotModified(client, "/api/sources/pubone/archive", etag, downloaded.Length);
+        using var zip = new ZipArchive(new MemoryStream(downloaded));
         var manifestEntry = zip.GetEntry("agent-plugins.json");
         Assert.NotNull(manifestEntry);
         using var manifestStream = manifestEntry.Open();
@@ -69,16 +74,46 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
         Assert.Equal("greet/skills/greet", component.GetProperty("path").GetString());
         Assert.NotNull(zip.GetEntry("greet/skills/greet/SKILL.md"));
 
-        using var conditional = new HttpRequestMessage(HttpMethod.Get, "/api/sources/pubone/archive");
-        conditional.Headers.IfNoneMatch.ParseAdd(etag);
-        var notModified = await client.SendAsync(conditional, TestContext.Current.CancellationToken);
-        Assert.Equal(HttpStatusCode.NotModified, notModified.StatusCode);
-
         var index = await client.GetFromJsonAsync<JsonElement>("/api/index", Json, TestContext.Current.CancellationToken);
         var entry = index.GetProperty("packages").EnumerateArray().Single(candidate => candidate.GetProperty("id").GetString() == "pubone/greet");
         Assert.Equal("personal", entry.GetProperty("lane").GetString());
         Assert.Equal(["greeting", "demo"], entry.GetProperty("tags").EnumerateArray().Select(tag => tag.GetString()).ToArray());
         Assert.Equal("TEST\\pubone", entry.GetProperty("publisher").GetProperty("account").GetString());
+    }
+
+    [Fact]
+    public async Task Cross_site_writes_are_refused()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var client = factory.ClientFor("TEST\\crosssite");
+        using var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("crosssite", "greet"), "1.0.0");
+        using var crossSite = new HttpRequestMessage(HttpMethod.Post, "/api/packages/crosssite/greet/versions") { Content = form };
+        crossSite.Headers.Add("Sec-Fetch-Site", "cross-site");
+        var refused = await client.SendAsync(crossSite, ct);
+        Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
+        Assert.Contains("another website", await Title(refused));
+        Assert.DoesNotContain("crosssite/greet/1.0.0.zip", factory.Store.Paths);
+
+        using var read = new HttpRequestMessage(HttpMethod.Get, "/api/me");
+        read.Headers.Add("Sec-Fetch-Site", "cross-site");
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(read, ct)).StatusCode);
+
+        using var portalForm = SamplePackages.PublishForm(SamplePackages.SkillPackage("crosssite", "greet"), "1.0.0");
+        using var portal = new HttpRequestMessage(HttpMethod.Post, "/api/packages/crosssite/greet/versions") { Content = portalForm };
+        portal.Headers.Add("Sec-Fetch-Site", "same-origin");
+        Assert.Equal(HttpStatusCode.Created, (await client.SendAsync(portal, ct)).StatusCode);
+    }
+
+    [Fact]
+    public void Namespace_is_valid_when_no_ascii_survives()
+    {
+        foreach (var username in new[] { "иван", "___" })
+        {
+            Assert.Matches(IdentityResolver.SourceIdPattern(), IdentityResolver.NamespaceFor(username));
+        }
+
+        Assert.NotEqual(IdentityResolver.NamespaceFor("иван"), IdentityResolver.NamespaceFor("___"));
+        Assert.Equal(IdentityResolver.NamespaceFor("иван"), IdentityResolver.NamespaceFor("ИВАН"));
     }
 
     [Fact]
@@ -239,6 +274,39 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
     }
 
     [Fact]
+    public async Task Installed_base_counts_each_recent_heartbeat_once_per_package()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var publisher = factory.ClientFor("TEST\\basecount");
+        foreach (var packageId in new[] { "one", "two" })
+        {
+            using var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("basecount", packageId), "1.0.0");
+            await PublishLiveAsync(publisher, "basecount", packageId, form);
+        }
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MarketplaceDbContext>();
+            var now = DateTime.UtcNow;
+            foreach (var (account, occurredAt, installed) in new[]
+            {
+                ("TEST\\base-a", now.AddDays(-1), new[] { "basecount/one", "basecount/two" }),
+                ("TEST\\base-b", now.AddHours(-1), new[] { "basecount/one" }),
+                ("TEST\\base-c", now.AddDays(-40), new[] { "basecount/one", "basecount/two" }),
+            })
+            {
+                db.Heartbeats.Add(new Heartbeat { Account = account, OccurredAt = occurredAt, ReceivedAt = occurredAt, ClientVersion = "0.1.0", OsBuild = "10.0.26100", Installed = installed, ChecksJson = "{}" });
+            }
+
+            await db.SaveChangesAsync(ct);
+        }
+
+        var index = await publisher.GetFromJsonAsync<JsonElement>("/api/index", Json, ct);
+        Assert.Equal(2, IndexEntry(index, "basecount/one").GetProperty("installedBase").GetInt32());
+        Assert.Equal(1, IndexEntry(index, "basecount/two").GetProperty("installedBase").GetInt32());
+    }
+
+    [Fact]
     public async Task Namespace_access_rule_hides_it_from_everyone_not_listed()
     {
         using var owner = factory.ClientFor("TEST\\gatekeeper");
@@ -315,14 +383,7 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
 
         var second = await member.GetAsync("/api/sources/partial/archive", TestContext.Current.CancellationToken);
         Assert.Equal(etag, second.Headers.ETag?.Tag);
-        using var headRequest = new HttpRequestMessage(HttpMethod.Head, "/api/sources/partial/archive");
-        var head = await member.SendAsync(headRequest, TestContext.Current.CancellationToken);
-        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
-        Assert.Equal(etag, head.Headers.ETag?.Tag);
-        Assert.Equal(bytes.Length, head.Content.Headers.ContentLength);
-        using var conditional = new HttpRequestMessage(HttpMethod.Get, "/api/sources/partial/archive");
-        conditional.Headers.IfNoneMatch.ParseAdd(etag);
-        Assert.Equal(HttpStatusCode.NotModified, (await member.SendAsync(conditional, TestContext.Current.CancellationToken)).StatusCode);
+        await AssertHeadThenNotModified(member, "/api/sources/partial/archive", etag, length: null);
 
         using var carol = factory.ClientFor("TEST\\carol");
         Assert.Equal(1, await PackageCount(carol, "partial"));
@@ -786,6 +847,25 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
         }
 
         return published;
+    }
+
+    /// <summary>HEAD answers with the ETag the GET served, and a GET carrying the HEAD's ETag answers 304 with it.</summary>
+    private static async Task AssertHeadThenNotModified(HttpClient client, string url, string etag, long? length)
+    {
+        using var headRequest = new HttpRequestMessage(HttpMethod.Head, url);
+        var head = await client.SendAsync(headRequest, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+        Assert.Equal(etag, head.Headers.ETag?.Tag);
+        if (length is not null)
+        {
+            Assert.Equal(length, head.Content.Headers.ContentLength);
+        }
+
+        using var conditional = new HttpRequestMessage(HttpMethod.Get, url);
+        conditional.Headers.IfNoneMatch.ParseAdd(head.Headers.ETag!.Tag);
+        var notModified = await client.SendAsync(conditional, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.NotModified, notModified.StatusCode);
+        Assert.Equal(etag, notModified.Headers.ETag?.Tag);
     }
 
     private static async Task AssertHidden(HttpClient client, string ns, string packageId)

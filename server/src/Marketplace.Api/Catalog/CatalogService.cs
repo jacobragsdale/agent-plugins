@@ -90,7 +90,10 @@ public sealed class CatalogService(
 
     public async Task<IndexDocument> IndexAsync(MarketplaceIdentity identity, CancellationToken cancellationToken)
     {
-        var packages = await db.Packages.Include(package => package.Versions).ToListAsync(cancellationToken);
+        // Only live versions: LatestVersion picks among the approved, non-yanked ones.
+        var packages = await db.Packages.AsNoTracking()
+            .Include(package => package.Versions.Where(version => !version.Yanked && version.ReviewState == ReviewState.Approved))
+            .ToListAsync(cancellationToken);
         var publishers = await db.Publishers.ToDictionaryAsync(publisher => publisher.Namespace, cancellationToken);
         var stats = await StatsAsync(cancellationToken);
         var rules = await access.RulesAsync(cancellationToken);
@@ -134,9 +137,12 @@ public sealed class CatalogService(
             .Select(group => new { PackageId = group.Key, Count = group.Count() })
             .ToListAsync(cancellationToken);
         var since = timeProvider.GetUtcNow().UtcDateTime - InstalledBaseWindow;
-        var installedSets = await db.Heartbeats
+        // Installed is de-duplicated on ingest, so each heartbeat counts once per package.
+        var installedBase = await db.Heartbeats
             .Where(heartbeat => heartbeat.OccurredAt >= since)
-            .Select(heartbeat => heartbeat.Installed)
+            .SelectMany(heartbeat => heartbeat.Installed)
+            .GroupBy(id => id)
+            .Select(group => new { PackageId = group.Key, Count = group.Count() })
             .ToListAsync(cancellationToken);
         var result = new Dictionary<string, (int, int)>(StringComparer.Ordinal);
         foreach (var install in installs)
@@ -144,13 +150,9 @@ public sealed class CatalogService(
             result[install.PackageId] = (install.Count, 0);
         }
 
-        foreach (var installed in installedSets)
+        foreach (var installed in installedBase)
         {
-            foreach (var id in installed.Distinct(StringComparer.Ordinal))
-            {
-                var current = result.GetValueOrDefault(id);
-                result[id] = (current.Item1, current.Item2 + 1);
-            }
+            result[installed.PackageId] = (result.GetValueOrDefault(installed.PackageId).Item1, installed.Count);
         }
 
         return result;

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The MSI's side of installer-hooks.nsh. light runs in the wix\x64 folder
+     below the build output, so the relative Source is the freshly built twin.
+     Tauri's main.wxs names the app's own file "Path". -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="ConsoleTwin" Guid="*">
+        <File Id="ConsoleTwin" Name="agent-plugins.com" Source="..\..\agent-plugins-console.exe" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <CustomAction Id="RemoveFromPath" FileKey="Path" ExeCommand="remove-from-path" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="RemoveFromPath" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>

@@ -561,13 +561,8 @@ public sealed partial class PublishService(
         }
     }
 
-    private async Task LockNamespaceAsync(string ns, CancellationToken cancellationToken)
-    {
-        if (db.Database.IsNpgsql())
-        {
-            await db.Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock(hashtext({ns}))", cancellationToken);
-        }
-    }
+    private async Task LockNamespaceAsync(string ns, CancellationToken cancellationToken) =>
+        await db.Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock(hashtext({ns}))", cancellationToken);
 
     /// <summary>Copies a version's name, description, and tags onto the package listing.</summary>
     private static void ApplyListing(Package package, PackageVersion version, DateTime now)

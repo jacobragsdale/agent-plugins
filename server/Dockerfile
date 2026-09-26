@@ -13,7 +13,7 @@ COPY src-tauri/build.rs src-tauri/windows-app-manifest.xml ./src-tauri/
 COPY src-tauri/src ./src-tauri/src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/src-tauri/target \
-    cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin validate-source \
+    cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --features tools --bin validate-source \
     && install -m 0755 src-tauri/target/release/validate-source /validate-source
 
 FROM node:22-bookworm-slim AS web

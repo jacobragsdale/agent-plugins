@@ -24,6 +24,9 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug)]
 pub(super) struct DocumentWork {
     path: PathBuf,
+    /// False when the document already reads as planned. Nothing is written
+    /// then, but its planned entries are still recorded as owned.
+    changed: bool,
     updated: Vec<u8>,
     persistent_backup: bool,
 }
@@ -190,18 +193,20 @@ fn stage_into(
     let documents = stage_documents(request, &mut backup_paths)?;
     for work in documents.values() {
         let target = validate_absolute_owned_path(paths, &work.path)?;
-        let exists = path_entry_exists(&target);
-        let original_digest = existing_path_digest(&target);
-        let backup = mutation_backup(paths, transaction_id, &target, work.persistent_backup)?;
-        let staging = stage_bytes(&target, &work.updated)?;
-        mutations.push(JournalMutation {
-            target: target.display().to_string(),
-            staging: Some(staging.display().to_string()),
-            backup: exists.then(|| backup.display().to_string()),
-            persistent_backup: work.persistent_backup,
-            target_existed: exists,
-            original_digest,
-        });
+        if work.changed {
+            let exists = path_entry_exists(&target);
+            let original_digest = existing_path_digest(&target);
+            let backup = mutation_backup(paths, transaction_id, &target, work.persistent_backup)?;
+            let staging = stage_bytes(&target, &work.updated)?;
+            mutations.push(JournalMutation {
+                target: target.display().to_string(),
+                staging: Some(staging.display().to_string()),
+                backup: exists.then(|| backup.display().to_string()),
+                persistent_backup: work.persistent_backup,
+                target_existed: exists,
+                original_digest,
+            });
+        }
         let document_digest = ledger::bytes_digest(&work.updated);
         for planned in plan.resources.values() {
             match &planned.desired {
@@ -439,16 +444,17 @@ pub(super) fn stage_documents(
                 _ => {}
             }
         }
-        if updated == original {
-            continue;
-        }
-        if persistent && path_entry_exists(&path) {
+        // An unchanged document still goes out: the entries it already holds
+        // were just detached from the ledger and are recorded again from it.
+        let changed = updated != original;
+        if changed && persistent && path_entry_exists(&path) {
             backup_paths.push(mutation_backup(paths, transaction_id, &path, true)?);
         }
         output.insert(
             key,
             DocumentWork {
                 path,
+                changed,
                 updated,
                 persistent_backup: persistent,
             },
@@ -489,9 +495,15 @@ pub(super) fn stage_path(
     let result = match desired.kind {
         OwnedPathKind::Directory => match &desired.materialization {
             PathMaterialization::Copy => copy_directory(&desired.source, &staging),
-            PathMaterialization::AgentSkill { effective_name } => {
-                materialize_agent_skill(&desired.source, &staging, effective_name)
-            }
+            PathMaterialization::AgentSkill {
+                effective_name,
+                disable_model_invocation,
+            } => materialize_agent_skill(
+                &desired.source,
+                &staging,
+                effective_name,
+                *disable_model_invocation,
+            ),
         },
         OwnedPathKind::File => fs_retry::copy(&desired.source, &staging)
             .map(|_| ())
@@ -548,7 +560,8 @@ pub(super) fn mutation_backup(
     }
     let directory = paths
         .home
-        .join(".agents/.agent-plugins-backups")
+        .join(".agents")
+        .join(".agent-plugins-backups")
         .join(transaction_id);
     fs_retry::create_dir_all(&directory).map_err(|error| {
         format!(

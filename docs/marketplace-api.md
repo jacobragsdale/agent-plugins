@@ -19,7 +19,7 @@ Group claims come from LDAP when `Auth:LdapDomain` is configured; the claim valu
 
 ### Personal namespaces
 
-The principal's personal namespace is derived from its sAMAccountName: lowercased, each run of other characters replaced by one hyphen, prefixed `u-` when it does not start with a letter, and cut to 16 characters. A derived name equal to `official` or a configured team namespace becomes `u-<name>` (`u-official`).
+The principal's personal namespace is derived from its sAMAccountName: lowercased, each run of other characters replaced by one hyphen, prefixed `u-` when it does not start with a letter, and cut to 16 characters. A name with no ASCII letter or digit (`иван`) becomes `u-` plus the first 8 hex digits of the SHA-256 of the lowercased name. A derived name equal to `official` or a configured team namespace becomes `u-<name>` (`u-official`).
 
 Two accounts can derive the same name: `christopher.johnson` and `christopher.johnston` both derive `christopher-john`. The first account to publish claims it. Any other account gets the first of `<first 14 characters>-2` through `-9` that it has claimed or that is still free (`christopher-jo-2`); when all are taken, every authenticated request answers `409`. Clients read `namespace` from [`GET /api/me`](#get-apime) and never derive it locally.
 
@@ -63,7 +63,7 @@ Returns an `agent-plugins-repository.json` document. Each listed source is one n
 
 Returns the namespace's current source archive: a zip whose root `agent-plugins.json` has `source.id` equal to the namespace and one package per latest non-yanked version. Supports `HEAD`, `ETag`, and `Last-Modified`.
 
-A caller who may see only some of the namespace's packages receives an archive holding just those. Its `ETag` is the digest of that subset, stable for the same subset of the same archive; `Last-Modified` is the full archive's. A caller who may see none answers `404`.
+A caller who may see only some of the namespace's packages receives an archive holding just those. Its `ETag` is a digest of the full archive's digest and the visible package ids, stable for the same subset of the same archive; `Last-Modified` is the full archive's. A caller who may see none answers `404`.
 
 ### `GET /api/index`
 
@@ -194,32 +194,37 @@ Flags a package. Body `{ "reason": "…" }`, 1 to 2,048 characters (`422` otherw
 
 Errors are RFC 9457 problem documents. `title` is a full sentence written for the person using the client, so show it as it is. When `detail` is present, show it too.
 
-| Status | When                                                                                                                                                                             |
-| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400`  | A malformed JSON body, route value, or upload form. `title` is `Failed to read parameter … as JSON.`; `detail` names the JSON path, for example `Path: $.events[0].occurredAt`.  |
-| `401`  | No credentials. Carries `WWW-Authenticate: Negotiate`.                                                                                                                           |
-| `403`  | The caller does not own the namespace; `title` names the account and the namespace.                                                                                              |
-| `404`  | The target is missing or hidden, with the same sentence either way: `The package jacob/review was not found, or you do not have access to it.`                                   |
-| `409`  | A conflict with stored state: a reused version number, a review of a version that is not pending, a personal namespace claimed by another account.                               |
-| `413`  | The request is above the 50 MB upload limit: `The request is larger than the 50 MB limit.`                                                                                       |
-| `422`  | The request breaks a rule; `title` says which. A validator failure also carries `errors[]` with `path` and `message`, matching the Rust validator's report.                      |
-| `503`  | PostgreSQL is unreachable, Artifact Keeper is unavailable after one automatic retry, or the package validator is missing or timed out. `title` says which and when to try again. |
+| Status | When                                                                                                                                                                                                                                      |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400`  | A malformed JSON body, route value, or upload form. `title` is `Failed to read parameter … as JSON.`; `detail` names the JSON path, for example `Path: $.events[0].occurredAt`.                                                           |
+| `401`  | No credentials. Carries `WWW-Authenticate: Negotiate`.                                                                                                                                                                                    |
+| `403`  | The caller does not own the namespace; `title` names the account and the namespace. Also any authenticated request other than `GET` or `HEAD` whose `Sec-Fetch-Site` is present and not `same-origin` or `none` (a page on another site). |
+| `404`  | The target is missing or hidden, with the same sentence either way: `The package jacob/review was not found, or you do not have access to it.`                                                                                            |
+| `409`  | A conflict with stored state: a reused version number, a review of a version that is not pending, a personal namespace claimed by another account.                                                                                        |
+| `413`  | The request is above the 50 MB upload limit: `The request is larger than the 50 MB limit.`                                                                                                                                                |
+| `422`  | The request breaks a rule; `title` says which. A validator failure also carries `errors[]` with `path` and `message`, matching the Rust validator's report.                                                                               |
+| `503`  | PostgreSQL is unreachable, Artifact Keeper is unavailable after one automatic retry, or the package validator is missing or timed out. `title` says which and when to try again.                                                          |
 
 ## Configuration
 
-| Setting                                   | Meaning                                                                                          |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `ConnectionStrings:Marketplace`           | PostgreSQL connection string.                                                                    |
-| `ArtifactKeeper:BaseUrl`                  | Artifact Keeper API base, for example `http://artifact-keeper:8080`.                             |
-| `ArtifactKeeper:Repository`               | Generic repository name, for example `files`.                                                    |
-| `ArtifactKeeper:Prefix`                   | Path prefix inside the repository, for example `marketplace`.                                    |
-| `ArtifactKeeper:Username` / `Password`    | Service credential used to obtain a bearer token.                                                |
-| `Auth:AllowDevHeader`                     | Trusts `X-Dev-User` outside Development. Beside Negotiate it logs a startup warning.             |
-| `Auth:LdapDomain`                         | Optional. Enables LDAP group claims for Negotiate.                                               |
-| `Auth:AdminGroup`                         | AD group whose members may call `/api/admin/*`.                                                  |
-| `Auth:AdminAccounts`                      | Accounts that may call `/api/admin/*`.                                                           |
-| `Auth:OfficialPublishers`                 | Principals that may publish under `official`.                                                    |
-| `Auth:TeamNamespaces`                     | `[{ namespace, group, displayName }]`: team namespaces owned by a group. Validated at startup.   |
-| `Client:MinimumVersion` / `LatestVersion` | Values returned by `/api/health`.                                                                |
-| `Validator:Path`                          | Path to the `validate-source` binary inside the image.                                           |
-| `Server:DownloadsPath`                    | Folder served at `/downloads`: `manifest.json` and `releases/`. The image sets `/srv/downloads`. |
+| Setting                                                   | Meaning                                                                                                                                                                              |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ConnectionStrings:Marketplace`                           | PostgreSQL connection string.                                                                                                                                                        |
+| `ArtifactKeeper:BaseUrl`                                  | Artifact Keeper API base, for example `http://artifact-keeper:8080`.                                                                                                                 |
+| `ArtifactKeeper:Repository`                               | Generic repository name, for example `files`.                                                                                                                                        |
+| `ArtifactKeeper:Prefix`                                   | Path prefix inside the repository, for example `marketplace`.                                                                                                                        |
+| `ArtifactKeeper:Username` / `Password`                    | Service credential used to obtain a bearer token.                                                                                                                                    |
+| `Database:MigrateOnStartup`                               | Applies pending EF Core migrations at startup. Default `true`.                                                                                                                       |
+| `Auth:EnableNegotiate`                                    | Registers the Negotiate (Kerberos) scheme. Default `true`; the integration tests turn it off.                                                                                        |
+| `Auth:AllowDevHeader`                                     | Trusts `X-Dev-User` outside Development. Beside Negotiate it logs a startup warning.                                                                                                 |
+| `Auth:LdapDomain`                                         | Optional. Enables LDAP group claims for Negotiate.                                                                                                                                   |
+| `Auth:AdminGroup`                                         | AD group whose members may call `/api/admin/*`.                                                                                                                                      |
+| `Auth:AdminAccounts`                                      | Accounts that may call `/api/admin/*`.                                                                                                                                               |
+| `Auth:OfficialPublishers`                                 | Principals that may publish under `official`.                                                                                                                                        |
+| `Auth:TeamNamespaces`                                     | `[{ namespace, group, displayName }]`: team namespaces owned by a group. Validated at startup.                                                                                       |
+| `Client:MinimumVersion` / `LatestVersion`                 | Values returned by `/api/health`.                                                                                                                                                    |
+| `Validator:Path`                                          | Path to the `validate-source` binary inside the image.                                                                                                                               |
+| `Validator:TimeoutSeconds`                                | How long one validator run may take before the publish answers `503`. Default `60`.                                                                                                  |
+| `Server:PublicBaseUrl`                                    | Required in every deployment. The HTTPS base clients reach, for example `https://marketplace.corp.example`; every catalog source URL is built from it. The default is a placeholder. |
+| `Server:CatalogId` / `CatalogName` / `CatalogDescription` | The `repository` block of `/api/catalog`. Defaults `marketplace`, `Marketplace`, and a one-line description.                                                                         |
+| `Server:DownloadsPath`                                    | Folder served at `/downloads`: `manifest.json` and `releases/`. The image sets `/srv/downloads`.                                                                                     |

@@ -69,9 +69,14 @@ fn toggle_launch_at_login<R: Runtime>(
     };
 
     match result {
-        Ok(()) => item.set_checked(!was_enabled).map_err(|error| {
-            format!("Launch at login changed, but the tray menu could not be updated: {error}")
-        }),
+        Ok(()) => {
+            if !was_enabled {
+                quote_launch_entry(app);
+            }
+            item.set_checked(!was_enabled).map_err(|error| {
+                format!("Launch at login changed, but the tray menu could not be updated: {error}")
+            })
+        }
         Err(error) => {
             if let Err(menu_error) = item.set_checked(was_enabled) {
                 eprintln!(
@@ -85,6 +90,34 @@ fn toggle_launch_at_login<R: Runtime>(
     }
 }
 
+/// `auto-launch` writes the Run entry as `<exe> --background` without quotes,
+/// and the per-user install folder is `Agent Plugins`, with a space. Windows
+/// then has to guess where the program name ends, and a stray `Agent.exe`
+/// would win. Rewrites the entry quoted, pointing at this copy.
+#[cfg(windows)]
+fn quote_launch_entry<R: Runtime>(app: &AppHandle<R>) {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
+    let name = &app.package_info().name;
+    let Ok(run) = winreg::RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
+        r"Software\Microsoft\Windows\CurrentVersion\Run",
+        KEY_READ | KEY_SET_VALUE,
+    ) else {
+        return;
+    };
+    let (Ok(current), Ok(exe)) = (run.get_value::<String, _>(name), std::env::current_exe()) else {
+        return;
+    };
+    let quoted = format!("\"{}\" {BACKGROUND_ARG}", exe.display());
+    if current != quoted {
+        if let Err(error) = run.set_value(name, &quoted) {
+            eprintln!("Could not quote the launch-at-login entry: {error}");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn quote_launch_entry<R: Runtime>(_app: &AppHandle<R>) {}
+
 pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> {
     let open_item = MenuItem::with_id(app, OPEN_MENU_ID, "Open Agent Plugins", true, None::<&str>)?;
     let check_now_item = MenuItem::with_id(
@@ -95,7 +128,12 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
         None::<&str>,
     )?;
     let launch_at_login_enabled = match app.autolaunch().is_enabled() {
-        Ok(enabled) => enabled,
+        Ok(enabled) => {
+            if enabled {
+                quote_launch_entry(app.handle());
+            }
+            enabled
+        }
         Err(error) => {
             eprintln!("Could not read the launch-at-login setting: {error}");
             false
@@ -146,7 +184,12 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
         .show_menu_on_left_click(cfg!(not(windows)))
         .on_menu_event(move |app, event| match event.id().as_ref() {
             OPEN_MENU_ID => open_main_window(app),
-            CHECK_NOW_MENU_ID => crate::application::spawn_app_sync(app.clone()),
+            // The window shows the check running and what it found; with it
+            // hidden, the click would look like it did nothing.
+            CHECK_NOW_MENU_ID => {
+                open_main_window(app);
+                crate::application::spawn_app_sync(app.clone());
+            }
             LAUNCH_AT_LOGIN_MENU_ID => {
                 if let Err(error) = toggle_launch_at_login(app, &launch_item_for_handler) {
                     eprintln!("{error}");

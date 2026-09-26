@@ -15,17 +15,17 @@ docs/          This documentation set, with ADRs under decisions/
 
 A source becomes files on disk in one direction. Each stage may use the stage above it and nothing below.
 
-| Stage        | Modules                                                                         | Responsibility                                                                               |
-| ------------ | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Acquire      | `locator.rs`, `artifact.rs`, `sources.rs`, `source.rs`, `repository.rs`         | Resolve an HTTPS locator, download, verify, extract safely, and cache a snapshot.            |
-| Normalize    | `manifest.rs`, `catalog.rs`, `mcp.rs`, `digest.rs`                              | Parse the pinned manifest, materialize skill names, validate MCP documents, digest content.  |
-| Plan         | `adapters.rs`, `agent_profiles.rs`, `planner.rs`, `resource.rs`                 | Detect agents, fan components across targets, coalesce identities, run structural preflight. |
-| Execute      | `executor/`, `managed_documents.rs`, `fs_retry.rs`                              | Stage, journal, activate, and roll back. The only writer of planned resources.               |
-| Own          | `ledger.rs`, `install.rs`                                                       | Record installations, bindings, and physical resources; derive item status.                  |
-| Serve        | `application/`, `ipc.rs`, `ipc_error.rs`, `app_state.rs`                        | Sequence use cases behind locks, project state for the UI, and classify errors.              |
-| Reach out    | `marketplace.rs`, `host_identity.rs`, `preflight.rs`                            | Identity, marketplace requests, events, and the startup checks.                              |
-| Host         | `paths.rs`, `startup.rs`, `process.rs`, `parallel.rs`, `qa_paths.rs`, `tray.rs` | Filesystem roots, environment repair, bounded subprocesses, QA isolation, tray.              |
-| Entry points | `main.rs`, `lib.rs`, `cli.rs`, `staging.rs`, `bin/`                             | Window, command registration, headless verbs, publish staging, validator binaries.           |
+| Stage        | Modules                                                                                        | Responsibility                                                                                      |
+| ------------ | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Acquire      | `locator.rs`, `artifact.rs`, `sources.rs`, `source.rs`, `repository.rs`                        | Resolve an HTTPS locator, download, verify, extract safely, and cache a snapshot.                   |
+| Normalize    | `manifest.rs`, `catalog.rs`, `mcp.rs`, `digest.rs`                                             | Parse the pinned manifest, materialize skill names, validate MCP documents, digest content.         |
+| Plan         | `adapters.rs`, `agent_profiles.rs`, `planner.rs`, `resource.rs`                                | Detect agents, fan components across targets, coalesce identities, run structural preflight.        |
+| Execute      | `executor/`, `managed_documents.rs`, `fs_retry.rs`                                             | Stage, journal, activate, and roll back. The only writer of planned resources.                      |
+| Own          | `ledger.rs`, `install.rs`                                                                      | Record installations, bindings, and physical resources; derive item status.                         |
+| Serve        | `application/`, `ipc.rs`, `ipc_error.rs`, `app_state.rs`                                       | Sequence use cases behind locks, project state for the UI, and classify errors.                     |
+| Reach out    | `marketplace.rs`, `host_identity.rs`, `preflight.rs`                                           | Identity, marketplace requests, events, and the startup checks.                                     |
+| Host         | `paths.rs`, `startup.rs`, `process.rs`, `parallel.rs`, `qa_paths.rs`, `tray.rs`, `tutorial.rs` | Filesystem roots, environment repair, bounded subprocesses, QA isolation, tray, the skill tutorial. |
+| Entry points | `main.rs`, `lib.rs`, `cli.rs`, `staging.rs`, `bin/`                                            | Window, command registration, headless verbs, publish staging, validator binaries.                  |
 
 ### Modules worth knowing before you change anything
 
@@ -69,14 +69,15 @@ Every command, and a failed `scheduled-sync` event, rejects with `{ kind, messag
 
 ### Binaries
 
-| Binary                       | Purpose                                                                               |
-| ---------------------------- | ------------------------------------------------------------------------------------- |
-| `agent-plugins`              | The app. A recognized first argument runs a CLI verb headless instead (`cli.rs`).     |
-| `validate-source`            | Validates a source tree or archive. The marketplace server shells out to this binary. |
-| `validate-source-repository` | Validates a catalog document.                                                         |
-| `generate-schema`            | Regenerates the checked-in JSON Schemas from the Rust types.                          |
+| Binary                       | Purpose                                                                                                                                                                                |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent-plugins`              | The app. A recognized first argument runs a CLI verb headless instead (`cli.rs`).                                                                                                      |
+| `agent-plugins-console`      | Windows installs it as `agent-plugins.com`, the console twin shells wait for; it runs the app with its console and returns the exit code. `windows/installer-hooks.nsh` puts it there. |
+| `validate-source`            | Validates a source tree or archive. The marketplace server shells out to this binary.                                                                                                  |
+| `validate-source-repository` | Validates a catalog document.                                                                                                                                                          |
+| `generate-schema`            | Regenerates the checked-in JSON Schemas from the Rust types.                                                                                                                           |
 
-The `app` feature is on by default. `--no-default-features` builds the validators without Tauri, which is how the server image avoids GTK and WebKit.
+The `app` feature is on by default. The `tools` feature builds the three tools above; it is off by default because the installers ship every binary cargo builds. `--no-default-features --features tools` builds them without Tauri, which is how the server image avoids GTK and WebKit.
 
 ## React
 

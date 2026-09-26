@@ -2,11 +2,13 @@
 
 `agent-plugins` is the Agent Plugins executable. When its first argument names a command it runs headless — no window — so a person or an agent can drive it from a terminal. Every command shares the app's validator, locator, identity, and installer, so a CLI publish or install is the same operation the window performs, authenticated the same way ([ADR 0004](decisions/0004-internal-marketplace.md)).
 
-The app puts itself on `PATH` on first run. Otherwise call it by path:
+The app puts its folder on your user `PATH` when it starts, and uninstalling takes it off again (the uninstaller runs `agent-plugins remove-from-path`). Otherwise call it by path:
 
 ```text
-"%LOCALAPPDATA%\Programs\Agent Plugins\agent-plugins.exe"
+"%LOCALAPPDATA%\Agent Plugins\agent-plugins.com"
 ```
+
+On Windows the installer also puts `agent-plugins.com` beside it: a small console program that runs the command through the app. Shells pick `.com` before `.exe` for a bare `agent-plugins`, and they wait for a console program and read its output, which they do not do for the app itself. Call `agent-plugins` without an extension from PowerShell, `cmd`, or a script. A first argument that is not a command prints the usage and exits with status 2 instead of opening the window.
 
 ## Synopsis
 
@@ -21,7 +23,7 @@ agent-plugins access <namespace>[/<package>] [--user <account>]... [--group <nam
 agent-plugins help
 ```
 
-Exit status is `0` on success and `1` on failure; failures print `error: <message>` on stderr. Any argument that is not one of `validate`, `publish`, `search`, `install`, `access`, `whoami`, `help`, or `--help` starts the desktop app instead.
+Exit status is `0` on success and `1` on failure; failures print `error: <message>` on stderr. A first argument that starts with `-` and is not `--help` or `-h`, such as `--background`, starts the desktop app instead. `--help` or `-h` anywhere after a command prints the usage and does nothing else.
 
 ## `whoami`
 
@@ -29,7 +31,7 @@ Prints the identity this machine publishes and installs under. Requires a reacha
 
 ```text
 host account: CORP\jacob
-identity: Kerberos (Negotiate)
+identity: Windows authentication (CORP)
 marketplace account: CORP\jacob
 namespace: jacob
 publishes to: jacob, official, team-data
@@ -40,7 +42,7 @@ admin: false
 | Line                  | Meaning                                                                                                                                               |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `host account`        | Who the process runs as, according to Windows.                                                                                                        |
-| `identity`            | The scheme used for marketplace requests: Kerberos, or the dev header.                                                                                |
+| `identity`            | The scheme used for marketplace requests: `Windows authentication (<domain>)`, or `development header as <account>`.                                  |
 | `marketplace account` | Who the server says you are.                                                                                                                          |
 | `namespace`           | Your personal publish namespace: your lowercase account name, or a numbered variant such as `christopher-jo-2` when another account claimed it first. |
 | `publishes to`        | Every namespace you may publish to: allowlisted lanes and team namespaces your groups own.                                                            |
@@ -130,17 +132,17 @@ A server rejection prints `HTTP <status>: <title>`, then the problem's `detail` 
 
 Syncs, then installs one catalog package onto every detected agent, exactly as the window would.
 
-| Argument        | Meaning                                                                                                      |
-| --------------- | ------------------------------------------------------------------------------------------------------------ |
-| `<ns>/<pkg>`    | The catalog ID. `agent-plugins search` prints it.                                                            |
-| `--approve-mcp` | Grants the Tier 3 approval. Required for any package containing an MCP server; without it the install fails. |
+| Argument        | Meaning                                                                                                                                                                                                                        |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `<ns>/<pkg>`    | The catalog ID. `agent-plugins search` prints it.                                                                                                                                                                              |
+| `--approve-mcp` | Grants the Tier 3 approval. Required for any package containing an MCP server; without it the install fails with `<name> includes a connector that runs a program on this computer. Run again with --approve-mcp to allow it.` |
 
 ```text
 installed jacob/review (Review workflow)
   backed up C:\Users\jacob\.agents\.agent-plugins-backups\...
 ```
 
-Backup lines appear only when an existing destination had to be preserved. An unknown ID fails with `<id> is not in the catalog. Try 'agent-plugins search'.`
+Backup lines appear only when an existing destination had to be preserved. An unknown ID fails with ``<id> is not in the catalog. Try `agent-plugins search`.``
 
 There is no `uninstall` command; uninstall from the app.
 
@@ -168,6 +170,13 @@ A public target prints `public`. A namespace or package with a list is hidden fr
 ## Environment
 
 The CLI prepares the host the same way the app does before it installs: it locates `uv`/`uvx`, normalizes proxy variables, and sets `UV_NATIVE_TLS`. Requests to the marketplace origin carry a Kerberos `Negotiate` token on a domain-joined host, or the `X-Dev-User` header where the server accepts it. Usage events are flushed as the process exits and never affect the exit status.
+
+| Variable                   | Effect                                                                                                                  |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `AGENT_PLUGINS_DEV_USER`   | Sends `X-Dev-User` with this account instead of Kerberos, even on a domain-joined host.                                 |
+| `AGENT_PLUGINS_DEV_GROUPS` | Comma-separated groups sent as `X-Dev-Groups` alongside the development header, so group rules can be tried without AD. |
+
+Only a server that accepts `X-Dev-User` honors either variable: always in Development, otherwise only with `Auth:AllowDevHeader`. Any other server treats the request as unauthenticated.
 
 ## See also
 

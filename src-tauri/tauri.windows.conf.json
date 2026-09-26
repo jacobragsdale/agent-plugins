@@ -1,0 +1,4 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": { "windows": { "nsis": { "installerHooks": "windows/installer-hooks.nsh" }, "wix": { "fragmentPaths": ["windows/console-twin.wxs"], "componentRefs": ["ConsoleTwin"] } } }
+}

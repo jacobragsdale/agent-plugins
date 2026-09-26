@@ -10,8 +10,6 @@ public sealed record InspectedArchive(
     string PackageId,
     JsonObject PackageManifest,
     IReadOnlyList<string> ComponentKinds,
-    /// <summary>Entry names relative to the source root, in archive order.</summary>
-    IReadOnlyList<string> Entries,
     /// <summary>The archive's root prefix, empty when <c>agent-plugins.json</c> is at the top level.</summary>
     string RootPrefix);
 
@@ -31,7 +29,7 @@ public static class ArchiveInspector
     {
         using var stream = new MemoryStream(bytes.ToArray(), writable: false);
         using var zip = OpenZip(stream);
-        var (names, prefix) = Scan(zip, bytes.Length);
+        var (_, prefix) = Scan(zip, bytes.Length);
         var manifestEntry = zip.GetEntry(prefix + ManifestFile)
             ?? throw new ProblemException(422, $"The archive has no {ManifestFile} at its root.");
         JsonObject manifest;
@@ -67,12 +65,7 @@ public static class ArchiveInspector
         var kinds = package["components"] is JsonArray components
             ? components.Select(component => Text((component as JsonObject)?["kind"]) ?? "unknown").Distinct().ToArray()
             : [];
-        var relative = names
-            .Where(name => name.StartsWith(prefix, StringComparison.Ordinal))
-            .Select(name => name[prefix.Length..])
-            .Where(name => name.Length > 0)
-            .ToArray();
-        return new InspectedArchive(sourceId, packageId, (JsonObject)package.DeepClone(), kinds, relative, prefix);
+        return new InspectedArchive(sourceId, packageId, (JsonObject)package.DeepClone(), kinds, prefix);
     }
 
     /// <summary>

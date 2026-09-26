@@ -6,7 +6,8 @@ use crate::catalog::{CatalogComponent, CatalogComponentKind, CatalogItem};
 use crate::ledger::{InstallationLedger, InstallationRecord};
 use crate::paths::SystemPaths;
 use crate::resource::{
-    stable_id, BindingPlan, CompatibilityReport, DesiredResource, OperationPlan,
+    stable_id, BindingPlan, CompatibilityReport, DesiredPath, DesiredResource, OperationPlan,
+    PathMaterialization,
 };
 use crate::source::{ConfiguredSource, SourceSnapshot};
 use serde::Serialize;
@@ -48,14 +49,25 @@ pub(crate) fn plan(
     if let Some(profiles) = profiles {
         return plan_portable(paths, snapshot, item, profiles, component_ids);
     }
-    let mut profiles = agent_profiles::read(paths)?;
+    plan_portable(
+        paths,
+        snapshot,
+        item,
+        &current_profiles(paths),
+        component_ids,
+    )
+}
+
+/// The agent profiles to plan with. Read these once to plan many packages.
+pub(crate) fn current_profiles(paths: &SystemPaths) -> Vec<AgentProfile> {
+    let profiles = agent_profiles::read(paths);
     // No enabled agent usually means detection missed one; look again once
     // before telling the user to install an app.
     if !profiles.iter().any(|profile| profile.enabled) && redetect_due() {
         agent_profiles::refresh_detection();
-        profiles = agent_profiles::read(paths)?;
+        return agent_profiles::read(paths);
     }
-    plan_portable(paths, snapshot, item, &profiles, component_ids)
+    profiles
 }
 
 /// Whether planning may ask for a fresh detection. At most once a minute,
@@ -159,14 +171,26 @@ fn plan_portable(
         return Err(format!("{} has no components to install.", item.id));
     }
     let mut plan = OperationPlan::default();
+    let overrides = crate::invocation::read_or_default(paths);
 
     for profile in enabled {
         let target_adapter = adapter(profile.target_id);
-        if target_adapter.target_id() != profile.target_id {
-            return Err("The target registry returned the wrong adapter.".to_string());
-        }
         for component in &components {
-            let target_plan = target_adapter.plan(component, profile, &context)?;
+            let mut target_plan = target_adapter.plan(component, profile, &context)?;
+            let manual = crate::invocation::override_for(&overrides, &item.id, component);
+            for resource in &mut target_plan.resources {
+                if let DesiredResource::Path(DesiredPath {
+                    materialization:
+                        PathMaterialization::AgentSkill {
+                            disable_model_invocation,
+                            ..
+                        },
+                    ..
+                }) = resource
+                {
+                    *disable_model_invocation = manual;
+                }
+            }
             let target_id = profile.target_id.as_str().to_string();
             plan.compatibility.push(CompatibilityReport {
                 component_id: component.id.clone(),
@@ -238,23 +262,24 @@ pub(crate) fn preflight_installed_conflicts(
     item: &CatalogItem,
     plan: &OperationPlan,
 ) -> Result<(), String> {
+    // One sentence: the window shows the first sentence and folds the rest away.
+    let incompatible = |installed: &str| {
+        format!(
+            "{} can't be installed while {installed} is installed; uninstall {installed} first.",
+            item.name
+        )
+    };
     for conflict in &item.conflicts_with {
-        if ledger.items.contains_key(conflict) {
-            return Err(format!(
-                "{} declares an incompatibility with installed package {conflict}.",
-                item.id
-            ));
+        if let Some(record) = ledger.items.get(conflict) {
+            return Err(incompatible(&record.name));
         }
     }
-    if let Some((installed_id, _)) = ledger
+    if let Some((_, record)) = ledger
         .items
         .iter()
         .find(|(_, record)| record.conflicts_with.contains(&item.id))
     {
-        return Err(format!(
-            "Installed package {installed_id} declares an incompatibility with {}.",
-            item.id
-        ));
+        return Err(incompatible(&record.name));
     }
     for resource in plan.resources.values() {
         if let Some(existing) = ledger.resource_by_identity(&resource.desired.identity()) {
@@ -318,28 +343,7 @@ pub(crate) fn preview(item: &CatalogItem, plan: &OperationPlan) -> InstallPrevie
         let Some(server) = &component.mcp_server else {
             continue;
         };
-        risk_details.push(match server {
-            crate::mcp::McpServer::Stdio {
-                command,
-                args,
-                env,
-                cwd,
-            } => format!(
-                "MCP {}: command {:?}, args {:?}, cwd {:?}, environment names {:?}",
-                component.effective_name,
-                command,
-                args,
-                cwd,
-                env.keys().collect::<Vec<_>>()
-            ),
-            crate::mcp::McpServer::StreamableHttp { url, headers }
-            | crate::mcp::McpServer::Sse { url, headers } => format!(
-                "MCP {}: URL {:?}, header names {:?}",
-                component.effective_name,
-                url,
-                headers.keys().collect::<Vec<_>>()
-            ),
-        });
+        risk_details.push(risk_detail(&component.effective_name, server));
     }
     InstallPreview {
         installation_id: item.id.clone(),
@@ -367,6 +371,53 @@ pub(crate) fn preview(item: &CatalogItem, plan: &OperationPlan) -> InstallPrevie
     }
 }
 
+/// One line of the approval prompt, written as the person would type it:
+/// `tracker runs: npx -y @acme/tracker (environment: MODE)`. Environment and
+/// header values stay out; only their names are shown.
+fn risk_detail(name: &str, server: &crate::mcp::McpServer) -> String {
+    let names = |keys: Vec<&String>, label: &str| {
+        if keys.is_empty() {
+            String::new()
+        } else {
+            let keys = keys.iter().map(|key| key.as_str()).collect::<Vec<_>>();
+            format!(" ({label}: {})", keys.join(", "))
+        }
+    };
+    match server {
+        crate::mcp::McpServer::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => {
+            let line = std::iter::once(command)
+                .chain(args)
+                .map(|part| {
+                    if part.is_empty() || part.contains(char::is_whitespace) {
+                        format!("\"{part}\"")
+                    } else {
+                        part.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let folder = cwd
+                .as_ref()
+                .map(|cwd| format!(" in {cwd}"))
+                .unwrap_or_default();
+            format!(
+                "{name} runs: {line}{folder}{}",
+                names(env.keys().collect(), "environment")
+            )
+        }
+        crate::mcp::McpServer::StreamableHttp { url, headers }
+        | crate::mcp::McpServer::Sse { url, headers } => format!(
+            "{name} connects to {url}{}",
+            names(headers.keys().collect(), "headers")
+        ),
+    }
+}
+
 fn normalize(path: &std::path::Path) -> String {
     path.components()
         .map(|component| component.as_os_str().to_string_lossy())
@@ -378,6 +429,33 @@ fn normalize(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_lines_read_like_the_command_they_run() {
+        use crate::mcp::McpServer;
+        let stdio = McpServer::Stdio {
+            command: "npx".to_string(),
+            args: vec![
+                "-y".to_string(),
+                "@acme/tracker".to_string(),
+                "two words".to_string(),
+            ],
+            env: [("MODE".to_string(), "secret".to_string())].into(),
+            cwd: Some("C:\\work".to_string()),
+        };
+        assert_eq!(
+            risk_detail("acme-tracker", &stdio),
+            "acme-tracker runs: npx -y @acme/tracker \"two words\" in C:\\work (environment: MODE)"
+        );
+        let http = McpServer::StreamableHttp {
+            url: "https://mcp.example.com/x".to_string(),
+            headers: [("Authorization".to_string(), "${TOKEN}".to_string())].into(),
+        };
+        assert_eq!(
+            risk_detail("acme-remote", &http),
+            "acme-remote connects to https://mcp.example.com/x (headers: Authorization)"
+        );
+    }
     use crate::agent_profiles::{AgentProfile, TargetId};
     use crate::catalog::{read_manifest_catalog, CatalogComponentKind, CatalogItem};
     use crate::source::{ConfiguredSource, SourceSnapshot, TEST_SOURCE_KEY};

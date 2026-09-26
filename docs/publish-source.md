@@ -81,14 +81,14 @@ Then run the repository-aware validator for source containment, component names,
 
 ```bash
 cargo run --manifest-path /path/to/agent-plugins/src-tauri/Cargo.toml \
-  --bin validate-source -- /path/to/example-source
+  --no-default-features --features tools --bin validate-source -- /path/to/example-source
 ```
 
 You can also validate a published HTTPS archive of the same tree:
 
 ```bash
 cargo run --manifest-path /path/to/agent-plugins/src-tauri/Cargo.toml \
-  --bin validate-source -- \
+  --no-default-features --features tools --bin validate-source -- \
   https://nexus.example.com/repository/raw/sources/example-latest.zip
 ```
 

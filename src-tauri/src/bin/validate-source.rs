@@ -138,10 +138,12 @@ fn stage(args: &StageArguments) -> ! {
     match result {
         Ok(staged) => {
             println!(
-                "{{\"packageId\":{},\"fileCount\":{},\"totalBytes\":{}}}",
-                json_string(&staged.package_id),
-                staged.file_count,
-                staged.total_bytes
+                "{}",
+                serde_json::json!({
+                    "packageId": staged.package_id,
+                    "fileCount": staged.file_count,
+                    "totalBytes": staged.total_bytes,
+                })
             );
             std::process::exit(0);
         }
@@ -164,8 +166,12 @@ fn finish(result: Result<agent_plugins_lib::SourceValidationReport, String>, jso
                 report.valid_installs,
                 report.errors.len()
             );
-            for error in report.errors {
+            for error in &report.errors {
                 println!("{}: {}", error.path, error.message);
+            }
+            // Same pass condition as `agent-plugins validate`; --json leaves the verdict to the reader.
+            if !report.errors.is_empty() || report.valid_installs == 0 {
+                std::process::exit(1);
             }
         }
         Err(error) if json => {
@@ -182,48 +188,20 @@ fn finish(result: Result<agent_plugins_lib::SourceValidationReport, String>, jso
 /// The marketplace server parses this document, so its shape is a contract:
 /// `sourceId`, `validInstalls`, and `errors[]` of `{ path, message }`.
 fn report_json(report: &agent_plugins_lib::SourceValidationReport) -> String {
-    let errors = report
-        .errors
-        .iter()
-        .map(|error| {
-            format!(
-                "{{\"path\":{},\"message\":{}}}",
-                json_string(&error.path),
-                json_string(&error.message)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "{{\"sourceId\":{},\"validInstalls\":{},\"errors\":[{}]}}",
-        json_string(&report.source_id),
-        report.valid_installs,
-        errors
-    )
+    serde_json::json!({
+        "sourceId": report.source_id,
+        "validInstalls": report.valid_installs,
+        "errors": report
+            .errors
+            .iter()
+            .map(|error| serde_json::json!({ "path": error.path, "message": error.message }))
+            .collect::<Vec<_>>(),
+    })
+    .to_string()
 }
 
 fn fatal_json(message: &str) -> String {
-    format!("{{\"fatal\":{}}}", json_string(message))
-}
-
-fn json_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            ch if (ch as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
+    serde_json::json!({ "fatal": message }).to_string()
 }
 
 fn usage() -> ! {

@@ -25,8 +25,11 @@ fn finish(result: Result<agent_plugins_lib::RepositoryValidationReport, String>)
                 report.listed_sources,
                 report.errors.len()
             );
-            for error in report.errors {
+            for error in &report.errors {
                 println!("{}: {}", error.path, error.message);
+            }
+            if !report.errors.is_empty() {
+                std::process::exit(1);
             }
         }
         Err(error) => {

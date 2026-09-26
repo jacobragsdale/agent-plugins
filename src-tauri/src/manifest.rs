@@ -201,21 +201,6 @@ impl SourceManifest {
         Ok(())
     }
 
-    pub fn referenced_repository_paths(&self) -> BTreeSet<String> {
-        let Self::V2(manifest) = self;
-        manifest
-            .packages
-            .iter()
-            .flat_map(|package| {
-                package
-                    .components
-                    .iter()
-                    .map(|component| component.path().to_string())
-            })
-            .chain(std::iter::once(SOURCE_MANIFEST_FILE.to_string()))
-            .collect()
-    }
-
     pub fn source(&self) -> &ManifestSource {
         let Self::V2(manifest) = self;
         &manifest.source
@@ -443,7 +428,6 @@ mod tests {
         .expect("valid v2 manifest");
         assert_eq!(manifest.source().id, "acme");
         assert_eq!(manifest.packages().len(), 1);
-        assert_eq!(manifest.referenced_repository_paths().len(), 3);
     }
 
     #[test]

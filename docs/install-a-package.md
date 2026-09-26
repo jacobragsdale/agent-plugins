@@ -86,8 +86,9 @@ This time a dialog appears before anything is written:
 
 ```text
 Allow connector
-<Package> includes a connector that runs a program on this computer. Every AI app found here will run it.
-database: node server.js
+<Package> includes a connector, a program or online service that AI apps use. Every AI app found here will use it.
+
+database runs: node server.js
 ```
 
 The difference matters. A skill is text your agent reads. An MCP server is a program your agent starts on this machine, so Agent Plugins shows you the command, its arguments, and the environment variables it wants, and writes nothing until you select **Allow and install**.

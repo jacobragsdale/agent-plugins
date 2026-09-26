@@ -299,6 +299,7 @@ fn skill_frontmatter(path: &Path) -> Result<(String, String), String> {
 /// The skill name must equal the component ID; rewrite only the `name:` line.
 fn rewrite_skill_name(path: &Path, id: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let text = text.trim_start_matches('\u{feff}');
     let mut out = String::with_capacity(text.len());
     let mut in_frontmatter = false;
     let mut replaced = false;
@@ -312,7 +313,7 @@ fn rewrite_skill_name(path: &Path, id: &str) -> Result<(), String> {
         if in_frontmatter && line.trim() == "---" {
             in_frontmatter = false;
         }
-        if in_frontmatter && !replaced && line.trim_start().starts_with("name:") {
+        if in_frontmatter && !replaced && line.starts_with("name:") {
             out.push_str(&format!("name: {id}\n"));
             replaced = true;
             continue;
@@ -568,6 +569,41 @@ mod tests {
         assert_eq!(report.valid_installs, 1);
         let archive = zip_tree(&staged.root).expect("zip");
         assert!(archive.len() > 100);
+    }
+
+    #[test]
+    fn rewrites_the_name_after_a_bom_and_ignores_nested_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for (label, text) in [
+            (
+                "bom",
+                "\u{feff}---\nname: acme-review\ndescription: d\n---\n",
+            ),
+            (
+                "nested",
+                "---\nmetadata:\n  name: x\nname: acme-review\ndescription: d\n---\n",
+            ),
+        ] {
+            let skill = temp.path().join(label).join("review");
+            std::fs::create_dir_all(&skill).expect("skill dir");
+            std::fs::write(skill.join("SKILL.md"), text).expect("write");
+            let staged = stage_tree(
+                &skill,
+                &request("acme"),
+                &temp.path().join(label).join("out"),
+            )
+            .expect("stage");
+            let rewritten =
+                std::fs::read_to_string(staged.root.join("skills/review/SKILL.md")).expect("skill");
+            assert!(
+                rewritten.contains("\nname: review\n"),
+                "{label}: {rewritten}"
+            );
+            let report = crate::source::validate_source(&staged.root.display().to_string())
+                .expect("validate");
+            assert!(report.errors.is_empty(), "{label}: {:?}", report.errors);
+            assert_eq!(report.valid_installs, 1, "{label}");
+        }
     }
 
     #[test]

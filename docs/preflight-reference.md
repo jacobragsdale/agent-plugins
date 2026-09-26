@@ -9,7 +9,9 @@ Agent Plugins runs a preflight at the end of every sync, including the one the w
   "startedAtEpochSeconds": 1756425600,
   "durationMillis": 1840,
   "blocked": false,
-  "checks": [{ "id": "auth.identity", "group": "auth", "title": "Signed in", "status": "ok", "detail": "CORP\\jacob (namespace jacob)", "remediation": null, "blocking": false, "durationMillis": 212 }]
+  "checks": [
+    { "id": "auth.identity", "group": "auth", "title": "Marketplace sign-in", "status": "ok", "detail": "CORP\\jacob (namespace jacob)", "remediation": null, "blocking": false, "durationMillis": 212 }
+  ]
 }
 ```
 
@@ -51,20 +53,20 @@ Checks run in parallel where independent, each with a timeout. A timed-out check
 
 ### Server
 
-| ID                     | Checks                                                                                   | Status rules                                                             | Remediation     |
-| ---------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | --------------- |
-| `server.health`        | `GET /api/health` returns a document.                                                    | `fail` when unreachable; the app enters offline mode.                    | —               |
-| `server.clientVersion` | The client version against `minimumClientVersion` and `latestClientVersion` from health. | `fail` below minimum; `warn` below latest.                               | action `update` |
-| `server.catalog`       | The marketplace catalog fetched during the last sync.                                    | `warn` when none was fetched yet, or the cached copy is older than 24 h. | action `sync`   |
+| ID                     | Checks                                                                                   | Status rules                                                                                                                                | Remediation     |
+| ---------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| `server.health`        | `GET /api/health` returns a document.                                                    | `fail` when unreachable; the app enters offline mode. A sync that could not connect to the marketplace records `fail` without asking again. | —               |
+| `server.clientVersion` | The client version against `minimumClientVersion` and `latestClientVersion` from health. | `fail` below minimum; `warn` below latest.                                                                                                  | action `update` |
+| `server.catalog`       | The marketplace catalog fetched during the last sync.                                    | `warn` when none was fetched yet, or the cached copy is older than 24 h.                                                                    | action `sync`   |
 
 ### Agents
 
-| ID                | Checks                                                                                                                                                              | Status rules                                                | Remediation        |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- | ------------------ |
-| `agents.detected` | At least one supported agent is installed.                                                                                                                          | `warn` when none.                                           | manual             |
-| `agents.ledger`   | The ledger file can be read. A damaged ledger has already been replaced by its `.previous` copy, and a newer version's ledger reads as read-only, so neither fails. | `fail` and blocking when unreadable.                        | manual             |
-| `agents.journal`  | Whether `resource-transaction.json` is present.                                                                                                                     | `warn` while an interrupted transaction waits for recovery. | —                  |
-| `agents.drift`    | Owned resources whose digest no longer matches the ledger.                                                                                                          | `warn` with the count and paths.                            | action `showDrift` |
+| ID                | Checks                                                                                                                                                | Status rules                                                           | Remediation                                   |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------- |
+| `agents.detected` | At least one supported agent is installed.                                                                                                            | `warn` when none.                                                      | manual                                        |
+| `agents.ledger`   | The ledger file can be read, and this version may change it. A damaged ledger has already been replaced by its `.previous` copy, so it does not fail. | `fail` and blocking when unreadable, or when a newer version wrote it. | manual; `update` for a newer version's ledger |
+| `agents.journal`  | Whether `resource-transaction.json` is present.                                                                                                       | `warn` while an interrupted transaction waits for recovery.            | —                                             |
+| `agents.drift`    | Owned resources whose digest no longer matches the ledger.                                                                                            | `warn` with the count and paths.                                       | action `showDrift`                            |
 
 ### Dependencies
 

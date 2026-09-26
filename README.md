@@ -59,8 +59,10 @@ Run local verification before pushing:
 
 ```bash
 pnpm typecheck && pnpm lint && pnpm test && pnpm format:check && pnpm build
+pnpm --filter website lint && pnpm --filter website test && pnpm --filter website build
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo clippy --manifest-path src-tauri/Cargo.toml --no-default-features --features tools --bins -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 ```
 

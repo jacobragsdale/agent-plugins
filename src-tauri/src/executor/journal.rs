@@ -35,6 +35,97 @@ pub(super) struct JournalMutation {
     pub(super) original_digest: Option<String>,
 }
 
+const LOCK_FILE: &str = "transaction.lock";
+
+/// Serializes ledger changes across processes. The window and the command
+/// line both change the ledger, and recovery must never roll back a journal
+/// another process is still activating. The OS releases the lock when its
+/// holder exits, so a crash never leaves it held. Within one process the
+/// operation lock already serializes changes, so holding it nests.
+pub(crate) struct TransactionLock(std::path::PathBuf);
+
+type HeldLocks = std::collections::HashMap<std::path::PathBuf, (fs::File, usize)>;
+
+/// The lock files this process holds, by path, and how many holders share each.
+fn held() -> std::sync::MutexGuard<'static, HeldLocks> {
+    static HELD: std::sync::OnceLock<std::sync::Mutex<HeldLocks>> = std::sync::OnceLock::new();
+    HELD.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl TransactionLock {
+    /// Waits for a change in another process to finish, then holds the lock.
+    pub(crate) fn acquire(paths: &SystemPaths) -> Result<Self, String> {
+        let path = paths.app_data().join(LOCK_FILE);
+        if let Some((_, holders)) = held().get_mut(&path) {
+            *holders += 1;
+            return Ok(Self(path));
+        }
+        let file = open_lock_file(paths)?;
+        file.lock()
+            .map_err(|error| format!("Could not lock {}: {error}", path.display()))?;
+        held()
+            .entry(path.clone())
+            .and_modify(|(_, holders)| *holders += 1)
+            .or_insert((file, 1));
+        Ok(Self(path))
+    }
+
+    /// Holds the lock only when nobody holds it now, this process included:
+    /// a holder is in the middle of a change and owns its journal.
+    fn try_acquire(paths: &SystemPaths) -> Option<Self> {
+        let path = paths.app_data().join(LOCK_FILE);
+        let mut held = held();
+        if held.contains_key(&path) {
+            return None;
+        }
+        let file = open_lock_file(paths).ok()?;
+        file.try_lock().ok()?;
+        held.insert(path.clone(), (file, 1));
+        Some(Self(path))
+    }
+}
+
+impl Drop for TransactionLock {
+    fn drop(&mut self) {
+        let mut held = held();
+        if let Some((_, holders)) = held.get_mut(&self.0) {
+            *holders -= 1;
+            if *holders == 0 {
+                // Closing the file releases the lock.
+                held.remove(&self.0);
+            }
+        }
+    }
+}
+
+fn open_lock_file(paths: &SystemPaths) -> Result<fs::File, String> {
+    let directory = paths.app_data();
+    fs_retry::create_dir_all(&directory).map_err(|error| {
+        format!(
+            "Could not create {}: {}",
+            directory.display(),
+            fs_retry::plain(&error)
+        )
+    })?;
+    fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(directory.join(LOCK_FILE))
+        .map_err(|error| format!("Could not open {LOCK_FILE}: {}", fs_retry::plain(&error)))
+}
+
+/// Recovery for a read: skipped while any change holds the lock, because its
+/// journal is live. Reads never wait for a change to finish.
+pub(super) fn recover_unless_busy(paths: &SystemPaths) -> Result<(), String> {
+    match TransactionLock::try_acquire(paths) {
+        Some(_lock) => recover(paths),
+        None => Ok(()),
+    }
+}
+
 /// Finishes or undoes a transaction a crash or failure left behind. A journal
 /// that cannot be parsed is moved aside instead of blocking every read, and a
 /// committed transaction whose leftovers cannot be removed yet is parked for a

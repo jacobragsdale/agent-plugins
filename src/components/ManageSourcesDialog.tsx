@@ -5,6 +5,7 @@ import type { AppError } from "../ipc/client";
 import type { AppState, ListedSource, RepositoryState, SourceState } from "../ipc/schemas";
 import { ErrorMessage } from "./Notice";
 import { FreshnessBadge } from "./SourceGroup";
+import type { SourceAction } from "./SourceGroup";
 
 function ListedSourceCard({ name, description, children }: Readonly<{ name: string; description: string; children: ReactNode }>): JSX.Element {
   return (
@@ -49,9 +50,10 @@ export function ManageSourcesDialog({
 }: Readonly<{
   open: boolean;
   state: AppState | null;
-  adding: boolean;
+  /** The URL of the listed source being added. */
+  adding: string | null;
   error: AppError | null;
-  removing: ReadonlySet<string>;
+  removing: ReadonlyMap<string, SourceAction>;
   onOpenChange: (open: boolean) => void;
   onAddListed: (repository: RepositoryState, listed: ListedSource) => Promise<void>;
   onRemove: (source: SourceState) => Promise<void>;
@@ -70,11 +72,6 @@ export function ManageSourcesDialog({
             <ErrorMessage summary={error.summary} detail={error.detail} />
           </Callout.Root>
         )}
-        {state?.catalogMessage === null || state?.catalogMessage === undefined ? null : (
-          <Text as="p" color="red" size="2">
-            {state.catalogMessage}
-          </Text>
-        )}
         {state === null || repository === null ? (
           <Text as="p" color="gray" size="2">
             The source catalog is not configured yet. Once the company catalog URL is set, sources will appear here.
@@ -85,16 +82,11 @@ export function ManageSourcesDialog({
               <Heading as="h3" size="3">
                 {repository.name}
               </Heading>
-              <FreshnessBadge status={repository.status} refreshFailed={repository.refreshFailed} lastSuccessAt={repository.lastSuccessAtEpochSeconds} />
+              <FreshnessBadge status={repository.status} refreshFailed={repository.refreshFailed} lastSuccessAt={repository.lastSuccessAtEpochSeconds} message={repository.message} />
             </div>
             <Text as="p" color="gray" size="2">
               {repository.description}
             </Text>
-            {repository.message === null || repository.status === "stale" ? null : (
-              <Text as="p" color="red" size="2">
-                {repository.message}
-              </Text>
-            )}
             {repository.sources.length === 0 ? (
               <Text as="p" color="gray" size="2">
                 This catalog does not list any sources yet.
@@ -126,8 +118,8 @@ export function ManageSourcesDialog({
                         ) : (
                           <Button
                             size="1"
-                            disabled={adding}
-                            loading={adding}
+                            disabled={adding !== null}
+                            loading={adding === listed.url}
                             onClick={() => {
                               onAddListed(repository, listed).catch((reason: unknown) => {
                                 onError(toAppError(reason));

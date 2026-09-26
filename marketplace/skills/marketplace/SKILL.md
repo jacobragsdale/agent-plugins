@@ -13,8 +13,10 @@ transaction. Authentication is the user's Windows logon.
 
 Try `agent-plugins help`. If it is not on PATH, use the installed executable:
 
-- Windows: `"%LOCALAPPDATA%\Programs\Agent Plugins\agent-plugins.exe"`
+- Windows: `"%LOCALAPPDATA%\Agent Plugins\agent-plugins.com"`. An older install has only `agent-plugins.exe`, which PowerShell neither waits for nor reads, so pipe it: `& "$env:LOCALAPPDATA\Agent Plugins\agent-plugins.exe" help | Out-String`.
 - macOS (development): `/Applications/Agent Plugins.app/Contents/MacOS/agent-plugins`
+
+If a command prints nothing in PowerShell, run it again piped to `Out-String`.
 
 ## Search
 

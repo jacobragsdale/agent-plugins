@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Marketplace.Api.Configuration;
@@ -144,7 +145,12 @@ public static partial class IdentityResolver
         }
 
         var candidate = builder.ToString();
-        if (candidate.Length == 0 || !char.IsAsciiLetter(candidate[0]))
+        if (candidate.Length == 0)
+        {
+            // Nothing ASCII survives (иван, ___): a short hash keeps the namespace stable and distinct.
+            candidate = "u-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(username.ToLowerInvariant())))[..8];
+        }
+        else if (!char.IsAsciiLetter(candidate[0]))
         {
             candidate = "u-" + candidate;
         }

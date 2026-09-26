@@ -356,16 +356,6 @@ pub(crate) fn write_sources_config(
     )
 }
 
-#[allow(dead_code)]
-pub(crate) fn write_sources(
-    config_base: &Path,
-    sources: &[ConfiguredSource],
-) -> Result<(), String> {
-    let mut config = read_sources_config(config_base).unwrap_or_default();
-    config.sources = sources.to_vec();
-    write_sources_config(config_base, &config)
-}
-
 pub(crate) fn configured_source(
     config_base: &Path,
     source_id: &str,
@@ -1197,7 +1187,16 @@ fn atomic_write_with_backup(
     contents: &[u8],
 ) -> Result<(), String> {
     let staging = temporary_path(parent, label);
-    write_new_file(&staging, contents)?;
+    let result = write_new_file(&staging, contents)
+        .and_then(|()| activate_with_backup(&staging, path, backup));
+    if result.is_err() {
+        let _ = fs_retry::remove_file(&staging);
+    }
+    result?;
+    sync_directory(parent)
+}
+
+fn activate_with_backup(staging: &Path, path: &Path, backup: &Path) -> Result<(), String> {
     if path.exists() {
         if backup.exists() {
             fs_retry::remove_file(backup)
@@ -1205,7 +1204,7 @@ fn atomic_write_with_backup(
         }
         fs_retry::rename(path, backup)
             .map_err(|error| format!("Could not stage {}: {error}", path.display()))?;
-        if let Err(error) = fs_retry::rename(&staging, path) {
+        if let Err(error) = fs_retry::rename(staging, path) {
             let restore = fs_retry::rename(backup, path);
             return match restore {
                 Ok(()) => Err(format!("Could not activate {}: {error}", path.display())),
@@ -1218,10 +1217,10 @@ fn atomic_write_with_backup(
         // The backup stays as the last good copy for a read that finds the
         // new file damaged.
     } else {
-        fs_retry::rename(&staging, path)
+        fs_retry::rename(staging, path)
             .map_err(|error| format!("Could not activate {}: {error}", path.display()))?;
     }
-    sync_directory(parent)
+    Ok(())
 }
 
 fn write_new_file(path: &Path, contents: &[u8]) -> Result<(), String> {
@@ -1576,5 +1575,23 @@ mod tests {
         assert!(after.repositories.is_empty());
         assert_eq!(after.sources.len(), 1);
         assert_eq!(after.sources[0].source_id, "review");
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_staging_file() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("sources.json");
+        let backup = dir.path().join("sources.previous.json");
+        fs::write(&path, "old").expect("current");
+        fs::create_dir_all(backup.join("occupied")).expect("blocking backup");
+        atomic_write_with_backup(dir.path(), &path, &backup, "sources-writing", b"new")
+            .expect_err("backup cannot be replaced");
+        assert_eq!(fs::read_to_string(&path).expect("current"), "old");
+        let leftovers = fs::read_dir(dir.path())
+            .expect("list")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains("-writing-"))
+            .count();
+        assert_eq!(leftovers, 0);
     }
 }

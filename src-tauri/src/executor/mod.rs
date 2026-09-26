@@ -10,6 +10,7 @@ use crate::ledger::{
 use crate::managed_documents;
 use crate::paths::SystemPaths;
 use crate::planner;
+use crate::resource::normalized_path as normalize_path;
 #[cfg(test)]
 use crate::resource::StructuredFormat;
 use crate::resource::{DesiredResource, DesiredStructuredEntry, OperationPlan};
@@ -28,7 +29,8 @@ mod stage;
 
 use activate::{commit, persist_reset_ledger, update_document_digests_from_journal};
 use journal::{
-    cleanup_staging, read_ledger_raw, JournalMutation, TransactionJournal, JOURNAL_FILE,
+    cleanup_staging, read_ledger_raw, recover_unless_busy, JournalMutation, TransactionJournal,
+    TransactionLock, JOURNAL_FILE,
 };
 use matching::plan_matches_ledger;
 use stage::{identical_to_desired, mutation_backup, stage_changes, StageRequest};
@@ -50,21 +52,23 @@ const STALE_STAGING_AGE: Duration = Duration::from_secs(10 * 60);
 /// The ledger for display. Reads never wait on recovery: a rollback that
 /// cannot finish yet is retried by the next change or sync.
 pub(crate) fn read_ledger(paths: &SystemPaths) -> Result<InstallationLedger, String> {
-    if let Err(error) = recover(paths) {
+    if let Err(error) = recover_unless_busy(paths) {
         eprintln!("{error}");
     }
     read_ledger_raw(paths)
 }
 
-/// The ledger a change starts from, after recovery. A ledger that a newer
-/// version wrote is shown but never changed.
-fn ledger_for_change(paths: &SystemPaths) -> Result<InstallationLedger, String> {
+/// The ledger a change starts from, after recovery, and the lock that keeps
+/// another process from changing it until this change commits. A ledger that
+/// a newer version wrote is shown but never changed.
+fn ledger_for_change(paths: &SystemPaths) -> Result<(TransactionLock, InstallationLedger), String> {
+    let lock = TransactionLock::acquire(paths)?;
     recover(paths)?;
     let ledger = read_ledger_raw(paths)?;
     if ledger.read_only {
         return Err(ledger::NEWER_LEDGER_MESSAGE.to_string());
     }
-    Ok(ledger)
+    Ok((lock, ledger))
 }
 
 /// How a refusal to overwrite a person's edits reads.
@@ -77,6 +81,26 @@ fn protected_error(installation_id: &str, state: &ContentState, action: &str) ->
         }
         _ => format!("{installation_id} {LOCAL_CHANGES} and cannot be {action}."),
     }
+}
+
+/// Why nothing in `plan` can go to any detected app: each app's own reason.
+fn unusable_here(item: &CatalogItem, plan: &OperationPlan) -> String {
+    let reasons = plan
+        .compatibility
+        .iter()
+        .filter_map(|report| match &report.capability {
+            crate::resource::CapabilityResult::Unsupported { reason }
+            | crate::resource::CapabilityResult::Blocked { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    format!(
+        "None of the AI apps on this computer can use {}. {}",
+        item.name,
+        reasons.into_iter().collect::<Vec<_>>().join(" ")
+    )
+    .trim_end()
+    .to_string()
 }
 
 /// Packages that skipped an agent because its settings file was unreadable
@@ -94,23 +118,37 @@ pub(crate) fn take_skipped_agent(installation_id: &str) -> bool {
         .is_ok_and(|mut skipped| skipped.remove(installation_id))
 }
 
-/// One agent's unreadable or locked settings file skips only that agent: the
-/// bindings that would write to it leave the plan, and each skipped file
-/// becomes a warning. Fails only when nothing else is left to install.
+/// One agent's unreadable or locked settings file, or a skill folder that
+/// cannot be written to, skips only the agents writing there: the bindings
+/// that would write to it leave the plan, and each skipped place becomes a
+/// warning. Fails only when nothing else is left to install.
 fn skip_unusable_documents(
     plan: &mut OperationPlan,
     installation_id: &str,
 ) -> Result<Vec<String>, String> {
-    let mut problems = BTreeMap::<PathBuf, String>::new();
+    let mut problems = BTreeMap::<PathBuf, (String, bool)>::new();
     for planned in plan.resources.values() {
-        let DesiredResource::StructuredEntry(desired) = &planned.desired else {
+        let Some(place) = written_in(&planned.desired) else {
             continue;
         };
-        if problems.contains_key(&desired.document_path) {
+        if problems.contains_key(place) {
             continue;
         }
-        if let Some(problem) = document_problem(desired, &planned.adapter_id) {
-            problems.insert(desired.document_path.clone(), problem);
+        let problem = match &planned.desired {
+            DesiredResource::StructuredEntry(desired) => {
+                document_problem(desired, &planned.adapter_id)
+            }
+            _ => folder_problem(
+                place,
+                planned
+                    .consumer_binding_ids
+                    .iter()
+                    .filter_map(|binding_id| plan.bindings.get(binding_id))
+                    .map(|binding| binding.target_id.as_str()),
+            ),
+        };
+        if let Some(problem) = problem {
+            problems.insert(place.to_path_buf(), problem);
         }
     }
     if problems.is_empty() {
@@ -120,8 +158,7 @@ fn skip_unusable_documents(
         .resources
         .values()
         .filter(|planned| {
-            matches!(&planned.desired, DesiredResource::StructuredEntry(desired)
-                if problems.contains_key(&desired.document_path))
+            written_in(&planned.desired).is_some_and(|place| problems.contains_key(place))
         })
         .map(|planned| planned.id.clone())
         .collect::<BTreeSet<_>>();
@@ -136,9 +173,10 @@ fn skip_unusable_documents(
         })
         .map(|binding| binding.id.clone())
         .collect::<BTreeSet<_>>();
-    let warnings = problems.into_values().collect::<Vec<_>>();
+    let problems = problems.into_values().collect::<Vec<_>>();
     if dropped_bindings.len() == plan.bindings.len() {
-        return Err(warnings.join(" "));
+        let texts = problems.iter().map(|(text, _)| text.as_str());
+        return Err(texts.collect::<Vec<_>>().join(" "));
     }
     plan.bindings
         .retain(|binding_id, _| !dropped_bindings.contains(binding_id));
@@ -151,28 +189,79 @@ fn skip_unusable_documents(
     if let Ok(mut skipped) = skipped_agents().lock() {
         skipped.insert(installation_id.to_string());
     }
-    Ok(warnings)
+    // A busy file frees up on its own and the next sync retries it, so only an
+    // unreadable one is worth a warning: someone has to fix that file.
+    Ok(problems
+        .into_iter()
+        .filter(|(_, busy)| !busy)
+        .map(|(text, _)| text)
+        .collect())
 }
 
-fn document_problem(desired: &DesiredStructuredEntry, adapter_id: &str) -> Option<String> {
+/// Where a resource is written: its settings file, or the folder a whole
+/// skill goes into.
+fn written_in(desired: &DesiredResource) -> Option<&Path> {
+    match desired {
+        DesiredResource::StructuredEntry(entry) => Some(&entry.document_path),
+        DesiredResource::Path(path) => path.path.parent(),
+        DesiredResource::TextBlock(_) => None,
+    }
+}
+
+/// A skill folder that cannot be written to, such as a OneDrive folder that a
+/// policy or a sync error keeps read-only. It stays so until someone fixes it,
+/// so it is a warning rather than a quiet retry.
+fn folder_problem<'a>(
+    folder: &Path,
+    targets: impl IntoIterator<Item = &'a str>,
+) -> Option<(String, bool)> {
+    let probe = folder.join(format!(".agent-plugins-write-test-{}", std::process::id()));
+    let written = fs::create_dir_all(folder).and_then(|()| fs::write(&probe, b"ok"));
+    let _ = fs::remove_file(&probe);
+    let error = written.err()?;
+    let apps = managed_documents::app_names(targets);
+    let why = if error.kind() == std::io::ErrorKind::PermissionDenied {
+        format!(
+            "Agent Plugins isn't allowed to write to {}",
+            folder.display()
+        )
+    } else {
+        format!(
+            "Agent Plugins could not write to {}: {}",
+            folder.display(),
+            fs_retry::plain(&error).trim_end_matches('.')
+        )
+    };
+    Some((format!("{apps} did not get the package: {why}."), false))
+}
+
+/// Why an agent's settings file cannot take the entry now, and whether that is
+/// only because it is busy.
+fn document_problem(desired: &DesiredStructuredEntry, adapter_id: &str) -> Option<(String, bool)> {
     let path = &desired.document_path;
-    let unreadable = managed_documents::read_or_empty(path, desired.format).and_then(|contents| {
-        managed_documents::entry_value(&contents, desired.format, &desired.key_path)
-    });
-    if let Err(error) = unreadable {
-        return Some(managed_documents::document_error(
-            path,
-            [adapter_id],
-            &error,
+    // Before reading: an app that holds the file without sharing makes the
+    // read fail too, and a busy file is no reason to tell anyone to delete it.
+    if document_locked(path) {
+        let app = managed_documents::app_names([adapter_id]);
+        return Some((
+            format!(
+                "{app} is using its settings file {}, so the package was not added to {app}. Close {app}; Agent Plugins tries again the next time it checks for updates.",
+                path.display()
+            ),
+            true,
         ));
     }
-    document_locked(path).then(|| {
-        let app = managed_documents::app_names([adapter_id]);
-        format!(
-            "{app} is using its settings file {}, so the package was not added to {app}. Close {app}; Agent Plugins tries again the next time it checks for updates.",
-            path.display()
-        )
-    })
+    managed_documents::read_or_empty(path, desired.format)
+        .and_then(|contents| {
+            managed_documents::entry_value(&contents, desired.format, &desired.key_path)
+        })
+        .err()
+        .map(|error| {
+            (
+                managed_documents::document_error(path, [adapter_id], &error),
+                false,
+            )
+        })
 }
 
 /// A settings file another process holds without sharing, which a rename
@@ -270,7 +359,7 @@ pub(crate) fn install_components(
     trust_approved: bool,
     component_ids: Option<&[String]>,
 ) -> Result<OperationOutcome, String> {
-    let ledger_state = ledger_for_change(paths)?;
+    let (_lock, ledger_state) = ledger_for_change(paths)?;
     let existing = ledger_state.items.get(&item.id).cloned();
     let operate_on = resolve_operate_on(item, component_ids)?;
     let mut plan = planner::plan(paths, snapshot, item, None, Some(&operate_on))?;
@@ -282,6 +371,15 @@ pub(crate) fn install_components(
         ));
     }
     let warnings = skip_unusable_documents(&mut plan, &item.id)?;
+    // A component no AI app here can use would be recorded as installed while
+    // nothing uses it. Say which apps cannot, and why, instead.
+    let newly_selected = existing.as_ref().is_none_or(|record| {
+        let selected = planner::selected_component_ids(record, item);
+        !operate_on.iter().all(|id| selected.contains(id))
+    });
+    if newly_selected && plan.bindings.is_empty() {
+        return Err(unusable_here(item, &plan));
+    }
 
     // Replacing an installed package restores the published content; the
     // user's changed copies are moved to kept backups.
@@ -321,8 +419,15 @@ pub(crate) fn install_components(
     validate_plan_paths(&plan)?;
 
     let mut next = ledger_state.clone();
-    let removed = if existing.is_some() {
-        detach_components(&mut next, &item.id, &operate_on)
+    let removed = if let Some(record) = &existing {
+        // Components the publisher removed are released with any change.
+        let mut detach = operate_on.clone();
+        detach.extend(
+            binding_component_ids(&ledger_state, record)
+                .into_iter()
+                .filter(|id| !item.components.iter().any(|component| component.id == *id)),
+        );
+        detach_components(&mut next, &item.id, &detach)
     } else {
         Vec::new()
     };
@@ -437,7 +542,7 @@ pub(crate) fn install_batch(
     if requests.is_empty() {
         return Ok(OperationOutcome::default());
     }
-    let original = ledger_for_change(paths)?;
+    let (_lock, original) = ledger_for_change(paths)?;
     let mut next = original.clone();
     let mut warnings = Vec::new();
     let batch_ids = requests
@@ -574,7 +679,7 @@ pub(crate) fn uninstall_batch(
     if installation_ids.is_empty() {
         return Ok(OperationOutcome::default());
     }
-    let original = ledger_for_change(paths)?;
+    let (_lock, original) = ledger_for_change(paths)?;
     for installation_id in installation_ids {
         let record = original
             .items
@@ -620,6 +725,7 @@ pub(crate) fn reset_source(
     source: &ConfiguredSource,
     snapshot: Option<&SourceSnapshot>,
 ) -> Result<OperationOutcome, String> {
+    let _lock = TransactionLock::acquire(paths)?;
     let original = read_ledger(paths)?;
     let catalog_ids = snapshot
         .map(|snapshot| {
@@ -653,6 +759,7 @@ pub(crate) fn reset_app(
     paths: &SystemPaths,
     sources: &[(ConfiguredSource, Option<SourceSnapshot>)],
 ) -> Result<OperationOutcome, String> {
+    let _lock = TransactionLock::acquire(paths)?;
     let mut backup_paths = Vec::new();
     // Reset is the way out of a damaged or newer ledger, so without a usable
     // one it removes what it can find and leaves the rest to the state wipe.
@@ -869,7 +976,7 @@ pub(crate) fn uninstall_components(
     component_ids: Option<&[String]>,
     force_modified: bool,
 ) -> Result<OperationOutcome, String> {
-    let ledger_state = ledger_for_change(paths)?;
+    let (_lock, ledger_state) = ledger_for_change(paths)?;
     let record = ledger_state
         .items
         .get(installation_id)
@@ -1292,14 +1399,6 @@ fn transaction_id(label: &str) -> String {
     crate::resource::stable_id("tx", &format!("{label}:{nanos}:{}", std::process::id()))
 }
 
-fn normalize_path(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-        .to_lowercase()
-}
-
 fn path_entry_exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
@@ -1322,6 +1421,31 @@ fn remove_any(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_settings_file_held_without_sharing_reads_as_busy_not_broken() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = tempfile::tempdir().expect("temp");
+        let path = root.path().join("mcp.json");
+        fs::write(&path, "{}").expect("write");
+        let _held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .expect("hold");
+        let desired = DesiredStructuredEntry {
+            document_path: path,
+            format: crate::resource::StructuredFormat::Json,
+            key_path: vec!["mcpServers".to_string(), "x".to_string()],
+            value: serde_json::json!({}),
+        };
+        let (problem, busy) = document_problem(&desired, "cursor").expect("problem");
+        assert!(
+            busy && problem.contains("is using its settings file"),
+            "{problem}"
+        );
+    }
     use crate::agent_profiles::TargetId;
     use crate::catalog::read_manifest_catalog;
     use crate::source::TEST_SOURCE_KEY;
@@ -1429,6 +1553,43 @@ mod tests {
     }
 
     #[test]
+    fn chosen_invocation_reinstalls_the_skill_without_local_changes() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, crate::agent_profiles::TargetId::Cursor, true)
+            .expect("enable");
+        let (source, snapshot, item) = fixture(root.path());
+        install(&paths, &source, &snapshot, &item, false, false).expect("install");
+        let skill_file = paths.home.join(".agents/skills/acme-review/SKILL.md");
+        assert!(!fs::read_to_string(&skill_file)
+            .expect("skill")
+            .contains("disable-model-invocation"));
+
+        let mut overrides = crate::invocation::Overrides::new();
+        crate::invocation::set(&mut overrides, &item.id, &item.components[0], true);
+        crate::invocation::write(&paths, &overrides).expect("write");
+        let ids = [item.components[0].id.clone()];
+        install_components(&paths, &source, &snapshot, &item, false, false, Some(&ids))
+            .expect("reinstall");
+        assert!(fs::read_to_string(&skill_file)
+            .expect("skill")
+            .contains("disable-model-invocation: true"));
+        assert_eq!(
+            installation_state(
+                &paths,
+                &read_ledger(&paths).expect("ledger"),
+                &item.id,
+                None
+            ),
+            ContentState::Match
+        );
+
+        // Choosing the source's value again forgets the choice.
+        crate::invocation::set(&mut overrides, &item.id, &item.components[0], false);
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
     fn batch_preflight_is_all_or_nothing_and_success_uses_one_ledger_commit() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
@@ -1525,6 +1686,44 @@ mod tests {
     }
 
     #[test]
+    fn a_read_leaves_the_live_journal_of_another_process_alone() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        fs::create_dir_all(&paths.home).expect("home");
+        let target = paths.home.join("skill.txt");
+        let staging = paths.home.join("skill-stage.txt");
+        fs::write(&staging, "new").expect("staging");
+        let journal = TransactionJournal {
+            version: 1,
+            transaction_id: "tx-in-flight".to_string(),
+            mutations: vec![JournalMutation {
+                target: target.display().to_string(),
+                staging: Some(staging.display().to_string()),
+                backup: None,
+                persistent_backup: false,
+                target_existed: false,
+                original_digest: None,
+            }],
+        };
+        super::journal::write_journal(&paths, &journal).expect("journal");
+        fs::rename(&staging, &target).expect("activate");
+        // Another process is mid-commit: it holds the lock through its own handle.
+        let other = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(paths.app_data().join("transaction.lock"))
+            .expect("lock file");
+        other.lock().expect("other process");
+        read_ledger(&paths).expect("ledger");
+        assert!(target.exists(), "a read rolled back a live transaction");
+        assert!(paths.app_data().join(JOURNAL_FILE).exists());
+        drop(other);
+        read_ledger(&paths).expect("ledger");
+        assert!(!target.exists(), "a crashed transaction is rolled back");
+    }
+
+    #[test]
     fn recovery_keeps_a_transaction_whose_ledger_committed() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
@@ -1608,7 +1807,7 @@ mod tests {
         install(&paths, &source, &snapshot, &old, false, false).expect("install old");
         assert!(install(&paths, &source, &snapshot, &new, false, false)
             .expect_err("conflict")
-            .contains("declares an incompatibility"));
+            .contains("can't be installed while"));
         assert!(paths.home.join(".agents/skills/acme-old").is_dir());
         assert!(!paths.home.join(".agents/skills/acme-new").exists());
         assert_eq!(read_ledger(&paths).expect("ledger").items.len(), 1);
@@ -2185,6 +2384,90 @@ mod tests {
             .contains("acme-database"));
         assert!(paths.home.join(".agents/skills/acme-review").is_dir());
         assert!(take_skipped_agent(&item.id));
+    }
+
+    #[test]
+    fn reinstall_over_an_unrecorded_identical_entry_keeps_the_ledger_whole() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let (source, snapshot, item) = mixed_fixture(root.path());
+        crate::agent_profiles::set_enabled(&paths, TargetId::Cursor, true).expect("cursor");
+        crate::agent_profiles::set_enabled(&paths, TargetId::Codex, true).expect("codex");
+        fs::create_dir_all(paths.home.join(".codex")).expect("codex");
+        fs::write(paths.home.join(".codex/config.toml"), "model = = broken").expect("broken");
+        install(&paths, &source, &snapshot, &item, false, true).expect("install");
+        let ledger_file = paths.app_data().join("installations.json");
+        let skipped = fs::read(&ledger_file).expect("ledger");
+        fs::write(paths.home.join(".codex/config.toml"), "").expect("fixed");
+        install(&paths, &source, &snapshot, &item, false, true).expect("add codex");
+        // The last good copy from before Codex was added comes back, as after a damaged ledger.
+        fs::write(&ledger_file, skipped).expect("restore");
+        install(&paths, &source, &snapshot, &item, false, true).expect("reinstall");
+        let ledger = read_ledger(&paths).expect("ledger");
+        // Reading prunes references to missing resources, so a lost entry shows
+        // up as a binding that owns nothing.
+        for binding in ledger.bindings.values() {
+            assert!(
+                !binding.resource_ids.is_empty()
+                    && binding
+                        .resource_ids
+                        .iter()
+                        .all(|resource| ledger.resources.contains_key(resource)),
+                "{} {} lost its resources",
+                binding.component_id,
+                binding.target_id
+            );
+        }
+        let plan = planner::plan(&paths, &snapshot, &item, None, None).expect("plan");
+        assert!(plan_satisfied(&ledger, &plan).expect("satisfied"));
+    }
+
+    #[test]
+    fn a_component_no_detected_app_can_use_is_refused_not_recorded() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let (source, snapshot, item) = mixed_fixture(root.path());
+        // Claude Desktop takes skills only through claude.ai.
+        crate::agent_profiles::set_enabled(&paths, TargetId::ClaudeDesktop, true).expect("app");
+        let error = install_components(
+            &paths,
+            &source,
+            &snapshot,
+            &item,
+            false,
+            false,
+            Some(&["review".to_string()]),
+        )
+        .expect_err("nothing can use it");
+        assert!(
+            error.starts_with("None of the AI apps on this computer can use"),
+            "{error}"
+        );
+        assert!(!ledger_has_item(&paths, &item.id));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_skill_folder_that_cannot_be_written_skips_only_its_agents() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let (source, snapshot, item) = fixture(root.path());
+        crate::agent_profiles::set_enabled(&paths, TargetId::Codex, true).expect("codex");
+        crate::agent_profiles::set_enabled(&paths, TargetId::ClaudeCode, true).expect("claude");
+        let shared = paths.home.join(".agents/skills");
+        fs::create_dir_all(&shared).expect("skills");
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o555)).expect("read-only");
+        let outcome = install(&paths, &source, &snapshot, &item, false, false);
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).expect("writable");
+        let outcome = outcome.expect("installs for Claude Code");
+        assert!(
+            outcome.warnings.len() == 1
+                && outcome.warnings[0].starts_with("Codex did not get the package"),
+            "{:?}",
+            outcome.warnings
+        );
+        assert!(paths.home.join(".claude/skills/acme-review").is_dir());
     }
 
     #[test]

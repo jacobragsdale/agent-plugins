@@ -13,6 +13,7 @@ mod executor;
 mod fs_retry;
 mod host_identity;
 mod install;
+mod invocation;
 #[cfg(feature = "app")]
 mod ipc;
 mod ipc_error;
@@ -34,15 +35,16 @@ mod source;
 mod sources;
 pub mod staging;
 mod startup;
+mod tutorial;
 
 /// The host preparation report, for the preflight.
 pub(crate) static STARTUP_REPORT: startup::SharedReport = startup::SharedReport::new();
 
-/// Runs host preparation for the command line, `uv` download included.
+/// Runs host preparation for the command line, `uv` download included. The
+/// report stays out of the terminal: an agent reading stderr would take it
+/// for a problem, and preflight reports the same facts.
 pub(crate) fn prepare_host() {
-    let report = startup::prepare();
-    report.log();
-    STARTUP_REPORT.set(report);
+    STARTUP_REPORT.set(startup::prepare());
 }
 
 pub use repository::{
@@ -61,8 +63,7 @@ pub fn run() {
     if let Some(code) = cli::maybe_run() {
         std::process::exit(code);
     }
-    let runtime_state =
-        application::RuntimeState::new().expect("could not initialize the Agent Plugins runtime");
+    let runtime_state = application::RuntimeState::new();
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -123,12 +124,15 @@ pub fn run() {
             ipc::cancel_prepared_source,
             ipc::install_item,
             ipc::replace_item,
+            ipc::set_manual_invocation,
             ipc::uninstall_item,
             ipc::plan_bulk_items,
             ipc::run_bulk_items,
             ipc::plan_source_removal,
             ipc::remove_manifest_source,
-            ipc::reset_app
+            ipc::reset_app,
+            ipc::run_tutorial,
+            ipc::dismiss_tutorial
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

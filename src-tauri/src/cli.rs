@@ -12,8 +12,17 @@ use crate::staging::{scan_for_secrets, stage_tree, zip_tree, StageRequest};
 use std::io::{self, BufRead as _, Write as _};
 use std::path::PathBuf;
 
-const COMMANDS: [&str; 8] = [
-    "validate", "publish", "search", "install", "access", "whoami", "help", "--help",
+const COMMANDS: [&str; 10] = [
+    "validate",
+    "publish",
+    "search",
+    "install",
+    "access",
+    "whoami",
+    "remove-from-path",
+    "help",
+    "--help",
+    "-h",
 ];
 const MAX_ARCHIVE_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -22,7 +31,14 @@ pub(crate) fn maybe_run() -> Option<i32> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let command = args.first()?;
     if !COMMANDS.contains(&command.as_str()) {
-        return None;
+        // Options such as `--background` are the window's. Anything else is a
+        // mistyped command, which should say so rather than open the window.
+        if command.starts_with('-') {
+            return None;
+        }
+        host_identity::attach_parent_console();
+        eprintln!("error: unknown command `{command}`\n\n{}", usage());
+        return Some(2);
     }
     host_identity::attach_parent_console();
     let code = match dispatch(command, &args[1..]) {
@@ -37,17 +53,25 @@ pub(crate) fn maybe_run() -> Option<i32> {
 }
 
 fn dispatch(command: &str, args: &[String]) -> Result<(), String> {
+    if matches!(command, "help" | "--help" | "-h")
+        || args.iter().any(|arg| arg == "--help" || arg == "-h")
+    {
+        print!("{}", usage());
+        return Ok(());
+    }
     match command {
-        "help" | "--help" => {
-            print!("{}", usage());
-            Ok(())
-        }
         "whoami" => whoami(),
         "validate" => validate(args),
         "search" => search(args),
         "publish" => publish(args),
         "install" => install(args),
         "access" => access(args),
+        // Run by the uninstaller, just before it deletes this folder.
+        "remove-from-path" => crate::startup::remove_cli_dir_from_path().map(|removed| {
+            if removed {
+                println!("Removed this folder from the user PATH.");
+            }
+        }),
         _ => Err(usage()),
     }
 }
@@ -62,8 +86,9 @@ agent-plugins search [query]\n  \
 agent-plugins publish <path> --version <major.minor.patch> [--namespace <ns>] [--package-id <id>] [--tags a,b] [--changelog <text>] [--yes]\n  \
 agent-plugins install <namespace>/<package> [--approve-mcp]\n  \
 agent-plugins access <namespace>[/<package>] [--user <account>]... [--group <name>]... [--public]\n\n\
-<path> for publish is a skill directory containing SKILL.md, an MCP document\n\
-(mcp.json shape), or a source tree with agent-plugins.json declaring one package.\n",
+<path> for publish is a skill directory containing SKILL.md, a folder of skill\n\
+directories (a skill pack), an MCP document (mcp.json shape), or a source tree\n\
+with agent-plugins.json declaring one package.\n",
         marketplace::CLIENT_VERSION
     )
 }
@@ -298,6 +323,7 @@ fn publish(args: &[String]) -> Result<(), String> {
         form = form.text("changelog", changelog.clone());
     }
     let client = reqwest::blocking::Client::builder()
+        .use_preconfigured_tls(marketplace::tls()?)
         .timeout(std::time::Duration::from_secs(120))
         .user_agent(format!("agent-plugins/{}", marketplace::CLIENT_VERSION))
         .build()
@@ -458,12 +484,18 @@ fn install(args: &[String]) -> Result<(), String> {
     crate::prepare_host();
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     runtime.block_on(async {
-        let state = RuntimeState::new()?;
+        let state = RuntimeState::new();
         let app = application::sync_app_state(&state).await?;
         let item =
             app.items.iter().find(|item| item.id == id).ok_or_else(|| {
                 format!("{id} is not in the catalog. Try `agent-plugins search`.")
             })?;
+        if item.requires_approval && !approve_mcp {
+            return Err(format!(
+                "{} includes a connector that runs a program on this computer. Run again with --approve-mcp to allow it.",
+                item.name
+            ));
+        }
         let outcome =
             application::install_item(&state, source_id, local_id, approve_mcp, None).await?;
         println!("installed {} ({})", item.id, item.name);
@@ -489,6 +521,19 @@ mod tests {
         assert_eq!(parsed.tags, vec!["a", "b"]);
         assert!(parsed.yes);
         assert!(parse_publish_args(&["./skill".to_string()]).is_err());
+    }
+
+    #[test]
+    fn help_flags_print_usage_for_every_command() {
+        for command in COMMANDS {
+            for flag in ["--help", "-h"] {
+                assert!(
+                    dispatch(command, &[flag.to_string()]).is_ok(),
+                    "{command} {flag}"
+                );
+            }
+        }
+        assert!(dispatch("-h", &[]).is_ok());
     }
 
     #[test]

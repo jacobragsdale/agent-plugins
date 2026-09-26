@@ -36,14 +36,14 @@ Then run the catalog validator:
 
 ```bash
 cargo run --manifest-path /path/to/agent-plugins/src-tauri/Cargo.toml \
-  --bin validate-source-repository -- /path/to/agent-plugins-repository.json
+  --no-default-features --features tools --bin validate-source-repository -- /path/to/agent-plugins-repository.json
 ```
 
 You can also validate a published HTTPS JSON URL:
 
 ```bash
 cargo run --manifest-path /path/to/agent-plugins/src-tauri/Cargo.toml \
-  --bin validate-source-repository -- \
+  --no-default-features --features tools --bin validate-source-repository -- \
   https://nexus.example.com/repository/raw/catalogs/acme.json
 ```
 

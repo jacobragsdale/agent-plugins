@@ -27,8 +27,12 @@ pnpm lint                                                         # eslint, zero
 pnpm test                                                         # vitest
 pnpm format:check
 pnpm build                                                        # typecheck + vite build
+pnpm --filter website lint                                        # the web portal
+pnpm --filter website test
+pnpm --filter website build
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo clippy --manifest-path src-tauri/Cargo.toml --no-default-features --features tools --bins -- -D warnings  # the validators, built without Tauri
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 ```
 
@@ -66,7 +70,7 @@ The Rust types are authoritative; the JSON Schemas are generated from them.
 2. Regenerate the checked-in schemas:
 
    ```bash
-   cargo run --manifest-path src-tauri/Cargo.toml --bin generate-schema
+   cargo run --manifest-path src-tauri/Cargo.toml --no-default-features --features tools --bin generate-schema
    ```
 
 3. Update [the source manifest reference](manifest-reference.md) or [the source repository reference](source-repository-reference.md) in the same commit. Unknown fields are rejected, so anything undocumented is unusable by definition.
@@ -93,7 +97,7 @@ A new `action` remediation needs a matching handler in `App.tsx` and a label in 
 
 ## Change the IPC surface
 
-Commands live in `ipc.rs`, are registered in `lib.rs`, and are validated on the React side by a Zod schema in `src/ipc/schemas.ts`. All three change together; a command registered but unparsed fails at runtime, not at build time.
+Commands live in `ipc.rs`, are registered in `lib.rs`, are named in the `IpcCommand` type in `src/ipc/client.ts`, and are validated on the React side by a Zod schema in `src/ipc/schemas.ts`. All four change together. A name missing from `IpcCommand` fails the typecheck, but nothing checks it against `lib.rs`, and a command registered but unparsed fails at runtime, not at build time.
 
 IPC returns plain data. Filesystem and manifest policy stays in Rust — React must not decide what is safe to write.
 
@@ -111,12 +115,12 @@ Then update `src/ipc/schemas.ts` until `pnpm test` passes. The comparison is by 
 ## Work on the marketplace server
 
 ```bash
-cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin validate-source
+cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --features tools --bin validate-source
 dotnet build server/Marketplace.slnx
 dotnet run --project server/tests/Marketplace.Api.Tests
 ```
 
-`--no-default-features` drops the `app` feature so the validator builds without Tauri, GTK, or WebKit — that is what the server image does. The test suite starts PostgreSQL in a container and uses the real validator when `src-tauri/target/debug/validate-source` exists.
+`--no-default-features --features tools` swaps the `app` feature for the validators, so they build without Tauri, GTK, or WebKit — that is what the server image does. The test suite starts PostgreSQL in a container and uses the real validator when `src-tauri/target/debug/validate-source` exists.
 
 `docker compose -f server/compose.yaml up --build` runs the API in Development mode on `http://localhost:8080`, where `X-Dev-User` stands in for Windows authentication:
 

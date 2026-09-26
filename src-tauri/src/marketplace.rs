@@ -7,12 +7,13 @@
 
 use crate::host_identity::{self, JoinState};
 use crate::locator::{self, is_marketplace_url};
-use reqwest::blocking::{Client, RequestBuilder, Response};
+use reqwest::blocking::{Client, ClientBuilder, RequestBuilder, Response};
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -181,13 +182,57 @@ pub(crate) fn authorize(builder: RequestBuilder, url: &str) -> Result<RequestBui
     Ok(builder)
 }
 
+static CLIENT: Mutex<Option<Client>> = Mutex::new(None);
+
 pub(crate) fn client() -> Result<Client, String> {
-    Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .user_agent(format!("agent-plugins/{CLIENT_VERSION}"))
-        .build()
-        .map_err(|error| format!("Could not create the HTTPS client: {error}"))
+    cached_client(&CLIENT, |builder| {
+        builder
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .user_agent(format!("agent-plugins/{CLIENT_VERSION}"))
+            .build()
+    })
+}
+
+/// A clone of the client in `slot`, built on first use, so requests share one
+/// connection pool, certificate checks, and proxy lookup until
+/// `reset_http_clients`.
+pub(crate) fn cached_client(
+    slot: &Mutex<Option<Client>>,
+    build: impl FnOnce(ClientBuilder) -> reqwest::Result<Client>,
+) -> Result<Client, String> {
+    let mut slot = slot.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(client) = slot.as_ref() {
+        return Ok(client.clone());
+    }
+    let client = build(Client::builder().use_preconfigured_tls(tls()?))
+        .map_err(|error| format!("Could not create the HTTPS client: {error}"))?;
+    *slot = Some(client.clone());
+    Ok(client)
+}
+
+/// Certificate checks for every HTTPS client, done by the operating system as
+/// a browser does them. A fresh Windows PC holds only a few root authorities
+/// and fetches the rest the first time a chain needs one; reading the store
+/// alone rejected such a server as untrusted until something else had fetched
+/// its root.
+pub(crate) fn tls() -> Result<rustls::ClientConfig, String> {
+    use rustls_platform_verifier::BuilderVerifierExt;
+    rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .and_then(BuilderVerifierExt::with_platform_verifier)
+    .map(|builder| builder.with_no_client_auth())
+    .map_err(|error| format!("Could not set up HTTPS certificate checks: {error}"))
+}
+
+/// Drops the cached clients, so the next request picks up proxy and
+/// certificate changes. Each sync pass starts with this.
+pub(crate) fn reset_http_clients() {
+    for slot in [&CLIENT, &crate::artifact::CLIENT] {
+        *slot.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    }
 }
 
 /// Sends a request, trying twice more when the server was not reached, timed
@@ -207,7 +252,10 @@ pub(crate) fn send(
                 (status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS)
                     .then(|| retry_after(response.headers()))
             }
-            Err(error) => (error.is_connect() || error.is_timeout()).then_some(None),
+            // A refused certificate stays refused, so it is not worth a retry.
+            Err(error) => ((error.is_connect() && refused_certificate(error).is_none())
+                || error.is_timeout())
+            .then_some(None),
         };
         match retry {
             Some(wait) if attempt < RETRIES => {
@@ -268,11 +316,13 @@ pub(crate) fn fetch_me() -> Result<Me, String> {
     let response = send(&url, || authorize(client.get(&url), &url))?;
     let status = response.status();
     if status.as_u16() == 401 {
-        return Err("The marketplace rejected this machine's identity (HTTP 401). On a domain-joined machine that means the service principal name or keytab does not match; on a workgroup machine the server must allow the development header.".to_string());
+        return Err(
+            "The marketplace didn't accept this computer's Windows sign-in (HTTP 401).".to_string(),
+        );
     }
     if status.as_u16() == 403 {
         return Err(
-            "The marketplace recognized this account but refused it (HTTP 403).".to_string(),
+            "The marketplace recognized your account but doesn't allow it (HTTP 403).".to_string(),
         );
     }
     if !status.is_success() {
@@ -302,7 +352,7 @@ pub(crate) fn index_with_cache(cache_base: &Path) -> Option<Index> {
         Ok(index) => {
             if let Ok(json) = serde_json::to_vec(&index) {
                 let _ = std::fs::create_dir_all(cache_base);
-                let _ = std::fs::write(cache_base.join(INDEX_CACHE_FILE), json);
+                let _ = crate::fs_retry::replace_file(&cache_base.join(INDEX_CACHE_FILE), &json);
             }
             Some(index)
         }
@@ -502,7 +552,7 @@ fn deliver_with_outbox(
         if let Some(parent) = outbox.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(outbox, json);
+        let _ = crate::fs_retry::replace_file(outbox, &json);
     }
     result
 }
@@ -549,15 +599,16 @@ pub(crate) fn problem_message(body: &str) -> Option<String> {
 }
 
 pub(crate) fn describe_error(url: &str, error: &reqwest::Error) -> String {
-    let text = error.to_string();
-    let source = std::error::Error::source(error)
-        .map(|inner| inner.to_string())
-        .unwrap_or_default();
-    let detail = if source.is_empty() {
-        text
-    } else {
-        format!("{text} ({source})")
-    };
+    // The server answered, so this is not being offline, and waiting fixes
+    // nothing: someone has to correct the clock or trust the certificate.
+    if let Some(reason) = refused_certificate(error) {
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_string))
+            .unwrap_or_else(|| url.to_string());
+        return format!("The security certificate of {host} isn't trusted by this computer ({reason}). Check that the date and time on this computer are right. If they are, ask IT to add your network's certificate authority to this computer.");
+    }
+    let detail = causes(error);
     // A connect timeout is a connect failure first: the server was never reached.
     if error.is_connect() {
         format!("{CONNECT_FAILURE} {url}: {detail}")
@@ -565,6 +616,59 @@ pub(crate) fn describe_error(url: &str, error: &reqwest::Error) -> String {
         format!("{url} {TIMED_OUT}.")
     } else {
         format!("Request to {url} failed: {detail}")
+    }
+}
+
+/// Each distinct message in the error's chain, outermost first. The outer
+/// layers are generic ("client error (Connect)"); the cause a person can act
+/// on, such as a refused connection or an unknown host, comes last.
+fn causes(error: &reqwest::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut next: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(current) = next {
+        let text = current.to_string();
+        if !parts.iter().any(|part| part.contains(&text)) {
+            parts.push(text);
+        }
+        next = current.source();
+    }
+    parts.join(": ")
+}
+
+/// Why the server's certificate was refused, when that is what failed.
+fn refused_certificate(error: &reqwest::Error) -> Option<String> {
+    match tls_error(error)? {
+        rustls::Error::InvalidCertificate(reason) => Some(certificate_reason(reason)),
+        _ => None,
+    }
+}
+
+/// The TLS error in the chain. It arrives inside `io::Error`s, which may nest,
+/// and whose `source()` skips the error they wrap, so those are unwrapped too.
+fn tls_error<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&'a rustls::Error> {
+    if let Some(tls) = error.downcast_ref::<rustls::Error>() {
+        return Some(tls);
+    }
+    if let Some(inner) = error
+        .downcast_ref::<std::io::Error>()
+        .and_then(std::io::Error::get_ref)
+    {
+        return tls_error(inner);
+    }
+    error.source().and_then(tls_error)
+}
+
+fn certificate_reason(reason: &rustls::CertificateError) -> String {
+    use rustls::CertificateError::*;
+    match reason {
+        UnknownIssuer => "it comes from an authority this computer doesn't recognize".to_string(),
+        Expired | ExpiredContext { .. } => "it has expired".to_string(),
+        NotValidYet | NotValidYetContext { .. } => "it isn't valid yet".to_string(),
+        NotValidForName | NotValidForNameContext { .. } => {
+            "it was issued for a different server".to_string()
+        }
+        Revoked => "it has been revoked".to_string(),
+        other => format!("it could not be verified: {other}"),
     }
 }
 
@@ -694,6 +798,62 @@ pub(crate) fn version_less_than(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A self-signed certificate for localhost, trusted by nothing.
+    const UNTRUSTED_CERT: &str = "MIIBmzCCAUGgAwIBAgIUIZ9hVrKfJCOuFKdb1Zd33iDfPtQwCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDkyNTIzMjQzMVoYDzIxMjYwOTAxMjMyNDMxWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARE7SSKUxTn0A8dvGU1K/qf/T9G72d0wm/uJv87lytJL0gPpV6hPx0tU5GDQCV0Oz2EHwYx1HQbYoODY/6ar6nbo28wbTAdBgNVHQ4EFgQUHk3lyxGNYjjzyehPdmOg7A4Oz3cwHwYDVR0jBBgwFoAUHk3lyxGNYjjzyehPdmOg7A4Oz3cwDwYDVR0TAQH/BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwCgYIKoZIzj0EAwIDSAAwRQIgemn/lCbAzkY29XruQGhqv6GODMc4LNqOyXtsi+IiyccCIQCmxyNRDAdG7pZ6zEhfzGvSlACSHd1Wh2ww6KZqY1HG4A==";
+    const UNTRUSTED_KEY: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgVn0geI0c5K0ur9wiOznRIE+iSyRmDlk4mwQFBtIv7kShRANCAARE7SSKUxTn0A8dvGU1K/qf/T9G72d0wm/uJv87lytJL0gPpV6hPx0tU5GDQCV0Oz2EHwYx1HQbYoODY/6ar6nb";
+
+    #[test]
+    fn an_untrusted_certificate_is_explained_not_reported_as_offline() {
+        use base64::Engine as _;
+        use std::io::{Read, Write};
+        let decode = |text| {
+            base64::engine::general_purpose::STANDARD
+                .decode(text)
+                .expect("der")
+        };
+        let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("versions")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![decode(UNTRUSTED_CERT).into()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(decode(UNTRUSTED_KEY).into()),
+        )
+        .expect("server config");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!(
+            "https://localhost:{}/api/health",
+            listener.local_addr().expect("addr").port()
+        );
+        let accepted = std::thread::spawn(move || {
+            let (tcp, _) = listener.accept().expect("accept");
+            let connection =
+                rustls::ServerConnection::new(std::sync::Arc::new(config)).expect("tls");
+            let mut stream = rustls::StreamOwned::new(connection, tcp);
+            let _ = stream.read(&mut [0; 1]);
+            let _ = stream.flush();
+        });
+        let client = Client::builder()
+            .use_preconfigured_tls(tls().expect("tls"))
+            .build()
+            .expect("client");
+        let error = client.get(&url).send().expect_err("untrusted");
+        accepted.join().expect("server");
+        let message = describe_error(&url, &error);
+        assert!(
+            message.starts_with(
+                "The security certificate of localhost isn't trusted by this computer ("
+            ),
+            "{message}"
+        );
+        assert_eq!(
+            crate::ipc_error::IpcError::from(message).kind,
+            crate::ipc_error::IpcErrorKind::NeedsUser
+        );
+    }
 
     #[test]
     fn formats_and_parses_dates() {

@@ -16,7 +16,7 @@ The skill validates the package, proposes a better description and tags, runs a 
 
 ## From a terminal
 
-`agent-plugins` is the Agent Plugins executable. The installer does not add it to PATH; run it as `"%LOCALAPPDATA%\Programs\Agent Plugins\agent-plugins.exe"`, or add that folder to your user PATH.
+`agent-plugins` is the Agent Plugins executable. The app adds its folder to your user PATH when it starts; until then, run it as `"%LOCALAPPDATA%\Agent Plugins\agent-plugins.com"`.
 
 1. Check who you are:
 

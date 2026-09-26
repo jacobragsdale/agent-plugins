@@ -93,11 +93,15 @@ function lines(text: string): string[] {
     <mat-dialog-content>
       @if (loaded()) {
         <mat-button-toggle-group aria-label="Visibility" [value]="everyone() ? 'everyone' : 'some'" (change)="everyone.set($event.value === 'everyone')">
-          <mat-button-toggle value="everyone">Everyone</mat-button-toggle>
+          <mat-button-toggle value="everyone">{{ inherited() === null ? "Everyone" : "Same as its space" }}</mat-button-toggle>
           <mat-button-toggle value="some">Only some people</mat-button-toggle>
         </mat-button-toggle-group>
         @if (everyone()) {
-          <p class="muted">Everyone who signs in can find and install it.</p>
+          @if (inherited(); as space) {
+            <p class="muted">It follows its space: only {{ space }} can find and install it. You and admins always can.</p>
+          } @else {
+            <p class="muted">Everyone who signs in can find and install it.</p>
+          }
         } @else {
           <p class="muted">Only these people and group members can find and install it. You and admins always can.</p>
           <mat-form-field appearance="outline" class="full">
@@ -137,6 +141,8 @@ export class VisibilityDialog {
   protected readonly data = inject<VisibilityData>(MAT_DIALOG_DATA);
   protected readonly loaded = signal(false);
   protected readonly everyone = signal(true);
+  /** The space's people and groups, when a package without its own rule follows the space's restriction. */
+  protected readonly inherited = signal<string | null>(null);
   protected readonly users = signal("");
   protected readonly groups = signal("");
   protected readonly error = signal<string | null>(null);
@@ -171,6 +177,12 @@ export class VisibilityDialog {
     try {
       const access = await this.api.access(this.data.namespace, this.data.packageId);
       this.everyone.set(access.users.length + access.groups.length === 0);
+      // A package with no rule of its own uses its space's rule on the server.
+      if (this.data.packageId !== undefined && this.everyone()) {
+        const space = await this.api.access(this.data.namespace);
+        const names = [...space.users, ...space.groups];
+        this.inherited.set(names.length === 0 ? null : names.join(", "));
+      }
       this.users.set(access.users.join("\n"));
       this.groups.set(access.groups.join("\n"));
       this.loaded.set(true);

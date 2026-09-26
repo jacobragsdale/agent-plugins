@@ -196,6 +196,8 @@ export const appStateSchema = z
     sources: tolerantArray(sourceSchema, "source"),
     items: tolerantArray(itemSchema, "package"),
     agentProfiles: z.array(agentProfileSchema).readonly(),
+    /** The detected app the skill tutorial can demonstrate, until it has run. */
+    tutorial: targetIdSchema.nullable().default(null),
     marketplaceUrl: z.string().min(1).nullable().default(null),
     downloadUrl: z.string().min(1).nullable().default(null),
     identity: identitySchema.nullable().default(null),
@@ -232,15 +234,7 @@ export const sourceRemovalPlanSchema = z.object({ sourceId: z.string().min(2), i
  */
 export const ipcErrorKindSchema = z.enum(["offline", "locked", "retryable", "needsUser", "bug"]);
 export const ipcErrorSchema = z.object({ kind: ipcErrorKindSchema, message: z.string().min(1), detail: z.string().min(1).optional() }).readonly();
-const syncFailureSchema = z.union([z.string().min(1), ipcErrorSchema]);
-// A failed pass carries its reason as `message` (a string, from older backends) or as a typed `error`.
-export const scheduledSyncSchema = z.union([
-  z.object({ kind: z.literal("updated"), state: appStateSchema }).readonly(),
-  z
-    .object({ kind: z.literal("failed"), error: ipcErrorSchema })
-    .or(z.object({ kind: z.literal("failed"), message: syncFailureSchema }).transform(({ kind, message }) => ({ kind, error: message })))
-    .readonly()
-]);
+export const scheduledSyncSchema = z.union([z.object({ kind: z.literal("updated"), state: appStateSchema }).readonly(), z.object({ kind: z.literal("failed"), error: ipcErrorSchema }).readonly()]);
 export const cachedStateSchema = appStateSchema.nullable();
 export const unitSchema = z.null();
 
