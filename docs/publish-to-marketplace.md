@@ -1,6 +1,6 @@
 # Publish to the marketplace
 
-This tutorial publishes a skill you already have on your machine to the company marketplace. It takes a minute. Authentication is your Windows logon; there is nothing to sign in to.
+This tutorial publishes a skill you already have on your machine to the company marketplace. It takes a minute, and the skill is live as soon as it is published. Authentication is your Windows logon; there is nothing to sign in to.
 
 ## From scratch, in Cursor
 
@@ -28,7 +28,7 @@ The skill validates the package, proposes a better description and tags, runs a 
    agent-plugins whoami
    ```
 
-   The `namespace` line is where your packages publish: your lowercase account name, or that name with a number on the end (`christopher-jo-2`) when another account claimed it first.
+   The `namespace` line is where your packages publish: your lowercase account name, or that name with a number on the end (`christopher-jo-2`) when another account claimed it first. `publishes to` adds every team you are in; publish to one with `--namespace <team>`.
 
 2. Point at the skill directory (it contains `SKILL.md`):
 
@@ -52,11 +52,35 @@ The skill validates the package, proposes a better description and tags, runs a 
 3. The response names the package and its page in the portal:
 
    ```
-   submitted jacob/review 1.0.0 for review; it goes live when an admin approves it
+   published jacob/review 1.0.0
      https://marketplace.example.com/p/jacob/review
    ```
 
-   An admin reviews a package's first version. Once it is approved, every client sees it at its next sync; the card shows your name, the version, and how many people use it. Later versions go live immediately unless they contain an MCP server, which is reviewed every time. The status and any reviewer's note are on **My skills** in the portal.
+   The version is live at once: everyone who can see your space finds it at their app's next check, and PCs that already have the package update to it. The card shows your name, the version, and how many people use it.
+
+   A package with an MCP server that everyone can see waits for an admin once, the first time it is shared with everyone: the CLI then prints `published jacob/review 1.0.0; everyone else sees it once an admin approves its MCP server`. You, your team, and people you share it with can use it straight away. The admin's decision, and any note, is on the package's page in the portal.
+
+## Choose who can see it
+
+A new package follows its space: your personal space is public, and a team's space is whatever its owners chose when they created it. To change one package, choose **Share** on its page in the portal, or **Share…** on its card in the app:
+
+- **Same as its space**, **Private**, or **Everyone at the company**.
+- Add people and teams to the list below. Private means the space's owners plus that list. Sharing lets people see and install it, never change it.
+- **Copy link** makes a link to send. Anyone at the company who opens it gets the package and is added to the list. **Reset link** stops the old link working; people already on the list stay.
+
+On the command line, `agent-plugins share jacob/review --private --add CORP\jane --add team:data-team` does the same, and `agent-plugins share jacob/review --link` prints the link.
+
+## Improve someone else's skill
+
+You can't publish to a space you don't own, but you can suggest a change. Choose **Suggest a change** on the package's page and upload your improved files with a note, or run `agent-plugins publish` on your copy: the CLI offers to send it as a suggestion. The owners see which files changed, then publish it (it becomes the next version, credited to you) or say why not. Their answer is on **My skills**.
+
+## Pack or bundle?
+
+| You want to                                                   | Publish                                                     |
+| ------------------------------------------------------------- | ----------------------------------------------------------- |
+| Ship several skills of your own that change together          | A skill pack: one folder of skill folders, one version.     |
+| Group skills that already exist, yours or other people's      | A bundle: **New bundle** in the portal or the app.          |
+| Let people install everything at once, or pick just one skill | Either: both offer **Install all** and one skill at a time. |
 
 ## What you can publish
 
@@ -71,7 +95,7 @@ The skill validates the package, proposes a better description and tags, runs a 
 
 ## Versions
 
-Versions are immutable release versions, `major.minor.patch`; a pre-release such as `1.0.0-beta.1` is refused. Publish a new version to change anything; the namespace archive always carries the latest non-yanked version of each package, so clients update on their next sync. Withdraw a version from its page in the portal, or yank it with the API, when it must disappear from the catalog (installed copies are unaffected). A withdrawn version can be restored the same way. A version number that was ever used, including one an admin sent back or one you withdrew, cannot be reused; the server names the next free one.
+Versions are immutable release versions, `major.minor.patch`; a pre-release such as `1.0.0-beta.1` is refused. Publish a new version to change anything; the namespace archive always carries the latest non-yanked version of each package, so clients update on their next sync. Withdraw a version from its page in the portal, or yank it with the API, when it must disappear from the catalog (installed copies are unaffected). A withdrawn version can be restored the same way. A version number that was ever used, including one you withdrew, cannot be reused; the server names the next free one. To take a package off every PC that has it, choose **Remove from every PC** on its page, or run `agent-plugins revoke <namespace>/<package>`; each app uninstalls it at its next check.
 
 ## Rules the CLI enforces
 
@@ -82,4 +106,4 @@ Versions are immutable release versions, `major.minor.patch`; a pre-release such
 
 The server also refuses more than 10 tags, a tag that is not up to 32 lowercase letters, digits, and single hyphens, and a changelog over 4,096 characters.
 
-See [the API reference](marketplace-api.md) for the request the CLI makes and [ADR 0004](decisions/0004-internal-marketplace.md) for why publishing works this way.
+See [the API reference](marketplace-api.md) for the request the CLI makes, and [ADR 0004](decisions/0004-internal-marketplace.md) and [ADR 0007](decisions/0007-self-service-marketplace.md) for why publishing works this way.

@@ -1,9 +1,10 @@
-import { Component, computed, inject, input, signal } from "@angular/core";
+import { Component, DestroyRef, computed, inject, input, signal } from "@angular/core";
 import { MatButtonModule } from "@angular/material/button";
 import { RouterLink } from "@angular/router";
 import { appLink, installState } from "../format";
 import { Session } from "../session";
 import { Icon } from "./icon";
+import { runTask } from "./tasks";
 
 /**
  * Installs through the desktop app: the button opens an `agent-plugins://` link, and the app asks
@@ -56,12 +57,22 @@ export class InstallButton {
   private readonly session = inject(Session);
   protected readonly opening = signal(false);
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private poll: ReturnType<typeof setInterval> | undefined;
+
+  /** What must be installed to count as done; one skill of a pack is not tracked. */
+  private readonly watched = computed(() => this.covers() ?? (this.target().split("/").length === 2 ? [this.target()] : []));
 
   protected readonly state = computed(() => {
     const me = this.session.me();
-    const target = this.target();
-    return installState(me === null ? undefined : me.app, this.covers() ?? (target.split("/").length === 2 ? [target] : []));
+    return installState(me === null ? undefined : me.app, this.watched());
   });
+
+  constructor() {
+    inject(DestroyRef).onDestroy(() => {
+      clearTimeout(this.timer);
+      clearInterval(this.poll);
+    });
+  }
 
   /** Getting or updating the app comes first; a card leaves that to the skill's page. */
   protected readonly needsApp = computed(() => {
@@ -87,5 +98,24 @@ export class InstallButton {
     this.timer = setTimeout(() => {
       this.opening.set(false);
     }, 8000);
+    if (verb === "install" && this.watched().length > 0) {
+      this.watch();
+    }
+  }
+
+  /**
+   * The app reports an install a few seconds after it finishes, which can be after this window gets focus
+   * back, so keep asking for up to a minute until it shows as installed.
+   */
+  private watch(): void {
+    clearInterval(this.poll);
+    const until = Date.now() + 60_000;
+    this.poll = setInterval(() => {
+      if (this.state() === "installed" || Date.now() > until) {
+        clearInterval(this.poll);
+        return;
+      }
+      runTask(this.session.refreshMe());
+    }, 3000);
   }
 }

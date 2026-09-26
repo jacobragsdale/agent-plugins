@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Agent Plugins",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "dev.jacobragsdale.agentplugins",
   "build": { "beforeDevCommand": "pnpm dev", "devUrl": "http://localhost:1420", "beforeBuildCommand": "pnpm build", "frontendDist": "../dist" },
   "app": { "windows": [{ "title": "Agent Plugins", "width": 920, "height": 680, "minWidth": 720, "minHeight": 540, "visible": false, "focus": false }], "security": { "csp": null } },

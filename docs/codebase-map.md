@@ -25,7 +25,7 @@ A source becomes files on disk in one direction. Each stage may use the stage ab
 | Serve        | `application/`, `ipc.rs`, `ipc_error.rs`, `app_state.rs`                                       | Sequence use cases behind locks, project state for the UI, and classify errors.                     |
 | Reach out    | `marketplace.rs`, `host_identity.rs`, `preflight.rs`                                           | Identity, marketplace requests, events, and the startup checks.                                     |
 | Host         | `paths.rs`, `startup.rs`, `process.rs`, `parallel.rs`, `qa_paths.rs`, `tray.rs`, `tutorial.rs` | Filesystem roots, environment repair, bounded subprocesses, QA isolation, tray, the skill tutorial. |
-| Entry points | `main.rs`, `lib.rs`, `cli.rs`, `staging.rs`, `bin/`                                            | Window, command registration, headless verbs, publish staging, validator binaries.                  |
+| Entry points | `main.rs`, `lib.rs`, `cli.rs`, `deep_link.rs`, `staging.rs`, `bin/`                            | Window, command registration, headless verbs, website links, publish staging, validator binaries.   |
 
 ### Modules worth knowing before you change anything
 
@@ -39,20 +39,21 @@ A source becomes files on disk in one direction. Each stage may use the stage ab
 | `preflight.rs`         | Declarative checks with stable IDs. IDs are retired, never renamed.                                                                                                                          |
 | `ipc_error.rs`         | Turns an internal error string into the `IpcError` every command rejects with. See [IPC errors](#ipc-errors).                                                                                |
 | `fs_retry.rs`          | Retries transient Windows sharing errors for up to 4 seconds, and words I/O errors (`is_locked`, disk full, access denied) for people.                                                       |
+| `deep_link.rs`         | Parses `agent-plugins://install/…` and `open/…` links strictly, and holds the newest one until the window takes it. `startup.rs` registers the link type per user.                           |
 | `qa_paths.rs`          | Debug-only. `AGENT_PLUGINS_QA_ROOT` relocates every root beneath the temp directory.                                                                                                         |
 
 ### `application/`
 
 The use-case layer. Mutations and ledger reads serialize on the operation lock. A sync holds the sync lock for its whole run, fetches under it alone, and takes the operation lock only to read the configuration and then to activate and reconcile.
 
-| File         | Responsibility                                                                                                                                              |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mod.rs`     | `RuntimeState`, the locks, the sync scheduler (15 minutes; 1, 2, then 5 after failed passes; on resume), the focus sync, and the re-exports `ipc.rs` calls. |
-| `sync.rs`    | Cached load, on-demand preflight, full sync, catalog auto-subscribe, background updates, `sync-health.json`, connectivity, and the not-found grace period.  |
-| `sources.rs` | Prepare, confirm, and cancel a source. Preparation stages a candidate; confirmation writes `sources.json`.                                                  |
-| `items.rs`   | Install, replace, uninstall, bulk plan and run, source removal, app reset, re-creating missing files, and extending installs to newly detected agents.      |
-| `status.rs`  | Derives the item and component states the cards show.                                                                                                       |
-| `project.rs` | Builds `AppState` for the window: catalog items, compatibility, approval details, marketplace metadata.                                                     |
+| File         | Responsibility                                                                                                                                                                                              |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mod.rs`     | `RuntimeState`, the locks, the sync scheduler (15 minutes; 1, 2, then 5 after failed passes; on resume), the focus sync, and the re-exports `ipc.rs` calls.                                                 |
+| `sync.rs`    | Cached load, on-demand preflight, full sync, catalog auto-subscribe, background updates, `sync-health.json`, connectivity, and the not-found grace period.                                                  |
+| `sources.rs` | Prepare, confirm, and cancel a source. Preparation stages a candidate; confirmation writes `sources.json`.                                                                                                  |
+| `items.rs`   | Install, replace, uninstall, batch plan and run across sources (source **Install all** and bundles), source removal, app reset, re-creating missing files, and extending installs to newly detected agents. |
+| `status.rs`  | Derives the item and component states the cards show.                                                                                                                                                       |
+| `project.rs` | Builds `AppState` for the window: catalog items, compatibility, approval details, marketplace metadata.                                                                                                     |
 
 ### IPC errors
 
@@ -83,37 +84,42 @@ The `app` feature is on by default. The `tools` feature builds the three tools a
 
 Presentation only. It validates every IPC response with Zod and owns no filesystem or manifest policy.
 
-| File                                                       | Responsibility                                                          |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `App.tsx`                                                  | State, IPC calls, confirmation flow, and the header.                    |
-| `ipc/client.ts`                                            | The invoke wrapper, `toAppError`, and the one automatic retry.          |
-| `ipc/schemas.ts`                                           | The Zod schema for every command result and for `IpcError`.             |
-| `ipc/fixtures/app-state.json`                              | An `AppState` generated by a Rust test; the contract the schemas parse. |
-| `lib/status.ts`                                            | Status labels and colors, action labels, and every confirmation dialog. |
-| `lib/connectivity.ts`                                      | **Last checked**, the offline banner text, and the empty-page states.   |
-| `components/ErrorBoundary.tsx`                             | Replaces a crashed window with **Reload**.                              |
-| `components/ItemCard.tsx`                                  | A package card and its component rows.                                  |
-| `components/SourceGroup.tsx`                               | One source and its bulk actions.                                        |
-| `components/SystemStatusDialog.tsx`                        | The preflight summary, agent details, and full check list.              |
-| `components/ManageSourcesDialog.tsx`                       | Catalog sources, added sources, and sources the catalog dropped.        |
-| `components/CatalogToolbar.tsx`                            | Search, the drift filter, the status button, and the sync line.         |
-| `components/AgentSetupNotice.tsx`, `components/Notice.tsx` | Callouts above the catalog, the offline banner, and error **Details**.  |
-| `*.test.ts`                                                | Vitest unit tests beside the module they cover.                         |
+| File                                                       | Responsibility                                                                    |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `App.tsx`                                                  | State, IPC calls, confirmation flow, and the header.                              |
+| `ipc/client.ts`                                            | The invoke wrapper, `toAppError`, and the one automatic retry.                    |
+| `ipc/schemas.ts`                                           | The Zod schema for every command result and for `IpcError`.                       |
+| `ipc/fixtures/app-state.json`                              | An `AppState` generated by a Rust test; the contract the schemas parse.           |
+| `lib/status.ts`                                            | Status labels and colors, action labels, and every confirmation dialog.           |
+| `lib/connectivity.ts`                                      | **Last checked**, the offline banner text, and the empty-page states.             |
+| `components/ErrorBoundary.tsx`                             | Replaces a crashed window with **Reload**.                                        |
+| `components/ItemCard.tsx`                                  | A package card and its component rows.                                            |
+| `components/SourceGroup.tsx`                               | One source and its bulk actions.                                                  |
+| `components/SystemStatusDialog.tsx`                        | The preflight summary, agent details, and full check list.                        |
+| `components/ManageSourcesDialog.tsx`                       | Catalog sources, added sources, and sources the catalog dropped.                  |
+| `components/TeamsDialog.tsx`, `components/ShareDialog.tsx` | Teams (create, members, invite link) and who can see a space, package, or bundle. |
+| `components/Bundles.tsx`                                   | The Bundles group and the New bundle dialog.                                      |
+| `components/LinkDialogs.tsx`                               | **Open a link** and the confirmation a website link opens.                        |
+| `components/CatalogToolbar.tsx`                            | Search, the drift filter, the status button, and the sync line.                   |
+| `components/AgentSetupNotice.tsx`, `components/Notice.tsx` | Callouts above the catalog, the offline banner, and error **Details**.            |
+| `*.test.ts`                                                | Vitest unit tests beside the module they cover.                                   |
 
 Adding a command means touching `ipc.rs`, `lib.rs`, and `src/ipc/schemas.ts` together. Changing `AppState` also means regenerating the fixture; see [how to work on Agent Plugins](development.md#change-the-ipc-surface).
 
 ## Server
 
-| Path                            | Responsibility                                                                                   |
-| ------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `src/Marketplace.Api/Endpoints` | Every HTTP endpoint, plus `PortalHosting`: the portal, `/downloads`, security headers.           |
-| `src/Marketplace.Api/Auth`      | Negotiate, and the Development-only `X-Dev-User` handler.                                        |
-| `src/Marketplace.Api/Packages`  | Publish, validation via the Rust binary, SemVer, archive inspection, namespace archive building. |
-| `src/Marketplace.Api/Catalog`   | The `/api/catalog` document, one listed source per namespace.                                    |
-| `src/Marketplace.Api/Storage`   | Artifact Keeper client behind `IArtifactStore`.                                                  |
-| `src/Marketplace.Api/Events`    | Install, update, uninstall, and heartbeat ingestion.                                             |
-| `src/Marketplace.Api/Data`      | EF Core model and migrations, applied at startup.                                                |
-| `tests/Marketplace.Api.Tests`   | Integration tests against a throwaway PostgreSQL container.                                      |
+| Path                            | Responsibility                                                                                                                                      |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/Marketplace.Api/Endpoints` | Every HTTP endpoint, plus `PortalHosting`: the portal, `/downloads`, security headers.                                                              |
+| `src/Marketplace.Api/Auth`      | Negotiate, and the Development-only `X-Dev-User` handler.                                                                                           |
+| `src/Marketplace.Api/Packages`  | Publish, revoke, the public MCP gate, suggestions, bundles, validation via the Rust binary, SemVer, archive inspection, namespace archive building. |
+| `src/Marketplace.Api/Teams`     | Teams, members, invite and share links, and the people-and-teams directory.                                                                         |
+| `src/Marketplace.Api/Access`    | Who may see what: public, private, share lists, and the public MCP gate. Every read goes through it.                                                |
+| `src/Marketplace.Api/Catalog`   | The `/api/catalog` document, one listed source per namespace.                                                                                       |
+| `src/Marketplace.Api/Storage`   | Artifact Keeper client behind `IArtifactStore`.                                                                                                     |
+| `src/Marketplace.Api/Events`    | Install, update, uninstall, and heartbeat ingestion.                                                                                                |
+| `src/Marketplace.Api/Data`      | EF Core model and migrations, applied at startup.                                                                                                   |
+| `tests/Marketplace.Api.Tests`   | Integration tests against a throwaway PostgreSQL container.                                                                                         |
 
 ## Web portal
 

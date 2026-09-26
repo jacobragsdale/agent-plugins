@@ -29,7 +29,20 @@ pub(crate) fn current() -> HostIdentity {
     }
 }
 
+/// `DOMAIN\user` from the logon token on Windows, which is the same in every
+/// session; `USERDOMAIN` says `WORKGROUP` in an SSH session but the machine
+/// name on the desktop, so it only fills in when the token can't be read.
+#[cfg(windows)]
 fn account_name() -> String {
+    windows::sam_account().unwrap_or_else(env_account_name)
+}
+
+#[cfg(not(windows))]
+fn account_name() -> String {
+    env_account_name()
+}
+
+fn env_account_name() -> String {
     let user = std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "unknown".to_string());
@@ -138,6 +151,19 @@ mod windows {
 
     fn wide(value: &str) -> Vec<u16> {
         OsStr::new(value).encode_wide().chain(Some(0)).collect()
+    }
+
+    pub(super) fn sam_account() -> Option<String> {
+        use windows_sys::Win32::Security::Authentication::Identity::{
+            GetUserNameExW, NameSamCompatible,
+        };
+        let mut buffer = [0u16; 512];
+        let mut length = buffer.len() as u32;
+        // SAFETY: `buffer` is writable for `length` wide characters; on success
+        // the API sets `length` to the characters written, without the NUL.
+        let ok = unsafe { GetUserNameExW(NameSamCompatible, buffer.as_mut_ptr(), &mut length) };
+        let written = buffer.get(..length as usize)?;
+        (ok != 0 && !written.is_empty()).then(|| String::from_utf16_lossy(written))
     }
 
     pub(super) fn join_state() -> JoinState {

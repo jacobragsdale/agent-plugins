@@ -97,6 +97,35 @@ Select **Allow and install**. The card becomes **Installed**, and the server is 
 
 Select **Cancel** instead, and nothing at all is written. Approval is never remembered and never inferred: a background update that would add or change an MCP server waits for you rather than approving itself.
 
+## Install from the marketplace website
+
+The marketplace website can hand a package to the app, so you can install while you read about it. Open the marketplace in your browser, pick a package, and select **Install in Agent Plugins** under **Get it**.
+
+The first time, the browser asks before it opens the app:
+
+```text
+This site is trying to open Agent Plugins.
+https://marketplace.example.com wants to open this application.
+```
+
+Tick **Always allow**, then select **Open**. The browser never asks again for this site.
+
+Agent Plugins comes to the front, starting if it was closed, and asks in its own window:
+
+```text
+Install Writing Pack?
+e2e-bob · v1.0.0
+Adds 2 skills to Cursor, Claude Code, Claude Desktop and Microsoft 365 Copilot.
+```
+
+Select **Install**. A connector still shows the **Allow connector** dialog from the previous section; the website cannot approve one for you. When you switch back to the browser, the button reads **Installed** once the app has reported the install, which takes a few seconds.
+
+A skill pack also offers **Install one skill instead**, with an **Install** button for each skill in it. A bundle page offers **Install all**, which lists every package in the bundle and asks once for any connectors among them.
+
+If the page says **Get Agent Plugins**, the marketplace has not heard from the app on your PC in the last 30 days; install the app, open it once, and reload the page. If it says **Update Agent Plugins**, your app is older than 0.2.0 and cannot open website links.
+
+Administrators can skip the browser's question for everyone: the Edge and Chrome policy `AutoLaunchProtocolsFromOrigins` with the protocol `agent-plugins` and the marketplace's origin allows the site to open the app without asking.
+
 ## Undo it
 
 Select **Uninstall** on the package you just installed. It disappears from the agent configuration, and the card returns to **Available**.
