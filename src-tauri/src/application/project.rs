@@ -140,6 +140,7 @@ const IDENTITY_CACHE_FILE: &str = "marketplace-identity.json";
 
 /// Attaches marketplace index metadata to the items it lists, and its bundles.
 pub(super) fn apply_index(state: &mut AppState, index: &crate::marketplace::Index) {
+    drop_revoked(&mut state.items, &index.revoked);
     for item in &mut state.items {
         item.marketplace = index
             .package(&item.id)
@@ -150,6 +151,15 @@ pub(super) fn apply_index(state: &mut AppState, index: &crate::marketplace::Inde
         .iter()
         .map(crate::app_state::BundleState::from_index)
         .collect();
+}
+
+/// A revoked package leaves the catalog even when a saved copy of its source
+/// still lists it. One still on this computer stays, so removing it can be
+/// retried or done by hand.
+fn drop_revoked(items: &mut Vec<crate::app_state::CatalogItemState>, revoked: &[String]) {
+    items.retain(|item| {
+        !revoked.contains(&item.id) || super::items::counts_as_installed(item.status)
+    });
 }
 
 /// Stores what the marketplace said about the caller and returns the identity
@@ -504,6 +514,57 @@ mod tests {
             cache: root.join("cache"),
             onedrive_commercial: None,
         }
+    }
+
+    fn catalog_item(
+        id: &str,
+        status: crate::install::ItemStatus,
+    ) -> crate::app_state::CatalogItemState {
+        let (source_id, local_id) = id.split_once('/').expect("canonical id");
+        crate::app_state::CatalogItemState {
+            id: id.to_string(),
+            local_id: local_id.to_string(),
+            source_id: source_id.to_string(),
+            source_key: "source-a1b2c3".to_string(),
+            source_name: source_id.to_string(),
+            source_url: format!("https://marketplace.test/api/sources/{source_id}/archive"),
+            name: local_id.to_string(),
+            description: local_id.to_string(),
+            manual_invocation: false,
+            source: format!("skills/{local_id}"),
+            source_is_directory: true,
+            manifest_version: 2,
+            components: Vec::new(),
+            compatibility: Vec::new(),
+            destination: None,
+            status,
+            requires_approval: false,
+            risk_details: Vec::new(),
+            marketplace: None,
+        }
+    }
+
+    #[test]
+    fn a_revoked_package_is_not_offered_from_a_saved_copy() {
+        use crate::install::ItemStatus;
+        let mut items = vec![
+            catalog_item("bob/pulled", ItemStatus::Available),
+            catalog_item("bob/stuck", ItemStatus::Installed),
+            catalog_item("bob/kept", ItemStatus::Available),
+        ];
+        drop_revoked(
+            &mut items,
+            &["bob/pulled".to_string(), "bob/stuck".to_string()],
+        );
+        let ids = items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            ["bob/stuck", "bob/kept"],
+            "installed stays so it can be removed"
+        );
     }
 
     #[test]

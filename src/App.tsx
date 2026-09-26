@@ -225,15 +225,16 @@ export default function App(): JSX.Element {
 
   /**
    * An `agent-plugins://` link. Something just published or shared may not be
-   * in this window's catalog until the next check, so a miss checks first. The
+   * in this window's catalog until the next check, so a miss checks first;
+   * `fresh` always checks, for access that was granted a moment ago. The
    * newest link wins: a later one replaces a confirmation still waiting.
    */
   const openLink = useCallback(
-    async (link: DeepLink): Promise<void> => {
+    async (link: DeepLink, fresh = false): Promise<void> => {
       linkSeq.current += 1;
       const seq = linkSeq.current;
       const current = stateRef.current;
-      let target: LinkTarget | null = current === null ? null : resolveLink(link, current);
+      let target: LinkTarget | null = current === null || fresh ? null : resolveLink(link, current);
       if (target === null) {
         const next = await invokeParsed("sync_manifest_state", appStateSchema);
         applySynced(next);
@@ -645,7 +646,8 @@ export default function App(): JSX.Element {
         })
       );
     } else {
-      settle(openLink({ kind: "install", namespace: result.target.slice(0, slash), id: result.target.slice(slash + 1), component: null }));
+      // A saved copy may already list it; checking again replaces that copy with the one now shared.
+      settle(openLink({ kind: "install", namespace: result.target.slice(0, slash), id: result.target.slice(slash + 1), component: null }, true));
     }
   }
 

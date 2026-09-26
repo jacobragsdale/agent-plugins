@@ -264,6 +264,16 @@ function CreateTeam({ onCreated, onBack, onError }: Readonly<{ onCreated: (names
   );
 }
 
+/**
+ * What the caller may do on a team page. The server refuses to leave a team
+ * without an owner, so the last owner is offered neither leaving nor stepping down.
+ */
+function permissions(team: Team): Readonly<{ owner: boolean; lastOwner: boolean; canLeave: boolean }> {
+  const owner = team.role === "owner" || team.role === "admin";
+  const lastOwner = team.members.filter((member) => member.owner).length === 1;
+  return { owner, lastOwner, canLeave: team.role === "member" || (team.role === "owner" && !lastOwner) };
+}
+
 function TeamDetail({
   namespace,
   account,
@@ -317,7 +327,7 @@ function TeamDetail({
       </Text>
     );
   }
-  const owner = team.role === "owner" || team.role === "admin";
+  const { owner, lastOwner, canLeave } = permissions(team);
   const reload = async (): Promise<Team> => invokeParsed("get_team", teamSchema, { namespace });
 
   async function copyInvite(reset: boolean): Promise<void> {
@@ -451,16 +461,18 @@ function TeamDetail({
             <EntryRow name={member.displayName} detail={member.account} badge={member.owner ? "Owner" : undefined}>
               {owner ? (
                 <>
-                  <Button
-                    size="1"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() => {
-                      run(change("Couldn't change the member.", () => invokeParsed("add_team_member", teamSchema, { namespace, account: member.account, owner: !member.owner })));
-                    }}
-                  >
-                    {member.owner ? "Make member" : "Make owner"}
-                  </Button>
+                  {member.owner && lastOwner ? null : (
+                    <Button
+                      size="1"
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() => {
+                        run(change("Couldn't change the member.", () => invokeParsed("add_team_member", teamSchema, { namespace, account: member.account, owner: !member.owner })));
+                      }}
+                    >
+                      {member.owner ? "Make member" : "Make owner"}
+                    </Button>
+                  )}
                   {member.account === account ? null : (
                     <Button
                       size="1"
@@ -535,7 +547,7 @@ function TeamDetail({
         <Button variant="soft" color="gray" onClick={onBack}>
           Back
         </Button>
-        {team.role === "admin" ? null : (
+        {canLeave ? (
           <Button
             variant="soft"
             color="red"
@@ -546,7 +558,7 @@ function TeamDetail({
           >
             Leave team
           </Button>
-        )}
+        ) : null}
         {owner ? (
           <Button
             variant="soft"

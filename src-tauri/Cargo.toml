@@ -1,6 +1,6 @@
 [package]
 name = "agent-plugins"
-version = "0.2.0"
+version = "0.2.1"
 description = "A desktop app for installing Agent Skills and MCP servers"
 authors = ["Jacob Ragsdale"]
 edition = "2021"

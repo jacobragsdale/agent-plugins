@@ -197,6 +197,10 @@ export async function reviewApproval(name: string, riskDetails: readonly string[
 }
 
 export async function reviewBulkApproval(names: readonly string[], riskDetails: readonly string[]): Promise<boolean> {
+  const [only] = names;
+  if (names.length === 1 && only !== undefined) {
+    return reviewApproval(only, riskDetails);
+  }
   const detail = riskDetails.length === 0 ? "" : `\n\n${riskDetails.join("\n")}`;
   return confirm(`${names.join(", ")} include connectors, programs or online services that AI apps use. Every AI app found here will use them.${detail}`, {
     title: "Allow connectors",

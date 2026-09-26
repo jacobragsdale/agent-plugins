@@ -8,6 +8,7 @@
 use crate::app_state::BulkAction;
 use crate::application::{self, RuntimeState};
 use crate::host_identity;
+use crate::install::ItemStatus;
 use crate::marketplace::{self, IndexBundle, IndexPackage};
 use crate::staging::{scan_for_secrets, stage_tree, zip_tree, StageRequest};
 use reqwest::blocking::multipart::{Form, Part};
@@ -589,6 +590,17 @@ fn install(args: &[String]) -> Result<(), String> {
                         }
                         None => item.requires_approval,
                     };
+                    // Following a link again, or asking twice, is not a failure.
+                    let installed = match component {
+                        Some(component) => item.components.iter().any(|candidate| {
+                            candidate.id == component && candidate.status == ItemStatus::Installed
+                        }),
+                        None => item.status == ItemStatus::Installed,
+                    };
+                    if installed {
+                        println!("{target} is already installed.");
+                        return Ok(());
+                    }
                     if requires_approval && !approve_mcp {
                         return Err(approval_needed(&[item.name.as_str()]));
                     }

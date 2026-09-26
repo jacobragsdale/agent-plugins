@@ -73,6 +73,10 @@ export class Session {
 
   constructor() {
     // Installing from the page happens in the desktop app; coming back shows what it installed.
+    // The app's window usually only covers the browser, so the tab never hides: focus is the signal.
+    window.addEventListener("focus", () => {
+      runTask(this.refreshMe());
+    });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
         runTask(this.refreshMe());
@@ -148,6 +152,12 @@ export class Session {
       this.health.set(health);
     } catch (error) {
       return { kind: "unavailable", message: ApiError.from(error).message };
+    }
+
+    // Without a development account the request would carry no credentials, and the 401's Negotiate
+    // challenge makes a browser off the domain pop up a password box that can never succeed.
+    if (health.authSchemes.includes("DevHeader") && this.devUser.account() === null) {
+      return { kind: "signed-out", devSignIn: true };
     }
 
     try {

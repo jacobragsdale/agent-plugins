@@ -74,7 +74,9 @@ export class TeamInvite {
             }
           </span>
           @if (isYou(member)) {
-            <button mat-button type="button" [disabled]="busy()" (click)="leave.emit()">Leave team</button>
+            @if (!(member.owner && lastOwner())) {
+              <button mat-button type="button" [disabled]="busy()" (click)="leave.emit()">Leave team</button>
+            }
           } @else if (manage()) {
             <button mat-button type="button" [disabled]="busy()" (click)="setOwner.emit(member)">{{ member.owner ? "Remove as owner" : "Make owner" }}</button>
             <button mat-button type="button" class="danger" [disabled]="busy()" (click)="remove.emit(member)">Remove</button>
@@ -122,6 +124,8 @@ export class TeamMembers {
   public readonly leave = output();
 
   protected readonly manage = computed(() => this.team().role !== "member");
+  /** A team keeps at least one owner, so the only one can't leave until they make someone else an owner. */
+  protected readonly lastOwner = computed(() => this.team().members.filter((member) => member.owner).length === 1);
 
   protected isYou(member: Member): boolean {
     return member.account.toLowerCase() === this.you().toLowerCase();
