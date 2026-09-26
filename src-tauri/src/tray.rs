@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::ffi::OsStr;
-use std::io;
 
 #[cfg(windows)]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
@@ -166,8 +165,8 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
     let icon = tauri::include_image!("icons/tray.png");
     #[cfg(not(target_os = "macos"))]
     let icon = app.default_window_icon().cloned().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
             "Agent Plugins has no application icon for the system tray.",
         )
     })?;
