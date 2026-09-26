@@ -1,6 +1,6 @@
 ---
 name: marketplace
-description: Find and install skills and MCP servers from the company marketplace with the Agent Plugins CLI. Use when the user asks whether a skill exists for a task, wants to search or browse the marketplace, or asks to install a published skill by name.
+description: Find and install skills, MCP servers, and bundles from the company marketplace with the Agent Plugins CLI. Use when the user asks whether a skill exists for a task, wants to search or browse the marketplace, asks to install a published skill or bundle by name, or pastes a marketplace link someone shared.
 ---
 
 # Marketplace search and install
@@ -25,7 +25,8 @@ agent-plugins search <words>
 ```
 
 Prints matching packages as `namespace/package`, version, publisher, install
-count, active users, and tags. Summarize the best matches for the user and
+count, active users, and tags, then matching bundles: named sets of packages
+that install together. Summarize the best matches for the user and
 say who published each one; publisher and usage numbers are how people judge
 trust here.
 
@@ -33,7 +34,15 @@ trust here.
 
 ```
 agent-plugins install <namespace>/<package>
+agent-plugins install <namespace>/<package>/<skill>   # one skill from a package with several
+agent-plugins install <namespace>/<bundle>            # every package in a bundle
+agent-plugins install <link>                          # something shared with a marketplace link
 ```
+
+A link someone shared looks like `https://…/l/<code>`; installing it first
+gives the user access to what it shares. A team invite link is different: it
+joins the user to a team with `agent-plugins team join <link>`, and only when
+the user asks to join.
 
 Skills install without further approval. If the package contains an MCP
 server the CLI refuses unless `--approve-mcp` is given: MCP servers run code,

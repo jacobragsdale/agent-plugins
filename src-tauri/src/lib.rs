@@ -8,6 +8,7 @@ mod artifact;
 mod catalog;
 #[cfg(feature = "app")]
 mod cli;
+mod deep_link;
 mod digest;
 mod executor;
 mod fs_retry;
@@ -66,7 +67,14 @@ pub fn run() {
     let runtime_state = application::RuntimeState::new();
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        // A second launch is often a portal link; the running window gets it.
+        if let Some(link) = deep_link::from_args(&args) {
+            deep_link::set_pending(link.clone());
+            if let Err(error) = tauri::Emitter::emit(app, deep_link::EVENT, link) {
+                eprintln!("Could not hand the link to the window: {error}");
+            }
+        }
         crate::tray::open_main_window(app);
     }));
     let builder = builder
@@ -85,6 +93,10 @@ pub fn run() {
             // over to the running app. Nothing here touches the network, and
             // the event loop runs no command until setup returns, so every
             // sync sees the repaired proxy variables.
+            // A link that started the app waits until the window asks for it.
+            if let Some(link) = deep_link::from_args(std::env::args()) {
+                deep_link::set_pending(link);
+            }
             let report = startup::prepare_process();
             report.log();
             STARTUP_REPORT.set(report);
@@ -133,7 +145,26 @@ pub fn run() {
             ipc::reset_app,
             ipc::run_tutorial,
             ipc::dismiss_tutorial,
-            ipc::create_skill
+            ipc::create_skill,
+            ipc::take_pending_link,
+            ipc::list_teams,
+            ipc::get_team,
+            ipc::create_team,
+            ipc::rename_team,
+            ipc::add_team_member,
+            ipc::remove_team_member,
+            ipc::team_invite,
+            ipc::delete_team,
+            ipc::search_directory,
+            ipc::preview_link,
+            ipc::redeem_link,
+            ipc::get_share,
+            ipc::set_share,
+            ipc::share_link,
+            ipc::save_bundle,
+            ipc::delete_bundle,
+            ipc::plan_items,
+            ipc::run_items
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

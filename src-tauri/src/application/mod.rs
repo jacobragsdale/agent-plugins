@@ -16,8 +16,8 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::sync::Mutex;
 
 pub(crate) use items::{
-    bulk_plan, bulk_run, install_item, plan_source_removal, remove_source, replace_item, reset_app,
-    set_manual_invocation, uninstall_item,
+    bulk_plan, bulk_run, install_item, plan_items, plan_source_removal, remove_source,
+    replace_item, reset_app, run_items, set_manual_invocation, uninstall_item,
 };
 pub(crate) use sources::{cancel_prepared_source, confirm_source, prepare_source};
 pub(crate) use sync::{load_cached_app_state, run_preflight, sync_app_state};
@@ -84,6 +84,26 @@ where
 }
 
 pub(super) use crate::marketplace::epoch_seconds_now as current_epoch_seconds;
+
+/// Calls the marketplace API off the async runtime and returns its JSON
+/// answer as it is, or `null` for an answer without a body.
+#[cfg(feature = "app")]
+pub(crate) async fn marketplace_call(
+    method: reqwest::Method,
+    path: String,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    run_blocking("Marketplace request", move || {
+        let text = crate::marketplace::api(method, &path, body.as_ref())?;
+        if text.trim().is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_str(&text).map_err(|error| {
+            format!("The marketplace answered with something Agent Plugins can't read: {error}")
+        })
+    })
+    .await
+}
 
 /// Closes the app, gives it the tutorial skill, and reopens it with the tutorial prompt.
 #[cfg(feature = "app")]

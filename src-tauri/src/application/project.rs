@@ -74,19 +74,7 @@ pub(super) fn build_app_state(
         if current_ids.contains(id) || super::sync::is_unsupported_legacy_install(record) {
             continue;
         }
-        let definition = loaded
-            .iter()
-            .find(|source| source.definition.source_key == record.source_key)
-            .map(|source| source.definition.clone())
-            .unwrap_or_else(|| ConfiguredSource {
-                source_key: record.source_key.clone(),
-                source_id: record.source_id.clone(),
-                name: record.source_id.clone(),
-                description: "This source is no longer configured.".to_string(),
-                locator: Locator::parse(&record.source_url)
-                    .unwrap_or_else(|_| Locator::display_url(record.source_url.clone())),
-                repository_key: None,
-            });
+        let definition = record_source(loaded, record);
         items.push(removed_item_state(
             paths,
             &ledger_state,
@@ -116,6 +104,7 @@ pub(super) fn build_app_state(
         repositories: repository_states,
         sources,
         items,
+        bundles: Vec::new(),
         tutorial: crate::tutorial::offer(paths, &agent_profiles),
         agent_profiles,
         marketplace_url: None,
@@ -125,15 +114,42 @@ pub(super) fn build_app_state(
     })
 }
 
+/// The source an installed package came from: the loaded one, or, when it is
+/// no longer configured, one rebuilt from the ledger so the package can still
+/// be removed.
+pub(super) fn record_source(
+    loaded: &[LoadedSource],
+    record: &InstallationRecord,
+) -> ConfiguredSource {
+    loaded
+        .iter()
+        .find(|source| source.definition.source_key == record.source_key)
+        .map(|source| source.definition.clone())
+        .unwrap_or_else(|| ConfiguredSource {
+            source_key: record.source_key.clone(),
+            source_id: record.source_id.clone(),
+            name: record.source_id.clone(),
+            description: "This source is no longer configured.".to_string(),
+            locator: Locator::parse(&record.source_url)
+                .unwrap_or_else(|_| Locator::display_url(record.source_url.clone())),
+            repository_key: None,
+        })
+}
+
 const IDENTITY_CACHE_FILE: &str = "marketplace-identity.json";
 
-/// Attaches marketplace index metadata to the items it lists.
-pub(super) fn apply_index(items: &mut [CatalogItemState], index: &crate::marketplace::Index) {
-    for item in items {
+/// Attaches marketplace index metadata to the items it lists, and its bundles.
+pub(super) fn apply_index(state: &mut AppState, index: &crate::marketplace::Index) {
+    for item in &mut state.items {
         item.marketplace = index
             .package(&item.id)
             .map(crate::app_state::MarketplaceMeta::from_index);
     }
+    state.bundles = index
+        .bundles
+        .iter()
+        .map(crate::app_state::BundleState::from_index)
+        .collect();
 }
 
 /// Stores what the marketplace said about the caller and returns the identity
@@ -150,6 +166,9 @@ pub(super) fn remember_identity(
         display_name: me.display_name,
         admin: me.admin,
         auth_mode: report.auth_mode.clone(),
+        namespaces: me.namespaces,
+        teams: me.teams,
+        suggestions_waiting: me.suggestions_waiting,
     });
     let rejected = report.checks.iter().any(|check| {
         check.id == "auth.identity"
@@ -198,7 +217,7 @@ pub(super) fn apply_cached_marketplace(state: &mut AppState, cache: &std::path::
     };
     state.marketplace_url = Some(base_url.to_string());
     if let Some(index) = crate::marketplace::read_cached_index(cache) {
-        apply_index(&mut state.items, &index);
+        apply_index(state, &index);
     }
     state.identity = read_identity_cache(cache);
     state.preflight = crate::preflight::PreflightReport::read_cache(cache);
@@ -496,6 +515,9 @@ mod tests {
             display_name: "Jacob".to_string(),
             admin: false,
             auth_mode: "Negotiate".to_string(),
+            namespaces: Vec::new(),
+            teams: Vec::new(),
+            suggestions_waiting: 0,
         };
         write_identity_cache(cache.path(), Some(&identity));
         let report = |detail: &str| crate::preflight::PreflightReport {

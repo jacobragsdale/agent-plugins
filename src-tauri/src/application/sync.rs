@@ -233,6 +233,10 @@ struct Fetched {
     subscribed: Vec<(String, Fetch<SourceCandidate>)>,
     sources: Vec<(ConfiguredSource, Fetch<SourceCandidate>)>,
     dead_hosts: DeadHosts,
+    /// The marketplace index: fresh, or the saved copy when the server is out of reach.
+    index: Option<crate::marketplace::Index>,
+    /// The index the last sync saved, which updates report the version they came from.
+    previous_index: Option<crate::marketplace::Index>,
 }
 
 impl Fetched {
@@ -322,6 +326,16 @@ fn fetch_all(cache: &Path, config: SourcesConfig) -> Fetched {
     let sources = crate::parallel::map(&config.sources, |definition| {
         dead_hosts.fetch(definition.url(), || prepare_source(cache, definition))
     });
+    // Fetched here, before activation, so activation can remove what the
+    // marketplace revoked under the same lock as every other change.
+    let previous_index = crate::marketplace::read_cached_index(cache);
+    let index = crate::locator::marketplace_base_url().and_then(|url| {
+        if dead_hosts.contains(url) {
+            previous_index.clone()
+        } else {
+            crate::marketplace::index_with_cache(cache)
+        }
+    });
     Fetched {
         cache: cache.to_path_buf(),
         catalog_message,
@@ -330,6 +344,8 @@ fn fetch_all(cache: &Path, config: SourcesConfig) -> Fetched {
         subscribed,
         sources: config.sources.into_iter().zip(sources).collect(),
         dead_hosts,
+        index,
+        previous_index,
     }
 }
 
@@ -454,6 +470,7 @@ struct MarketplaceCheck {
     updates: Vec<(String, Option<String>)>,
     catalog_age_seconds: Option<u64>,
     marketplace_unreachable: bool,
+    index: Option<crate::marketplace::Index>,
 }
 
 /// Activates what was fetched and reconciles installed packages. Runs under
@@ -565,8 +582,12 @@ fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), Strin
 
     retire_unsupported_legacy_installs(&paths);
     agent_profiles::apply_detected_defaults(&paths);
-    let previous_index = crate::marketplace::read_cached_index(&cache);
+    let previous_index = fetched.previous_index;
+    let index = fetched.index;
     let mut report = reconcile_installed_items(&paths, &loaded_sources)?;
+    if let Some(index) = &index {
+        report.removed_items = remove_revoked(&paths, &loaded_sources, &index.revoked);
+    }
     match repair_missing_installs() {
         Ok(names) => report.repaired_items = names,
         Err(error) => eprintln!("Could not check installed packages for missing files: {error}"),
@@ -610,8 +631,34 @@ fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), Strin
         catalog_age_seconds: catalog_age(&health),
         marketplace_unreachable,
         cache,
+        index,
     };
     Ok((state, check))
+}
+
+/// Uninstalls every installed package the marketplace revoked, even one whose
+/// source is gone, backing up any copy someone edited. Returns their names.
+fn remove_revoked(paths: &SystemPaths, loaded: &[LoadedSource], revoked: &[String]) -> Vec<String> {
+    if revoked.is_empty() {
+        return Vec::new();
+    }
+    let Ok(ledger) = crate::executor::read_ledger(paths) else {
+        return Vec::new();
+    };
+    let mut removed = Vec::new();
+    for (id, record) in &ledger.items {
+        if !revoked.contains(id) {
+            continue;
+        }
+        let source = super::project::record_source(loaded, record);
+        match install::uninstall_item_components(paths, &source, id, None, true) {
+            Ok(_) => removed.push(record.name.clone()),
+            Err(error) => eprintln!(
+                "Could not remove {id}, which was pulled from the marketplace; the next sync tries again: {error}"
+            ),
+        }
+    }
+    removed
 }
 
 const LAST_SYNC_FILE: &str = "last-sync.json";
@@ -736,31 +783,18 @@ fn enrich_with_marketplace(mut state: AppState, check: MarketplaceCheck) -> AppS
         return state;
     };
     state.marketplace_url = Some(base_url.to_string());
-    // The preflight never reads the index's metadata, so both requests run at once.
-    let (index, (report, findings)) = std::thread::scope(|scope| {
-        let index = scope.spawn(|| {
-            if check.marketplace_unreachable {
-                crate::marketplace::read_cached_index(&check.cache)
-            } else {
-                crate::marketplace::index_with_cache(&check.cache)
-            }
-        });
-        let preflight = crate::preflight::run(&crate::preflight::PreflightInput {
-            paths: &check.paths,
-            startup: crate::STARTUP_REPORT.get(),
-            profiles: &state.agent_profiles,
-            items: &state.items,
-            catalog_age_seconds: check.catalog_age_seconds,
-            ledger_error: check.ledger_error,
-            marketplace_unreachable: check.marketplace_unreachable,
-        });
-        let index = index
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        (index, preflight)
+    let (report, findings) = crate::preflight::run(&crate::preflight::PreflightInput {
+        paths: &check.paths,
+        startup: crate::STARTUP_REPORT.get(),
+        profiles: &state.agent_profiles,
+        items: &state.items,
+        catalog_age_seconds: check.catalog_age_seconds,
+        ledger_error: check.ledger_error,
+        marketplace_unreachable: check.marketplace_unreachable,
     });
+    let index = check.index;
     if let Some(index) = &index {
-        super::project::apply_index(&mut state.items, index);
+        super::project::apply_index(&mut state, index);
     }
     report.write_cache(&check.cache);
     state.identity = super::project::remember_identity(&check.cache, &report, findings.identity);
@@ -1500,6 +1534,8 @@ mod tests {
             subscribed: vec![("a".to_string(), Fetch::Unreachable(message.to_string()))],
             sources: Vec::new(),
             dead_hosts: DeadHosts::default(),
+            index: None,
+            previous_index: None,
         };
         assert_eq!(
             fetched("Could not download the artifact (HTTP 503): busy").connectivity(),
@@ -1540,6 +1576,9 @@ mod tests {
             display_name: "Jacob".to_string(),
             admin: false,
             auth_mode: "Negotiate".to_string(),
+            namespaces: Vec::new(),
+            teams: Vec::new(),
+            suggestions_waiting: 0,
         };
         super::super::project::write_identity_cache(&cache, Some(&identity));
 
@@ -1641,6 +1680,45 @@ mod tests {
             catalog,
         };
         (source, snapshot)
+    }
+
+    #[test]
+    fn a_revoked_package_is_removed_even_after_its_source_is_gone() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(
+            &paths,
+            crate::agent_profiles::TargetId::ClaudeCode,
+            true,
+        )
+        .expect("enable Claude");
+        let (source, snapshot) = snapshot(root.path(), "Guidance", 'a');
+        for id in ["python-standards", "python"] {
+            crate::executor::install(
+                &paths,
+                &source,
+                &snapshot,
+                &snapshot.catalog.items[id],
+                false,
+                false,
+            )
+            .expect("install");
+        }
+        // Someone edited it; the removal backs that copy up instead of refusing.
+        let installed = paths
+            .home
+            .join(".claude/skills/skillbook-python-standards/SKILL.md");
+        fs::write(&installed, "edited").expect("edit");
+
+        let removed = remove_revoked(&paths, &[], &["skillbook/python-standards".to_string()]);
+
+        assert_eq!(removed, vec!["skillbook-python-standards".to_string()]);
+        let ledger = crate::executor::read_ledger(&paths).expect("ledger");
+        assert!(!ledger.items.contains_key("skillbook/python-standards"));
+        assert!(
+            ledger.items.contains_key("skillbook/python"),
+            "only the revoked package goes"
+        );
     }
 
     #[test]

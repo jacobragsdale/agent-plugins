@@ -320,7 +320,7 @@ pub(crate) fn reject_unknown_fields(
     }
 }
 
-fn validate_package_id(value: &str, label: &str) -> Result<(), String> {
+pub(crate) fn validate_package_id(value: &str, label: &str) -> Result<(), String> {
     let valid = !value.is_empty()
         && value.len() <= 64
         && !value.starts_with('-')

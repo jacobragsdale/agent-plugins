@@ -70,6 +70,7 @@ pub(crate) struct MarketplaceMeta {
     pub(crate) installs: u64,
     pub(crate) installed_base: u64,
     pub(crate) restricted: bool,
+    pub(crate) shared_with_you: bool,
 }
 
 impl MarketplaceMeta {
@@ -84,6 +85,44 @@ impl MarketplaceMeta {
             installs: package.installs,
             installed_base: package.installed_base,
             restricted: package.restricted,
+            shared_with_you: package.shared_with_you,
+        }
+    }
+}
+
+/// A bundle from the marketplace index: packages that install together.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BundleState {
+    pub(crate) id: String,
+    pub(crate) namespace: String,
+    pub(crate) bundle_id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    /// The publisher's display name.
+    pub(crate) publisher: String,
+    pub(crate) lane: String,
+    /// Canonical ids of the members this person may see.
+    pub(crate) members: Vec<String>,
+    pub(crate) updated_at: String,
+    pub(crate) restricted: bool,
+    pub(crate) shared_with_you: bool,
+}
+
+impl BundleState {
+    pub(crate) fn from_index(bundle: &crate::marketplace::IndexBundle) -> Self {
+        Self {
+            id: bundle.id.clone(),
+            namespace: bundle.namespace.clone(),
+            bundle_id: bundle.bundle_id.clone(),
+            name: bundle.name.clone(),
+            description: bundle.description.clone(),
+            publisher: bundle.publisher.display_name.clone(),
+            lane: bundle.lane.clone(),
+            members: bundle.members.clone(),
+            updated_at: bundle.updated_at.clone(),
+            restricted: bundle.restricted,
+            shared_with_you: bundle.shared_with_you,
         }
     }
 }
@@ -96,6 +135,13 @@ pub(crate) struct MarketplaceIdentity {
     pub(crate) display_name: String,
     pub(crate) admin: bool,
     pub(crate) auth_mode: String,
+    /// Every space this person may publish to.
+    #[serde(default)]
+    pub(crate) namespaces: Vec<String>,
+    #[serde(default)]
+    pub(crate) teams: Vec<crate::marketplace::TeamMembership>,
+    #[serde(default)]
+    pub(crate) suggestions_waiting: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,6 +198,9 @@ pub(crate) struct AutoUpdateReport {
     pub(crate) repaired_items: Vec<String>,
     /// Display names of installed packages the sync added to newly found agents.
     pub(crate) extended_items: Vec<String>,
+    /// Display names of packages the sync uninstalled because their publisher
+    /// or an admin pulled them from every PC.
+    pub(crate) removed_items: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -167,6 +216,7 @@ pub(crate) struct AppState {
     pub(crate) repositories: Vec<RepositoryState>,
     pub(crate) sources: Vec<SourceState>,
     pub(crate) items: Vec<CatalogItemState>,
+    pub(crate) bundles: Vec<BundleState>,
     pub(crate) agent_profiles: Vec<AgentProfileState>,
     /// The detected app the skill tutorial can demonstrate, until it has run.
     pub(crate) tutorial: Option<crate::agent_profiles::TargetId>,
@@ -239,6 +289,14 @@ pub(crate) enum BulkAction {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BulkPlan {
     pub(crate) source_id: String,
+    pub(crate) action: BulkAction,
+    pub(crate) entries: Vec<BulkPlanEntry>,
+}
+
+/// What installing or removing a list of packages, from any sources, would do.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ItemsPlan {
     pub(crate) action: BulkAction,
     pub(crate) entries: Vec<BulkPlanEntry>,
 }
@@ -393,6 +451,7 @@ mod tests {
             installs: 120,
             installed_base: 87,
             restricted: false,
+            shared_with_you: false,
         });
 
         let mut sql = item(
@@ -469,6 +528,7 @@ mod tests {
                 }],
                 repaired_items: vec![text("Meeting notes")],
                 extended_items: vec![text("Publish")],
+                removed_items: Vec::new(),
             },
             catalog_message: None,
             repositories: vec![RepositoryState {
@@ -543,6 +603,19 @@ mod tests {
                 },
             ],
             items,
+            bundles: vec![BundleState {
+                id: text("team-data/starter"),
+                namespace: text("team-data"),
+                bundle_id: text("starter"),
+                name: text("Data starter kit"),
+                description: text("Everything a new analyst needs."),
+                publisher: text("Data team"),
+                lane: text("team"),
+                members: vec![text("team-data/sql-helper"), text("team-data/chart-style")],
+                updated_at: text("2026-09-20T12:00:00Z"),
+                restricted: false,
+                shared_with_you: false,
+            }],
             agent_profiles: vec![
                 profile(
                     TargetId::ClaudeDesktop,
@@ -570,6 +643,13 @@ mod tests {
                 display_name: text("Sam Lee"),
                 admin: false,
                 auth_mode: text("Windows sign-in (Kerberos)"),
+                namespaces: vec![text("sam"), text("team-data")],
+                teams: vec![crate::marketplace::TeamMembership {
+                    namespace: text("team-data"),
+                    display_name: text("Data team"),
+                    owner: true,
+                }],
+                suggestions_waiting: 0,
             }),
             preflight: Some(PreflightReport {
                 started_at_epoch_seconds: 1_789_999_000,
@@ -653,6 +733,7 @@ mod tests {
                 last_success_at_epoch_seconds: Some(1),
                 catalog_errors: Vec::new(),
             }],
+            bundles: Vec::new(),
             items: vec![CatalogItemState {
                 id: "review/python-standards".to_string(),
                 local_id: "python-standards".to_string(),

@@ -207,6 +207,12 @@ pub(crate) trait Host {
     fn session_record_path(&self) -> Option<PathBuf>;
     /// The app's own directory, published so agents can run `agent-plugins`.
     fn cli_dir(&self) -> Option<PathBuf>;
+    /// The app's executable, which `agent-plugins://` links open.
+    fn app_exe(&self) -> Option<PathBuf>;
+    /// The command Windows runs for an `agent-plugins://` link, if any.
+    fn link_handler(&self) -> Result<Option<String>, String>;
+    /// Points `agent-plugins://` links at `exe`, or forgets them for `None`.
+    fn set_link_handler(&mut self, exe: Option<&Path>) -> Result<(), String>;
     fn managed_tools_root(&self) -> Option<PathBuf>;
     fn install_tool_pack(&mut self, pack: ToolPack) -> Result<PathBuf, String>;
 }
@@ -314,9 +320,24 @@ impl Host for LiveHost {
         if cfg!(debug_assertions) {
             return None;
         }
-        std::env::current_exe()
-            .ok()
+        self.app_exe()
             .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    }
+
+    fn app_exe(&self) -> Option<PathBuf> {
+        // A development build in `target/` must not take over the links.
+        if cfg!(debug_assertions) {
+            return None;
+        }
+        std::env::current_exe().ok()
+    }
+
+    fn link_handler(&self) -> Result<Option<String>, String> {
+        live_link_handler()
+    }
+
+    fn set_link_handler(&mut self, exe: Option<&Path>) -> Result<(), String> {
+        live_set_link_handler(exe)
     }
 
     fn managed_tools_root(&self) -> Option<PathBuf> {
@@ -700,6 +721,9 @@ fn finish_session(host: &mut impl Host, report: &mut StartupReport) {
             "Could not publish PATH to the user session: {error}"
         )),
     }
+    if let Err(error) = register_link_handler(host) {
+        report.notes.push(error);
+    }
     let mut values = report.user_proxy_values.clone();
     if let Some(value) = host.env(UV_NATIVE_TLS) {
         values.push((UV_NATIVE_TLS.to_string(), value));
@@ -768,6 +792,12 @@ fn remove_cli_dir_from_path_with(host: &mut impl Host) -> Result<bool, String> {
     if !host.persist_enabled() {
         return Ok(false);
     }
+    let removed = remove_cli_dir(host);
+    unregister_link_handler(host)?;
+    removed
+}
+
+fn remove_cli_dir(host: &mut impl Host) -> Result<bool, String> {
     let (Some(dir), Some(path)) = (host.cli_dir(), host.session_env("PATH")?) else {
         return Ok(false);
     };
@@ -783,6 +813,83 @@ fn remove_cli_dir_from_path_with(host: &mut impl Host) -> Result<bool, String> {
     }
     host.persist_session("PATH", &join_paths(&kept, sep))?;
     Ok(true)
+}
+
+/// What Windows runs for an `agent-plugins://` link: this copy, with the link
+/// as its one argument.
+fn link_command(exe: &Path) -> String {
+    format!("\"{}\" \"%1\"", exe.display())
+}
+
+/// Points `agent-plugins://` links at this copy, so the marketplace portal's
+/// Install buttons open it. Writes only when the handler points elsewhere.
+fn register_link_handler(host: &mut impl Host) -> Result<(), String> {
+    let Some(exe) = host.app_exe() else {
+        return Ok(());
+    };
+    if host.link_handler()? == Some(link_command(&exe)) {
+        return Ok(());
+    }
+    host.set_link_handler(Some(&exe))
+}
+
+/// Forgets the link handler, but only one that still points at this copy.
+fn unregister_link_handler(host: &mut impl Host) -> Result<(), String> {
+    let Some(exe) = host.app_exe() else {
+        return Ok(());
+    };
+    if host.link_handler()? == Some(link_command(&exe)) {
+        host.set_link_handler(None)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+const LINK_KEY: &str = r"Software\Classes\agent-plugins";
+
+#[cfg(windows)]
+fn live_link_handler() -> Result<Option<String>, String> {
+    let key = format!(r"{LINK_KEY}\shell\open\command");
+    match winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey(key) {
+        Ok(command) => Ok(command.get_value::<String, _>("").ok()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "Could not read the agent-plugins:// link handler: {error}"
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn live_set_link_handler(exe: Option<&Path>) -> Result<(), String> {
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    let Some(exe) = exe else {
+        return match hkcu.delete_subkey_all(LINK_KEY) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(format!(
+                "Could not remove the agent-plugins:// link handler: {error}"
+            )),
+            _ => Ok(()),
+        };
+    };
+    let write = || -> io::Result<()> {
+        let (root, _) = hkcu.create_subkey(LINK_KEY)?;
+        root.set_value("", &"URL:Agent Plugins".to_string())?;
+        root.set_value("URL Protocol", &String::new())?;
+        let (icon, _) = root.create_subkey("DefaultIcon")?;
+        icon.set_value("", &format!("\"{}\",0", exe.display()))?;
+        let (command, _) = root.create_subkey(r"shell\open\command")?;
+        command.set_value("", &link_command(exe))
+    };
+    write().map_err(|error| format!("Could not register agent-plugins:// links: {error}"))
+}
+
+#[cfg(not(windows))]
+fn live_link_handler() -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+#[cfg(not(windows))]
+fn live_set_link_handler(_exe: Option<&Path>) -> Result<(), String> {
+    Ok(())
 }
 
 fn user_proxy_values(host: &impl Host) -> Vec<(String, OsString)> {
@@ -2054,6 +2161,8 @@ mod tests {
         persist_calls: Vec<String>,
         record_path: Option<PathBuf>,
         cli_dir: Option<PathBuf>,
+        app_exe: Option<PathBuf>,
+        link_handler: Option<String>,
         managed_root: Option<PathBuf>,
         install_error: Option<String>,
         installed: Vec<ToolPack>,
@@ -2078,6 +2187,8 @@ mod tests {
                 persist_calls: Vec::new(),
                 record_path: None,
                 cli_dir: None,
+                app_exe: None,
+                link_handler: None,
                 managed_root: None,
                 install_error: None,
                 installed: Vec::new(),
@@ -2256,6 +2367,20 @@ mod tests {
             self.cli_dir.clone()
         }
 
+        fn app_exe(&self) -> Option<PathBuf> {
+            self.app_exe.clone()
+        }
+
+        fn link_handler(&self) -> Result<Option<String>, String> {
+            Ok(self.link_handler.clone())
+        }
+
+        fn set_link_handler(&mut self, exe: Option<&Path>) -> Result<(), String> {
+            self.persist_calls.push("link".to_string());
+            self.link_handler = exe.map(link_command);
+            Ok(())
+        }
+
         fn managed_tools_root(&self) -> Option<PathBuf> {
             self.managed_root.clone()
         }
@@ -2303,6 +2428,30 @@ mod tests {
             OsString::from(r"%USERPROFILE%\bin;C:\Tools")
         );
         assert!(!remove_cli_dir_from_path_with(&mut host).expect("already gone"));
+    }
+
+    #[test]
+    fn links_open_this_copy_until_it_is_uninstalled() {
+        let exe = PathBuf::from(r"C:\Users\sam\AppData\Local\Agent Plugins\agent-plugins.exe");
+        let command = format!("\"{}\" \"%1\"", exe.display());
+        let mut host = FakeHost::new();
+        host.app_exe = Some(exe);
+        register_link_handler(&mut host).expect("register");
+        assert_eq!(host.link_handler.as_deref(), Some(command.as_str()));
+        register_link_handler(&mut host).expect("unchanged");
+        assert_eq!(
+            host.persist_calls,
+            vec!["link"],
+            "an unchanged handler is not rewritten"
+        );
+
+        remove_cli_dir_from_path_with(&mut host).expect("uninstall");
+        assert_eq!(host.link_handler, None);
+
+        // Another copy's handler is not ours to remove.
+        host.link_handler = Some("\"D:\\Other\\agent-plugins.exe\" \"%1\"".to_string());
+        remove_cli_dir_from_path_with(&mut host).expect("uninstall");
+        assert!(host.link_handler.is_some());
     }
 
     #[test]

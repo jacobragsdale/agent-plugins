@@ -1,13 +1,14 @@
 ---
 name: publish
-description: Publish a skill or MCP server configuration to the company marketplace with the Agent Plugins CLI. Use when the user wants to share, publish, release, or upload a skill they wrote, bump a published version, or asks how to put something on the marketplace.
+description: Publish a skill or MCP server configuration to the company marketplace with the Agent Plugins CLI, for the user or one of their teams, or suggest a change to someone else's. Use when the user wants to share, publish, release, or upload a skill they wrote, bump a published version, improve a colleague's skill, or asks how to put something on the marketplace.
 ---
 
 # Publish to the marketplace
 
 Agent Plugins ships a command line, `agent-plugins`, that publishes a package
-under the user's own namespace. Authentication is the user's Windows logon, so
-there is nothing to log in to. You do the judgment work (description, tags,
+under the user's own namespace or one of their teams. Authentication is the
+user's Windows logon, so there is nothing to log in to. A published version is
+live at once; there is no review queue. You do the judgment work (description, tags,
 version, changelog); the CLI does the trust-sensitive work (validation, secret
 scan, upload).
 
@@ -30,8 +31,10 @@ Every command below accepts the full path in place of `agent-plugins`.
    JSON document in the Agent Plugins `mcp.json` shape. Do not publish a skill
    that Agent Plugins installed from the marketplace (its name starts with a
    publisher namespace such as `jacob-`) unless the user owns it.
-2. **Confirm identity.** Run `agent-plugins whoami` and tell the user the
-   namespace the package will publish under.
+2. **Confirm identity and space.** Run `agent-plugins whoami`. If its `teams`
+   line names any teams, ask whether the package is just for the user or for
+   one of those teams. Tell the user the namespace it will publish under: the
+   team's, or the `namespace` line. Pass a team as `--namespace <team>`.
 3. **Validate.** Run `agent-plugins validate <path>` when the path holds an
    `agent-plugins.json`; otherwise skip to the dry run in step 6, which
    validates the staged package.
@@ -51,17 +54,42 @@ Every command below accepts the full path in place of `agent-plugins`.
 7. **Publish.** Run with `--yes`:
 
    ```
-   agent-plugins publish <path> --version <semver> --tags <a,b,c> --changelog "<text>" --yes
+   agent-plugins publish <path> [--namespace <team>] --version <semver> --tags <a,b,c> --changelog "<text>" --yes
    ```
 
-   Report the printed marketplace URL. If the CLI refuses because of a secret
-   or a validation error, show the message and fix the cause with the user;
-   never work around the secret scan.
+   Report the printed marketplace URL. `published` means everyone who can see
+   the space has it now. For an MCP server that everyone can see, the CLI adds
+   that others see it once an admin approves it; the user's team has it at
+   once. If the CLI refuses because of a secret or a validation error, show
+   the message and fix the cause with the user; never work around the secret
+   scan.
+
+## Improving someone else's package
+
+To change a package the user doesn't own, publish the edited copy to the
+owner's namespace with a message instead of a version. The CLI sends it to the
+owners as a suggestion; they decide whether to publish it, credited to the
+user:
+
+```
+agent-plugins publish <path> --namespace <owner-namespace> --message "<what changed and why>"
+```
+
+Owners answer suggestions with `agent-plugins review`, which lists them, then
+`agent-plugins review <number> --accept` or `--decline "<note>"`.
+
+## Who can see it
+
+A package follows its space unless it is shared differently.
+`agent-plugins share <ns>/<package>` shows who can see it; `--private` limits
+it to the space and a share list, `--add <account>` or `--add team:<ns>` adds
+to that list, and `--link` prints a link that gives anyone who opens it
+access. Change visibility only when the user asks.
 
 ## Rules
 
-- Publish only under the user's namespace unless they say otherwise and
-  `whoami` lists the other namespace.
+- Publish only under the user's namespace, or a team that `whoami` lists
+  when the user chooses it. Anything else is a suggestion to its owners.
 - Never include `.env` files, private keys, tokens, or personal data.
 - Do not edit the CLI's output or claim a publish succeeded without the
   `published` line.

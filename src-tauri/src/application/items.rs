@@ -1,5 +1,5 @@
 use super::RuntimeState;
-use crate::app_state::{BulkAction, BulkFailure, BulkPlan, BulkPlanEntry, BulkResult};
+use crate::app_state::{BulkAction, BulkFailure, BulkPlan, BulkPlanEntry, BulkResult, ItemsPlan};
 use crate::catalog::{CatalogComponentKind, CatalogItem};
 use crate::executor::ContentState;
 use crate::install::{self, ItemStatus, OperationOutcome, SourceRemovalPlan};
@@ -215,22 +215,29 @@ pub(crate) async fn bulk_plan(
         .ok_or_else(|| format!("{} has no validated revision.", source.source_id))?;
     let ledger_state = crate::executor::read_ledger(&paths)?;
     Ok(BulkPlan {
-        entries: bulk_entries(&paths, &ledger_state, &snapshot, action),
+        entries: plan_entries(
+            &paths,
+            &ledger_state,
+            &snapshot,
+            snapshot.catalog.items.values(),
+            action,
+        ),
         source_id: source.source_id,
         action,
     })
 }
 
-fn bulk_entries(
+/// What `action` does to each of `items`: a whole source's, or the packages a
+/// bundle or a person picked.
+fn plan_entries<'a>(
     paths: &SystemPaths,
     ledger_state: &crate::ledger::InstallationLedger,
     snapshot: &SourceSnapshot,
+    items: impl IntoIterator<Item = &'a CatalogItem>,
     action: BulkAction,
 ) -> Vec<BulkPlanEntry> {
-    snapshot
-        .catalog
-        .items
-        .values()
+    items
+        .into_iter()
         .map(|item| {
             let status =
                 super::status::refined_item_status(paths, ledger_state, snapshot, item, None, None);
@@ -280,46 +287,129 @@ fn selection_satisfied(
     })
 }
 
+/// A configured source, its snapshot, and the packages of it that were asked for.
+type ItemSource = (ConfiguredSource, SourceSnapshot, Vec<CatalogItem>);
+
+/// Finds each canonical id (`source-id/package-id`) in the configured sources,
+/// grouped by source. Ids that no source on this computer lists come back on
+/// their own: a bundle can name a package from a source the next sync adds.
+fn item_sources(ids: &[String]) -> Result<(Vec<ItemSource>, Vec<String>), String> {
+    let cache = cache_base_dir()?;
+    let config = config_base_dir()?;
+    let mut grouped = std::collections::BTreeMap::<&str, Vec<&str>>::new();
+    let mut missing = Vec::new();
+    for id in ids {
+        match id.split_once('/') {
+            Some((source_id, local_id)) => {
+                let local_ids = grouped.entry(source_id).or_default();
+                if !local_ids.contains(&local_id) {
+                    local_ids.push(local_id);
+                }
+            }
+            None => missing.push(id.clone()),
+        }
+    }
+    let mut sources = Vec::new();
+    for (source_id, local_ids) in grouped {
+        let loaded = source::configured_source(&config, source_id)
+            .ok()
+            .and_then(|source| {
+                let snapshot = source::load_current(&cache, &source).ok().flatten()?;
+                Some((source, snapshot))
+            });
+        let Some((source, snapshot)) = loaded else {
+            missing.extend(local_ids.iter().map(|id| format!("{source_id}/{id}")));
+            continue;
+        };
+        let mut items = Vec::new();
+        for local_id in local_ids {
+            match snapshot.catalog.items.get(local_id) {
+                Some(item) => items.push(item.clone()),
+                None => missing.push(format!("{source_id}/{local_id}")),
+            }
+        }
+        sources.push((source, snapshot, items));
+    }
+    Ok((sources, missing))
+}
+
+/// What `action` does to each package in `ids`, whichever sources they come
+/// from. Packages not on this computer yet are left out.
+pub(crate) async fn plan_items(
+    runtime: &RuntimeState,
+    ids: &[String],
+    action: BulkAction,
+) -> Result<ItemsPlan, String> {
+    let _guard = runtime.operation_lock.lock().await;
+    let paths = SystemPaths::from_system()?;
+    let ledger_state = crate::executor::read_ledger(&paths)?;
+    let (sources, _) = item_sources(ids)?;
+    let entries = sources
+        .iter()
+        .flat_map(|(_, snapshot, items)| {
+            plan_entries(&paths, &ledger_state, snapshot, items, action)
+        })
+        .collect();
+    Ok(ItemsPlan { action, entries })
+}
+
 pub(crate) async fn bulk_run(
     runtime: &RuntimeState,
     source_id: &str,
     action: BulkAction,
     trust_approved: bool,
 ) -> Result<BulkResult, String> {
-    let plan = bulk_plan(runtime, source_id, action).await?;
-    let entries = plan
+    let ids = bulk_plan(runtime, source_id, action)
+        .await?
         .entries
         .into_iter()
-        .filter(|entry| entry.will_run)
+        .map(|entry| entry.id)
         .collect::<Vec<_>>();
-    if entries.is_empty() {
-        return Ok(BulkResult {
-            completed: Vec::new(),
-            failures: Vec::new(),
-            backup_paths: Vec::new(),
-        });
-    }
+    run_items(runtime, &ids, action, trust_approved).await
+}
+
+/// Applies `action` to every package in `ids` that it would change.
+pub(crate) async fn run_items(
+    runtime: &RuntimeState,
+    ids: &[String],
+    action: BulkAction,
+    trust_approved: bool,
+) -> Result<BulkResult, String> {
+    let plan = plan_items(runtime, ids, action).await?;
     let _guard = runtime.operation_lock.lock().await;
     let paths = SystemPaths::from_system()?;
-    let cache = cache_base_dir()?;
-    let config = config_base_dir()?;
-    let source = source::configured_source(&config, source_id)?;
-    let snapshot = source::load_current(&cache, &source)?
-        .ok_or_else(|| format!("{} has no validated revision.", source.source_id))?;
-    // Each package is its own transaction, so one that fails its checks
-    // leaves the others to finish and reports its own message.
+    let (sources, missing) = item_sources(ids)?;
     let mut result = BulkResult {
         completed: Vec::new(),
         failures: Vec::new(),
         backup_paths: Vec::new(),
     };
-    for entry in entries {
+    if action != BulkAction::Uninstall {
+        result.failures = missing
+            .into_iter()
+            .map(|id| BulkFailure {
+                message: format!(
+                    "{id} isn't available on this computer yet. Refresh, then try again."
+                ),
+                id,
+            })
+            .collect();
+    }
+    // Each package is its own transaction, so one that fails its checks
+    // leaves the others to finish and reports its own message.
+    for entry in plan.entries.into_iter().filter(|entry| entry.will_run) {
+        let Some((source, snapshot, _)) = sources
+            .iter()
+            .find(|(_, _, items)| items.iter().any(|item| item.id == entry.id))
+        else {
+            continue;
+        };
         let outcome = match action {
             BulkAction::Install | BulkAction::Replace => {
-                bulk_install(&paths, &source, &snapshot, &entry, action, trust_approved)
+                bulk_install(&paths, source, snapshot, &entry, action, trust_approved)
             }
             BulkAction::Uninstall => {
-                install::uninstall_item_components(&paths, &source, &entry.id, None, false)
+                install::uninstall_item_components(&paths, source, &entry.id, None, false)
             }
         };
         match outcome {
@@ -904,7 +994,13 @@ mod tests {
         .expect("install review");
         let ledger = crate::executor::read_ledger(&paths).expect("ledger");
 
-        let entries = bulk_entries(&paths, &ledger, &snapshot, BulkAction::Install);
+        let entries = plan_entries(
+            &paths,
+            &ledger,
+            &snapshot,
+            snapshot.catalog.items.values(),
+            BulkAction::Install,
+        );
         assert_eq!(entries[0].status, ItemStatus::PartiallyInstalled);
         assert!(!entries[0].will_run);
     }

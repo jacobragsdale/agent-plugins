@@ -61,6 +61,21 @@ pub(crate) struct Me {
     pub(crate) admin: bool,
     #[serde(default)]
     pub(crate) groups: Vec<String>,
+    #[serde(default)]
+    pub(crate) teams: Vec<TeamMembership>,
+    /// Suggestions on the caller's packages that wait for their answer.
+    #[serde(default)]
+    pub(crate) suggestions_waiting: u64,
+}
+
+/// A team the caller belongs to, as `/api/me` lists it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TeamMembership {
+    pub(crate) namespace: String,
+    pub(crate) display_name: String,
+    #[serde(default)]
+    pub(crate) owner: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -90,9 +105,35 @@ pub(crate) struct IndexPackage {
     pub(crate) installs: u64,
     #[serde(default)]
     pub(crate) installed_base: u64,
-    /// The package or its namespace has an access list; the caller is on it.
+    /// Only some people may see it: the package or its space is private.
     #[serde(default)]
     pub(crate) restricted: bool,
+    /// The caller sees it only because it was shared with them.
+    #[serde(default)]
+    pub(crate) shared_with_you: bool,
+}
+
+/// A named list of packages that install together, from the index.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IndexBundle {
+    pub(crate) id: String,
+    pub(crate) namespace: String,
+    pub(crate) bundle_id: String,
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) description: String,
+    pub(crate) publisher: IndexPublisher,
+    pub(crate) lane: String,
+    /// Canonical ids of the members the caller may see.
+    #[serde(default)]
+    pub(crate) members: Vec<String>,
+    #[serde(default)]
+    pub(crate) updated_at: String,
+    #[serde(default)]
+    pub(crate) restricted: bool,
+    #[serde(default)]
+    pub(crate) shared_with_you: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -102,6 +143,11 @@ pub(crate) struct Index {
     pub(crate) generated_at: String,
     #[serde(default)]
     pub(crate) packages: Vec<IndexPackage>,
+    #[serde(default)]
+    pub(crate) bundles: Vec<IndexBundle>,
+    /// Packages their publisher or an admin pulled from every PC.
+    #[serde(default)]
+    pub(crate) revoked: Vec<String>,
 }
 
 impl Index {
@@ -366,6 +412,102 @@ pub(crate) fn index_with_cache(cache_base: &Path) -> Option<Index> {
 pub(crate) fn read_cached_index(cache_base: &Path) -> Option<Index> {
     let bytes = std::fs::read(cache_base.join(INDEX_CACHE_FILE)).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+/// Calls `/api/{path}` as the caller and returns the body of a successful
+/// answer. A read is retried like every other request; a change is sent once,
+/// so it never happens twice. A failed answer becomes its problem title.
+pub(crate) fn api(
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<String, String> {
+    let url = format!("{}/api/{path}", base_url()?);
+    let client = client()?;
+    let request = || {
+        let mut request = client.request(method.clone(), &url);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        authorize(request, &url)
+    };
+    let response = if method == reqwest::Method::GET {
+        send(&url, request)?
+    } else {
+        request()?
+            .send()
+            .map_err(|error| describe_error(&url, &error))?
+    };
+    if !response.status().is_success() {
+        return Err(failure(&url, response));
+    }
+    response
+        .text()
+        .map_err(|error| describe_error(&url, &error))
+}
+
+/// [`api`], read as JSON.
+pub(crate) fn api_json<T: serde::de::DeserializeOwned>(
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<T, String> {
+    let text = api(method, path, body)?;
+    serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "The marketplace answered /api/{path} with something Agent Plugins can't read: {error}"
+        )
+    })
+}
+
+/// A space's name, checked so it can go into a URL path.
+pub(crate) fn namespace_path(namespace: &str) -> Result<&str, String> {
+    crate::manifest::validate_source_id(namespace)
+        .map(|()| namespace)
+        .map_err(|_| format!("{namespace} is not a space name such as data-team."))
+}
+
+/// `ns` or `ns/id`, checked as marketplace names so it can go into a URL path.
+pub(crate) fn target_path(target: &str) -> Result<&str, String> {
+    let (namespace, id) = match target.split_once('/') {
+        Some((namespace, id)) => (namespace, Some(id)),
+        None => (target, None),
+    };
+    let valid = crate::manifest::validate_source_id(namespace).is_ok()
+        && id.is_none_or(|id| crate::manifest::validate_package_id(id, "package").is_ok());
+    if valid {
+        Ok(target)
+    } else {
+        Err(format!(
+            "{target} is not a marketplace name such as data-team or data-team/review."
+        ))
+    }
+}
+
+/// `value` percent-encoded for a query string.
+pub(crate) fn query(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+/// The code of a marketplace link (`https://<marketplace>/l/<code>`), or the
+/// bare code itself.
+pub(crate) fn link_code(link: &str) -> Result<String, String> {
+    let link = link.trim();
+    let code = link
+        .rsplit_once("/l/")
+        .map_or(link, |(_, code)| code)
+        .trim_end_matches('/');
+    let valid = (8..=64).contains(&code.len())
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    if valid {
+        Ok(code.to_string())
+    } else {
+        Err(format!(
+            "{link} is not a marketplace link. Copy the whole link, which ends in /l/ and a code."
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -912,6 +1054,25 @@ mod tests {
             "queued events go first, and only the newest heartbeat is kept"
         );
         assert!(!outbox.exists());
+    }
+
+    #[test]
+    fn reads_link_codes_and_checks_names() {
+        assert_eq!(
+            link_code("https://marketplace.example.com/l/Xk3qZ9_-abcdEFGH12345w/"),
+            Ok("Xk3qZ9_-abcdEFGH12345w".to_string())
+        );
+        assert_eq!(
+            link_code(" Xk3qZ9_-abcdEFGH12345w "),
+            Ok("Xk3qZ9_-abcdEFGH12345w".to_string())
+        );
+        assert!(link_code("https://marketplace.example.com/l/../admin").is_err());
+        assert!(link_code("short").is_err());
+        assert_eq!(target_path("data-team/review"), Ok("data-team/review"));
+        assert!(target_path("data-team/review/extra").is_err());
+        assert!(target_path("../admin").is_err());
+        assert!(namespace_path("data-team/review").is_err());
+        assert_eq!(query("CORP\\jane doe"), "CORP%5Cjane+doe");
     }
 
     #[test]
