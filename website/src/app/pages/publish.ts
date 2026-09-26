@@ -19,9 +19,9 @@ import { pickedArchive, Problem, UploadPicker, VersionFields } from "./publish-p
 type Mode = "new" | "upload" | "suggest";
 
 const headings: Readonly<Record<Mode, readonly [string, string]>> = {
-  new: ["Share a skill", "Share a skill you already use. Drop its folder or zip here, and everyone you choose can install it."],
-  upload: ["New version", "Upload the updated files. They replace the current version once published."],
-  suggest: ["Suggest a change", "Upload your improved files. The owners read them and decide whether to publish them."]
+  new: ["Share a skill", "Upload a skill folder or zip. You choose who can install it."],
+  upload: ["New version", "The files you upload replace the current version when you publish."],
+  suggest: ["Suggest a change", "Upload your improved files. The owners decide whether to publish them."]
 };
 
 @Component({

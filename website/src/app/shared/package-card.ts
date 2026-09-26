@@ -9,58 +9,49 @@ import { LaneBadge } from "./lane-badge";
   selector: "app-package-card",
   imports: [RouterLink, AccessBadge, InstallButton, LaneBadge],
   template: `
-    <article class="card item">
-      <div class="row head">
-        <h3>
-          <a class="name" [routerLink]="link()">{{ item().name }}</a>
-        </h3>
-        <app-access-badge [restricted]="item().restricted" [sharedWithYou]="item().sharedWithYou" />
-      </div>
-      <p class="description">{{ item().description }}</p>
-      <div class="row meta">
+    <div class="head">
+      <h3>
+        <a class="name" [routerLink]="link()">{{ item().name }}</a>
+      </h3>
+      <app-access-badge [restricted]="item().restricted" [sharedWithYou]="item().sharedWithYou" />
+    </div>
+    <p class="description">{{ item().description }}</p>
+    <div class="foot">
+      <div class="meta">
         <app-lane-badge [lane]="item().lane" [publisher]="item().publisher.displayName" />
-        <span class="kind">{{ kind() }}</span>
-      </div>
-      <div class="row foot muted">
-        <span>v{{ item().version }}</span>
-        <span>·</span>
-        <span>{{ age() }}</span>
         @if (item().installedBase > 0) {
-          <span>·</span>
-          <span>{{ item().installedBase }} using it</span>
+          <span>· {{ item().installedBase }} using it</span>
+        }
+        @if (hasServer()) {
+          <span class="badge" title="Runs a small program on your PC">MCP server</span>
         }
       </div>
       @if (install()) {
         <app-install-button class="install" [target]="item().id" label="Install" [compact]="true" />
       }
-    </article>
+    </div>
   `,
   styles: `
     :host {
-      display: block;
-    }
-    .item {
       position: relative;
       display: grid;
-      gap: 0.6rem;
-      height: 100%;
-      transition:
-        border-color 120ms,
-        box-shadow 120ms,
-        transform 120ms;
+      grid-template-rows: auto 1fr auto;
+      gap: 0.375rem;
+      padding: 1rem 1.125rem;
+      background: var(--card);
+      border: var(--border);
+      border-radius: var(--radius);
+      transition: border-color 120ms;
       &:hover,
       &:focus-within {
-        border-color: var(--mat-sys-primary);
-        box-shadow: 0 8px 24px color-mix(in srgb, var(--mat-sys-shadow) 12%, transparent);
-        transform: translateY(-1px);
+        border-color: var(--mat-sys-outline);
       }
     }
     .head {
+      display: flex;
+      align-items: baseline;
       justify-content: space-between;
-      flex-wrap: nowrap;
-      h3 {
-        margin: 0;
-      }
+      gap: 0.5rem;
     }
     /* The name's link covers the card, so the whole card opens the skill; the install button sits above it. */
     .name {
@@ -76,38 +67,39 @@ import { LaneBadge } from "./lane-badge";
         outline: none;
       }
     }
-    .install {
-      position: relative;
-      z-index: 1;
+    :host:has(.name:focus-visible) {
+      outline: 2px solid var(--mat-sys-primary);
+      outline-offset: 2px;
     }
     .description {
       margin: 0;
       color: var(--muted);
+      font: var(--mat-sys-body-medium);
       display: -webkit-box;
-      -webkit-line-clamp: 3;
+      -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
-    .meta,
     .foot {
-      gap: 0.4rem;
-      font: var(--mat-sys-body-small);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      min-height: 36px;
+      margin-top: 0.375rem;
     }
-    .kind {
-      color: var(--muted);
-    }
-    .foot {
-      margin-top: auto;
+    .install {
+      position: relative;
+      z-index: 1;
     }
   `
 })
 export class PackageCard {
   public readonly item = input.required<IndexPackage>();
-  public readonly age = input.required<string>();
   public readonly install = input(true);
 
   protected readonly link = computed(() => ["/p", this.item().namespace, this.item().packageId]);
-  protected readonly kind = computed(() => describeKinds(this.item().componentKinds));
+  protected readonly hasServer = computed(() => this.item().componentKinds.includes("mcpServer"));
 }
 
 /** "Skill", "MCP server", or "Skill + MCP server", in words non-developers know. */

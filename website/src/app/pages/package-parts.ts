@@ -23,26 +23,33 @@ import { copyText, runTask } from "../shared/tasks";
   imports: [LaneBadge, AccessBadge],
   template: `
     <h1>{{ item().name }}</h1>
-    <div class="row badges">
+    <div class="meta">
       @if (entry(); as listed) {
         <app-lane-badge [lane]="listed.lane" [publisher]="listed.publisher.displayName" />
       }
       <app-access-badge [restricted]="item().effective === 'private'" [sharedWithYou]="item().sharedWithYou" [showPublic]="item().owned" />
-      <span class="badge">{{ kinds() }}</span>
+      @if (kinds() !== "Skill") {
+        <span class="badge">{{ kinds() }}</span>
+      }
       @for (tag of item().tags; track tag) {
-        <span class="badge tag">#{{ tag }}</span>
+        <span class="tag">{{ tag }}</span>
       }
     </div>
     <p class="lead">{{ item().description }}</p>
   `,
   styles: `
-    .badges {
-      gap: 0.4rem;
-      margin-bottom: 0.75rem;
+    :host {
+      display: grid;
+      gap: 0.5rem;
+    }
+    .lead {
+      margin: 0.25rem 0 0;
     }
     .tag {
-      background: none;
       border: var(--border);
+      border-radius: 4px;
+      padding: 0 0.4rem;
+      font: var(--mat-sys-label-medium);
     }
   `
 })
@@ -76,14 +83,10 @@ export class PackageHeader {
     :host {
       display: grid;
       gap: 1rem;
-      border-color: var(--mat-sys-primary);
     }
     .detail {
       margin: 0;
       flex: 1 1 20rem;
-    }
-    .danger {
-      color: var(--mat-sys-error);
     }
   `,
   host: { class: "card", role: "region", "aria-label": "Your package" }
@@ -206,12 +209,7 @@ export class VersionFiles {
       <a mat-button [href]="href" download><app-icon name="download" />Download</a>
     }
     @if (owner()) {
-      <button mat-button type="button" [class.withdraw]="!version().yanked" (click)="toggle()">{{ version().yanked ? "Restore" : "Withdraw" }}</button>
-    }
-  `,
-  styles: `
-    .withdraw {
-      color: var(--mat-sys-error);
+      <button mat-button type="button" [class.danger]="!version().yanked" (click)="toggle()">{{ version().yanked ? "Restore" : "Withdraw" }}</button>
     }
   `,
   host: { class: "row" }
@@ -388,10 +386,9 @@ export class PackageUsage {
   selector: "app-get-it",
   imports: [InstallButton],
   template: `
-    <h2>Get it</h2>
     @if (item().liveVersion !== null && !item().revoked) {
       <app-install-button [target]="item().id" />
-      <p class="muted">Agent Plugins asks before it adds anything, then adds it to every AI assistant it found.</p>
+      <p class="muted">Adds it to every AI assistant on your PC. The app asks first.</p>
       @if (skills().length > 0) {
         <details class="skills">
           <summary>Install one skill instead</summary>
@@ -406,7 +403,7 @@ export class PackageUsage {
         </details>
       }
     } @else {
-      <p class="muted">Not available to install. Its status above says why.</p>
+      <p class="muted">Not available to install. The status above says why.</p>
     }
     @if (hasServer()) {
       <p class="notice">

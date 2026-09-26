@@ -31,12 +31,12 @@
 
 <footer class="foot">
   <div class="bar">
-    <span>Agent Plugins</span>
-    <a routerLink="/help/publish">Publishing help</a>
-    <a routerLink="/help/source-manifest">Manifest reference</a>
+    <a routerLink="/help/publish">Command line</a>
+    <a routerLink="/help/source-manifest">Source manifest</a>
+    <a routerLink="/help/source-repository">Source repository</a>
     <span class="spacer"></span>
     @if (session.health(); as health) {
-      <span class="muted">Server {{ health.serverVersion }}</span>
+      <span>Server {{ health.serverVersion }}</span>
     }
   </div>
 </footer>

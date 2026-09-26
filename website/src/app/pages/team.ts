@@ -34,10 +34,6 @@ import { copyText, runTask } from "../shared/tasks";
     </div>
   `,
   styles: `
-    h2 {
-      font: var(--mat-sys-title-large);
-      margin: 0;
-    }
     p {
       margin: 0;
     }
@@ -86,10 +82,6 @@ export class TeamInvite {
     </ul>
   `,
   styles: `
-    h2 {
-      font: var(--mat-sys-title-large);
-      margin: 0;
-    }
     ul {
       list-style: none;
       margin: 0;
@@ -105,9 +97,6 @@ export class TeamInvite {
     }
     .grow {
       flex: 1 1 16rem;
-    }
-    .danger {
-      color: var(--mat-sys-error);
     }
   `,
   host: { class: "card stack" }
@@ -137,24 +126,18 @@ export class TeamMembers {
   selector: "app-team",
   imports: [RouterLink, MatButtonModule, MatProgressBarModule, Icon, TeamInvite, TeamMembers],
   template: `
-    <div class="page stack">
+    <div class="page stack narrow">
       <a class="back" routerLink="/teams"><app-icon name="arrowBack" />Teams</a>
       @if (team.hasValue()) {
         @let current = team.value();
-        <header class="row">
-          <div class="grow">
+        <div class="page-head">
+          <div>
             <h1>{{ current.displayName }}</h1>
-            <div class="row badges">
-              <span class="badge team"><app-icon name="group" />Team · {{ current.namespace }}</span>
-              <span class="badge"
-                ><app-icon [name]="current.visibility === 'private' ? 'lock' : 'visibility'" />{{ current.visibility === "private" ? "Private" : "Everyone can see its skills" }}</span
-              >
-              <span class="badge">{{ roles[current.role] }}</span>
-            </div>
+            <p class="meta">{{ current.namespace }} · {{ current.visibility === "private" ? "Private" : "Everyone can see its skills" }} · {{ roles[current.role] }}</p>
           </div>
-          <a mat-stroked-button routerLink="/browse" [queryParams]="{ space: current.namespace }">See its skills</a>
-          <a mat-flat-button routerLink="/publish" [queryParams]="{ to: current.namespace }"><app-icon name="add" />Share a skill</a>
-        </header>
+          <a mat-button routerLink="/browse" [queryParams]="{ space: current.namespace }">See its skills</a>
+          <a mat-stroked-button routerLink="/publish" [queryParams]="{ to: current.namespace }"><app-icon name="add" />Share a skill here</a>
+        </div>
 
         <app-team-invite [team]="current" [busy]="busy()" (copyLink)="copyInvite(current)" (resetLink)="resetInvite()" />
         <app-team-members [team]="current" [busy]="busy()" [you]="you()" (add)="add($event)" (setOwner)="setOwner($event, !$event.owner)" (remove)="remove($event)" (leave)="leave(current)" />
@@ -181,33 +164,8 @@ export class TeamMembers {
     </div>
   `,
   styles: `
-    .page {
-      max-width: 960px;
-    }
-    .back {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      color: var(--muted);
-      text-decoration: none;
-      font: var(--mat-sys-label-large);
-      width: fit-content;
-    }
-    .grow {
-      flex: 1 1 16rem;
-    }
-    .badges {
-      gap: 0.4rem;
-    }
-    h2 {
-      font: var(--mat-sys-title-large);
-      margin: 0;
-    }
     p {
       margin: 0;
-    }
-    .danger {
-      color: var(--mat-sys-error);
     }
   `
 })

@@ -44,10 +44,6 @@ const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
     }
   `,
   styles: `
-    h2 {
-      font: var(--mat-sys-title-large);
-      margin: 0;
-    }
     p {
       margin: 0;
     }
@@ -108,20 +104,7 @@ export class SuggestionSummary {
     </div>
   `,
   styles: `
-    .back {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      color: var(--muted);
-      text-decoration: none;
-      font: var(--mat-sys-label-large);
-      width: fit-content;
-    }
     h1 {
-      margin: 0;
-    }
-    h2 {
-      font: var(--mat-sys-title-large);
       margin: 0;
     }
   `

@@ -6,7 +6,6 @@ import { MatSnackBar } from "@angular/material/snack-bar";
 import { RouterLink } from "@angular/router";
 import type { IndexPackage } from "../api";
 import { Api, ApiError } from "../api";
-import { formatAge } from "../format";
 import { Session } from "../session";
 import { AccessBadge } from "../shared/access-badge";
 import { Icon } from "../shared/icon";
@@ -27,31 +26,31 @@ import { runTask } from "../shared/tasks";
       <app-shared-banner [by]="shared()" what="this bundle" />
       @if (bundle.hasValue()) {
         @let current = bundle.value();
-        <header class="stack">
-          <h1><app-icon name="layers" /> {{ current.name }}</h1>
-          <div class="row badges">
+        <header class="stack tight">
+          <h1>{{ current.name }}</h1>
+          <div class="meta">
             <app-lane-badge [lane]="current.lane" [publisher]="current.publisher.displayName" />
+            <span>· Bundle of {{ count() }}</span>
             <app-access-badge [restricted]="current.effective === 'private'" [showPublic]="current.owned" />
-            <span class="badge">Bundle · {{ count() }}</span>
           </div>
-          <p class="lead">{{ current.description }}</p>
+          @if (current.description.length > 0) {
+            <p class="lead">{{ current.description }}</p>
+          }
         </header>
 
-        <section class="card stack">
-          <h2>Install them all</h2>
+        <div class="row">
           <app-install-button [target]="current.id" [covers]="current.members" label="Install all" />
-          <p class="muted">Agent Plugins asks before it adds anything. You can also install just the ones you want below.</p>
           @if (current.owned) {
-            <div class="row">
-              <a mat-stroked-button [routerLink]="['/b', current.namespace, current.bundleId, 'edit']"><app-icon name="edit" />Edit</a>
-              <button mat-stroked-button type="button" (click)="openShare()"><app-icon name="share" />Share</button>
-            </div>
+            <span class="spacer"></span>
+            <a mat-button [routerLink]="['/b', current.namespace, current.bundleId, 'edit']"><app-icon name="edit" />Edit</a>
+            <button mat-button type="button" (click)="openShare()"><app-icon name="share" />Share</button>
           }
-        </section>
+        </div>
 
+        <h2>Skills in this bundle</h2>
         <div class="grid">
           @for (item of members(); track item.id) {
-            <app-package-card [item]="item" [age]="age(item)" />
+            <app-package-card [item]="item" />
           }
         </div>
       } @else if (bundle.error(); as error) {
@@ -66,35 +65,11 @@ import { runTask } from "../shared/tasks";
     </div>
   `,
   styles: `
-    .back {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      color: var(--muted);
-      text-decoration: none;
-      font: var(--mat-sys-label-large);
-      width: fit-content;
-    }
-    h1 {
-      display: flex;
-      align-items: center;
+    .tight {
       gap: 0.5rem;
+    }
+    .lead {
       margin: 0;
-    }
-    h2 {
-      font: var(--mat-sys-title-large);
-      margin: 0;
-    }
-    .badges {
-      gap: 0.4rem;
-    }
-    .card p {
-      margin: 0;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
-      gap: 1rem;
     }
   `
 })
@@ -129,10 +104,6 @@ export class BundlePage {
     const hidden = bundle?.hiddenMembers ?? 0;
     return `${members === 1 ? "1 skill" : `${String(members)} skills`}${hidden > 0 ? `, and ${String(hidden)} not shared with you` : ""}`;
   });
-
-  protected age(item: IndexPackage): string {
-    return formatAge(item.publishedAt);
-  }
 
   protected status(error: unknown): number {
     return ApiError.from(error).status;

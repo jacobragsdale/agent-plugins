@@ -8,8 +8,6 @@ import { MatSelectModule } from "@angular/material/select";
 import { RouterLink } from "@angular/router";
 import type { IndexBundle, IndexPackage, Lane } from "../api";
 import { Api, ApiError } from "../api";
-import { formatAge } from "../format";
-import { Session } from "../session";
 import { BundleGrid } from "../shared/bundle-card";
 import { Icon } from "../shared/icon";
 import { PackageCard } from "../shared/package-card";
@@ -20,20 +18,24 @@ type LaneFilter = Lane | "all";
 /** What narrowed the list: someone shared a space, or a team page asked for its skills. */
 @Component({
   selector: "app-browse-scope",
-  imports: [RouterLink, MatButtonModule, SharedBanner],
+  imports: [RouterLink, SharedBanner],
   template: `
     <app-shared-banner [by]="shared()" what="these skills" />
     @if (space() !== undefined) {
-      <div class="row">
-        <span class="badge team">Showing {{ spaceName() }} only</span>
-        <a mat-button routerLink="/browse">Show everything</a>
-      </div>
+      <p class="notice row">
+        Showing {{ spaceName() }} only.
+        <a routerLink="/browse">Show everything</a>
+      </p>
     }
   `,
   styles: `
     :host {
       display: grid;
       gap: 1rem;
+    }
+    p {
+      margin: 0;
+      gap: 0.5rem;
     }
   `
 })
@@ -48,56 +50,52 @@ export class BrowseScope {
   imports: [RouterLink, MatButtonModule, MatButtonToggleModule, MatFormFieldModule, MatInputModule, MatProgressBarModule, MatSelectModule, Icon, PackageCard, BundleGrid, BrowseScope],
   template: `
     <div class="page stack">
-      <header class="row">
-        <div class="grow">
-          <h1>Browse skills</h1>
-          <p class="lead">Everything here also appears in the Agent Plugins app on your PC, ready to install.</p>
-        </div>
-        <a mat-stroked-button routerLink="/bundles/new"><app-icon name="layers" />New bundle</a>
-      </header>
+      <div class="page-head">
+        <h1>Skills</h1>
+        <a mat-button routerLink="/bundles/new"><app-icon name="layers" />New bundle</a>
+      </div>
 
       <app-browse-scope [shared]="shared()" [space]="space()" [spaceName]="spaceName()" />
 
-      <div class="filters row">
+      <div class="filters">
         <mat-form-field appearance="outline" subscriptSizing="dynamic" class="search">
-          <mat-label>Search</mat-label>
           <app-icon matPrefix name="search" class="prefix" />
-          <input matInput type="search" placeholder="Meeting notes, code review, tone…" [value]="query()" (input)="setQuery($event)" />
+          <input matInput type="search" aria-label="Search skills" placeholder="Search skills" [value]="query()" (input)="setQuery($event)" />
         </mat-form-field>
-        <mat-button-toggle-group aria-label="Who published it" [value]="lane()" (change)="setLane($event.value)">
+        <mat-button-toggle-group aria-label="Who published it" hideSingleSelectionIndicator [value]="lane()" (change)="setLane($event.value)">
           <mat-button-toggle value="all">All</mat-button-toggle>
           <mat-button-toggle value="official">Official</mat-button-toggle>
           <mat-button-toggle value="team">Teams</mat-button-toggle>
           <mat-button-toggle value="personal">People</mat-button-toggle>
         </mat-button-toggle-group>
-        <mat-form-field appearance="outline" subscriptSizing="dynamic" class="teams">
-          <mat-label>Teams</mat-label>
-          <mat-select multiple placeholder="All teams" [disabled]="teams().length === 0" [value]="selectedTeams()" (selectionChange)="setTeams($event.value)">
-            @for (team of teams(); track team.namespace) {
-              <mat-option [value]="team.namespace">{{ team.displayName }} ({{ team.count }})</mat-option>
-            }
-          </mat-select>
-        </mat-form-field>
+        @if (lane() === "team" && teams().length > 1) {
+          <mat-form-field appearance="outline" subscriptSizing="dynamic" class="teams">
+            <mat-select multiple aria-label="Teams" placeholder="All teams" [value]="selectedTeams()" (selectionChange)="setTeams($event.value)">
+              @for (team of teams(); track team.namespace) {
+                <mat-option [value]="team.namespace">{{ team.displayName }} ({{ team.count }})</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+        }
       </div>
 
       @if (index.hasValue()) {
         <app-bundle-grid [bundles]="bundles()" />
-        <p class="muted" aria-live="polite">{{ summary() }}</p>
-        @if (results().length > 0) {
-          <div class="grid">
-            @for (item of results(); track item.id) {
-              <app-package-card [item]="item" [age]="age(item)" />
-            }
-          </div>
-        } @else {
-          <div class="card empty">
-            <h2>Nothing matches yet</h2>
-            <p class="muted">Try a shorter search, or share the skill you were looking for.</p>
-            @if (session.me()) {
-              <a mat-flat-button routerLink="/publish">Share a skill</a>
-            }
-          </div>
-        }
+        <section class="stack" aria-labelledby="skills-heading">
+          <h2 id="skills-heading">
+            Skills <span class="count">{{ results().length }}</span>
+          </h2>
+          <p class="visually-hidden" aria-live="polite">{{ summary() }}</p>
+          @if (results().length > 0) {
+            <div class="grid">
+              @for (item of results(); track item.id) {
+                <app-package-card [item]="item" />
+              }
+            </div>
+          } @else {
+            <p class="muted">No skills match. <a routerLink="/publish">Share the one you were looking for</a>.</p>
+          }
+        </section>
       } @else if (index.error(); as error) {
         <p class="problem">{{ message(error) }}</p>
       } @else {
@@ -107,29 +105,28 @@ export class BrowseScope {
   `,
   styles: `
     .filters {
-      justify-content: space-between;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem;
     }
     .search {
-      flex: 1 1 20rem;
-      max-width: 36rem;
+      flex: 0 1 26rem;
     }
     .teams {
-      flex: 0 1 16rem;
+      flex: 0 1 14rem;
     }
     .prefix {
       margin: 0 0.25rem 0 0.75rem;
       color: var(--muted);
     }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
-      gap: 1rem;
+    .count {
+      margin-left: 0.25rem;
+      color: var(--muted);
+      font-weight: 400;
     }
-    .empty {
-      text-align: center;
-    }
-    .grow {
-      flex: 1 1 24rem;
+    section {
+      margin-top: 0.5rem;
     }
   `
 })
@@ -139,7 +136,6 @@ export class BrowsePage {
   /** Who shared the space, when the page was opened from a share link. */
   public readonly shared = input<string>();
 
-  protected readonly session = inject(Session);
   protected readonly query = signal("");
   protected readonly lane = signal<LaneFilter>("all");
   /** Team namespaces to show; only set while the Teams lane is on, and empty shows every team. */
@@ -224,10 +220,6 @@ export class BrowsePage {
       this.selectedTeams.set(value.filter((team): team is string => typeof team === "string"));
       this.lane.set("team");
     }
-  }
-
-  protected age(item: IndexPackage): string {
-    return formatAge(item.publishedAt);
   }
 
   protected message(error: unknown): string {

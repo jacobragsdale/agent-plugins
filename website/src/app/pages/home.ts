@@ -1,17 +1,18 @@
 import { HttpClient } from "@angular/common/http";
-import { NgOptimizedImage } from "@angular/common";
 import { Component, computed, inject, input, resource } from "@angular/core";
 import { MatButtonModule } from "@angular/material/button";
 import { RouterLink } from "@angular/router";
 import { firstValueFrom } from "rxjs";
 import { z } from "zod";
+import { Api } from "../api";
 import { formatBytes } from "../format";
-import { Session } from "../session";
 import { Icon } from "../shared/icon";
+import { PackageCard } from "../shared/package-card";
 
+/** Tauri names installers like "Agent Plugins_0.2.2_x64-setup.exe", so spaces are allowed; each segment is URL-encoded. */
 const safeReleasePath = z
   .string()
-  .regex(/^[a-zA-Z0-9._/-]+$/u)
+  .regex(/^[a-zA-Z0-9 ._/-]+$/u)
   .refine((path) => !path.startsWith("/") && !path.split("/").includes(".."), "unsafe path");
 
 const platformSchema = z
@@ -31,7 +32,7 @@ const platformSchema = z
 type Platform = z.infer<typeof platformSchema>;
 
 /** `/downloads/manifest.json`, written by whoever publishes an installer (server/releases/). */
-const downloadsSchema = z.strictObject({ schemaVersion: z.literal(1), release: z.strictObject({ version: z.string(), platforms: z.array(platformSchema).readonly() }).readonly() }).readonly();
+export const downloadsSchema = z.strictObject({ schemaVersion: z.literal(1), release: z.strictObject({ version: z.string(), platforms: z.array(platformSchema).readonly() }).readonly() }).readonly();
 
 function detectPlatform(): Platform["id"] | null {
   const agent = navigator.userAgent.toLowerCase();
@@ -49,64 +50,84 @@ interface Download {
   readonly recommended: boolean;
 }
 
+/** One platform's installer, as a row of the download panel. */
 @Component({
   selector: "app-download-card",
   imports: [MatButtonModule, Icon],
   template: `
-    <div class="row">
-      <h3>{{ download().platform.name }}</h3>
-      @if (download().recommended) {
-        <span class="badge official">Your computer</span>
+    <div class="line">
+      <div class="text">
+        <strong>{{ download().platform.name }}</strong>
+        @if (download().recommended) {
+          <span class="badge">This PC</span>
+        }
+        <div class="meta">{{ download().details }}</div>
+      </div>
+      @if (download().href; as href) {
+        <a download [href]="href" [matButton]="download().recommended ? 'filled' : 'outlined'"><app-icon name="download" />Download</a>
+      } @else {
+        <span class="muted">Not available yet</span>
       }
     </div>
-    @if (download().href; as href) {
-      <a mat-flat-button download [href]="href"><app-icon name="download" />Download for {{ download().platform.name }}</a>
-      <p class="muted details">{{ download().details }}</p>
-    } @else {
-      <p class="muted">Not available yet.</p>
-    }
     @if (download().platform.sha256; as sha256) {
-      <details class="technical">
-        <summary>Checksum</summary>
-        <code class="checksum">SHA-256 {{ sha256 }}</code>
+      <details>
+        <summary>SHA-256</summary>
+        <code>{{ sha256 }}</code>
       </details>
     }
   `,
   styles: `
     :host {
       display: grid;
+      gap: 0.25rem;
+      padding-top: 0.75rem;
+      border-top: var(--border);
+    }
+    .line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       gap: 0.75rem;
-      align-content: start;
     }
-    :host(.recommended) {
-      border-color: var(--mat-sys-primary);
+    .badge {
+      margin-left: 0.4rem;
     }
-    h3,
-    p {
-      margin: 0;
-    }
-    .details {
+    details {
       font: var(--mat-sys-body-small);
+      color: var(--muted);
     }
-    .checksum {
+    summary {
+      cursor: pointer;
+    }
+    code {
       display: block;
-      margin-top: 0.5rem;
+      margin-top: 0.25rem;
       overflow-wrap: anywhere;
     }
-  `,
-  host: { class: "card", "[class.recommended]": "download().recommended" }
+  `
 })
 export class DownloadCard {
   public readonly download = input.required<Download>();
 }
 
-@Component({ selector: "app-home", imports: [NgOptimizedImage, RouterLink, MatButtonModule, Icon, DownloadCard], templateUrl: "./home.html", styleUrl: "./home.scss" })
+@Component({ selector: "app-home", imports: [RouterLink, MatButtonModule, DownloadCard, PackageCard], templateUrl: "./home.html", styleUrl: "./home.scss" })
 export class HomePage {
-  protected readonly session = inject(Session);
   private readonly http = inject(HttpClient);
+  private readonly api = inject(Api);
   private readonly detected = detectPlatform();
 
   protected readonly release = resource({ loader: async () => downloadsSchema.parse(await firstValueFrom(this.http.get<unknown>("/downloads/manifest.json"))).release });
+
+  /** The index needs a signed-in caller; without one the page simply has no skills to show. */
+  private readonly index = resource({ loader: () => this.api.index() });
+  protected readonly popular = computed(() =>
+    this.index.hasValue()
+      ? this.index
+          .value()
+          .packages.toSorted((left, right) => right.installedBase - left.installedBase)
+          .slice(0, 6)
+      : []
+  );
 
   protected readonly downloads = computed<readonly Download[]>(() => {
     if (!this.release.hasValue()) {

@@ -13,10 +13,7 @@ import { Icon } from "./icon";
   template: `
     @if (session.me(); as me) {
       <a mat-flat-button routerLink="/publish"><app-icon name="add" />Share a skill</a>
-      <span class="who" [title]="me.account">
-        <app-icon name="person" />
-        <span class="who-name">{{ me.displayName }}</span>
-      </span>
+      <span class="who" [title]="me.account">{{ me.displayName }}</span>
       @if (session.devSignedIn()) {
         <button mat-button type="button" (click)="signOut()">Sign out</button>
       }
@@ -26,17 +23,14 @@ import { Icon } from "./icon";
     :host {
       display: flex;
       align-items: center;
-      gap: 1rem;
+      gap: 0.75rem;
     }
     .who {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
       color: var(--muted);
       font: var(--mat-sys-label-large);
     }
     @media (max-width: 720px) {
-      .who-name {
+      .who {
         display: none;
       }
     }
@@ -56,13 +50,13 @@ export class Account {
   template: `
     <div class="bar">
       <a class="brand" routerLink="/">
-        <img ngSrc="icon.svg" alt="" width="32" height="32" priority />
-        <span>Agent Plugins</span>
+        <img ngSrc="icon.svg" alt="" width="26" height="26" priority />
+        <span class="name">Agent Plugins</span>
       </a>
       <nav aria-label="Main">
         <a routerLink="/browse" routerLinkActive="active" ariaCurrentWhenActive="page">Browse</a>
         @if (session.me(); as me) {
-          <a routerLink="/mine" routerLinkActive="active" ariaCurrentWhenActive="page" class="with-count">
+          <a routerLink="/mine" routerLinkActive="active" ariaCurrentWhenActive="page">
             My skills
             @if (me.suggestionsWaiting > 0) {
               <span class="count">{{ me.suggestionsWaiting }}<span class="visually-hidden"> suggestions waiting for you</span></span>
@@ -71,7 +65,7 @@ export class Account {
           <a routerLink="/teams" routerLinkActive="active" ariaCurrentWhenActive="page">Teams</a>
         }
         @if (session.isAdmin()) {
-          <a routerLink="/admin" routerLinkActive="active" ariaCurrentWhenActive="page" class="with-count">
+          <a routerLink="/admin" routerLinkActive="active" ariaCurrentWhenActive="page">
             Admin
             @if (session.pendingReviews() > 0) {
               <span class="count">{{ session.pendingReviews() }}<span class="visually-hidden"> waiting for an admin</span></span>

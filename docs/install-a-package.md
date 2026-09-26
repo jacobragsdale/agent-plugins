@@ -99,7 +99,7 @@ Select **Cancel** instead, and nothing at all is written. Approval is never reme
 
 ## Install from the marketplace website
 
-The marketplace website can hand a package to the app, so you can install while you read about it. Open the marketplace in your browser, pick a package, and select **Install in Agent Plugins** under **Get it**.
+The marketplace website can hand a package to the app, so you can install while you read about it. Open the marketplace in your browser, pick a package, and select **Install in Agent Plugins** beside its files.
 
 The first time, the browser asks before it opens the app:
 

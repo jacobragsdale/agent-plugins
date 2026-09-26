@@ -11,44 +11,43 @@ import { LaneBadge } from "./lane-badge";
   selector: "app-bundle-card",
   imports: [RouterLink, AccessBadge, Icon, InstallButton, LaneBadge],
   template: `
-    <article class="card item">
-      <div class="row head">
-        <h3>
-          <a class="name" [routerLink]="link()"><app-icon name="layers" />{{ bundle().name }}</a>
-        </h3>
-        <app-access-badge [restricted]="bundle().restricted" [sharedWithYou]="bundle().sharedWithYou" />
-      </div>
-      @if (bundle().description.length > 0) {
-        <p class="description">{{ bundle().description }}</p>
-      }
-      <div class="row meta">
+    <div class="head">
+      <h3>
+        <a class="name" [routerLink]="link()"><app-icon name="layers" />{{ bundle().name }}</a>
+      </h3>
+      <app-access-badge [restricted]="bundle().restricted" [sharedWithYou]="bundle().sharedWithYou" />
+    </div>
+    @if (bundle().description.length > 0) {
+      <p class="description">{{ bundle().description }}</p>
+    }
+    <div class="foot">
+      <div class="meta">
         <app-lane-badge [lane]="bundle().lane" [publisher]="bundle().publisher.displayName" />
-        <span class="muted">{{ count() }}</span>
+        <span>· {{ count() }}</span>
       </div>
       <app-install-button class="install" [target]="bundle().id" [covers]="bundle().members" label="Install all" [compact]="true" />
-    </article>
+    </div>
   `,
   styles: `
     :host {
-      display: block;
-    }
-    .item {
       position: relative;
       display: grid;
-      gap: 0.6rem;
-      height: 100%;
-      border-style: dashed;
+      align-content: space-between;
+      gap: 0.375rem;
+      padding: 1rem 1.125rem;
+      background: var(--card);
+      border: var(--border);
+      border-radius: var(--radius);
       &:hover,
       &:focus-within {
-        border-color: var(--mat-sys-primary);
+        border-color: var(--mat-sys-outline);
       }
     }
     .head {
+      display: flex;
+      align-items: baseline;
       justify-content: space-between;
-      flex-wrap: nowrap;
-      h3 {
-        margin: 0;
-      }
+      gap: 0.5rem;
     }
     .name {
       display: inline-flex;
@@ -56,6 +55,9 @@ import { LaneBadge } from "./lane-badge";
       gap: 0.4rem;
       color: inherit;
       text-decoration: none;
+      app-icon {
+        color: var(--muted);
+      }
       &::after {
         content: "";
         position: absolute;
@@ -66,13 +68,21 @@ import { LaneBadge } from "./lane-badge";
         outline: none;
       }
     }
+    :host:has(.name:focus-visible) {
+      outline: 2px solid var(--mat-sys-primary);
+      outline-offset: 2px;
+    }
     .description {
       margin: 0;
       color: var(--muted);
+      font: var(--mat-sys-body-medium);
     }
-    .meta {
-      gap: 0.4rem;
-      font: var(--mat-sys-body-small);
+    .foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      min-height: 36px;
     }
     .install {
       position: relative;
@@ -94,29 +104,25 @@ export class BundleCard {
   template: `
     @if (bundles().length > 0) {
       <section class="stack" aria-labelledby="bundles-heading">
-        <h2 id="bundles-heading">Bundles</h2>
+        <h2 id="bundles-heading">
+          Bundles <span class="count">{{ bundles().length }}</span>
+        </h2>
         <div class="grid">
           @for (bundle of bundles(); track bundle.id) {
             <app-bundle-card [bundle]="bundle" />
           }
         </div>
       </section>
-      <h2>Skills</h2>
     }
   `,
   styles: `
-    :host {
-      display: grid;
-      gap: 1rem;
+    section {
+      margin-top: 0.5rem;
     }
-    h2 {
-      font: var(--mat-sys-title-large);
-      margin: 0.5rem 0 0;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
-      gap: 1rem;
+    .count {
+      margin-left: 0.25rem;
+      color: var(--muted);
+      font-weight: 400;
     }
   `
 })

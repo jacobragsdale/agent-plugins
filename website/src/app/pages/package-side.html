@@ -1,16 +1,14 @@
 <app-get-it class="card" [item]="item()" [skills]="skills()" [hasServer]="hasServer()" />
 
 @if (entry(); as listed) {
-  <section class="card facts">
-    <dl>
-      <dt>Version</dt>
-      <dd>{{ listed.version }}</dd>
-      <dt>Updated</dt>
-      <dd>{{ updated() }}</dd>
-      <dt>People using it</dt>
-      <dd>{{ listed.installedBase }}</dd>
-    </dl>
-  </section>
+  <dl class="facts">
+    <dt>Version</dt>
+    <dd>{{ listed.version }}</dd>
+    <dt>Updated</dt>
+    <dd>{{ updated() }}</dd>
+    <dt>Using it</dt>
+    <dd>{{ listed.installedBase === 1 ? "1 person" : listed.installedBase + " people" }}</dd>
+  </dl>
 }
 
 @if (version(); as shown) {

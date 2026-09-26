@@ -22,6 +22,7 @@ function text(event: Event): string {
   template: `
     <form class="card stack create" (submit)="create($event)">
       <h2>Create a team</h2>
+      <p class="muted">Everyone on a team can publish skills to its space. Send the invite link to bring colleagues in.</p>
       <mat-form-field appearance="outline">
         <mat-label>Team name</mat-label>
         <input matInput maxlength="120" required placeholder="Data Engineering" [value]="displayName()" (input)="displayName.set(text($event))" />
@@ -51,10 +52,6 @@ function text(event: Event): string {
     </form>
   `,
   styles: `
-    h2 {
-      font: var(--mat-sys-title-large);
-      margin: 0;
-    }
     .tight {
       gap: 0.4rem;
     }
@@ -120,22 +117,19 @@ export class CreateTeam {
   selector: "app-teams",
   imports: [RouterLink, MatProgressBarModule, Icon, CreateTeam],
   template: `
-    <div class="page stack">
-      <header>
-        <h1>Teams</h1>
-        <p class="lead">A team shares one space: everyone on it can publish skills there. Start one, then send the invite link to your colleagues.</p>
-      </header>
+    <div class="page stack narrow">
+      <h1>Teams</h1>
 
       @if (teams.hasValue()) {
-        <ul class="teams">
+        <ul class="list-box teams">
           @for (team of teams.value(); track team.namespace) {
-            <li class="card">
+            <li>
               <app-icon name="group" />
               <div class="grow">
                 <a class="name" [routerLink]="['/teams', team.namespace]">{{ team.displayName }}</a>
                 <p class="muted">{{ team.memberCount === 1 ? "1 member" : team.memberCount + " members" }} · {{ team.visibility === "private" ? "Private" : "Everyone can see its skills" }}</p>
               </div>
-              <span class="badge team">{{ team.role === "owner" ? "Owner" : "Member" }}</span>
+              <span class="muted">{{ team.role === "owner" ? "Owner" : "Member" }}</span>
             </li>
           } @empty {
             <li class="muted">You aren't on a team yet.</li>
@@ -151,20 +145,12 @@ export class CreateTeam {
     </div>
   `,
   styles: `
-    .page {
-      max-width: 880px;
-    }
-    .teams {
-      list-style: none;
-      margin: 0;
-      padding: 0;
-      display: grid;
-      gap: 0.75rem;
-      li.card {
-        display: flex;
-        align-items: center;
-        gap: 1rem;
-        padding: 1rem 1.25rem;
+    .teams li {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      app-icon {
+        color: var(--muted);
       }
     }
     .grow {
@@ -174,7 +160,7 @@ export class CreateTeam {
       }
     }
     .name {
-      font: var(--mat-sys-title-medium);
+      font-weight: 600;
       color: inherit;
       text-decoration: none;
       &:hover {

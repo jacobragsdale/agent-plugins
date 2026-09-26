@@ -24,7 +24,7 @@ import { runTask } from "./tasks";
         <a mat-flat-button routerLink="/" fragment="download"><app-icon name="download" />{{ app.action }}</a>
         <button mat-button type="button" (click)="open('install')">{{ app.anyway }}</button>
       } @else if (state() === "install") {
-        <button mat-flat-button type="button" (click)="open('install')"><app-icon name="download" />{{ label() }}</button>
+        <button type="button" [matButton]="compact() ? 'outlined' : 'filled'" (click)="open('install')"><app-icon name="download" />{{ label() }}</button>
       }
     </div>
     @if (opening()) {

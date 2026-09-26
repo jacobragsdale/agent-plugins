@@ -1,4 +1,4 @@
-<div class="page stack">
+<div class="page narrow stack">
   <header>
     <h1>{{ heading() }}</h1>
     <p class="lead">{{ lead() }}</p>
@@ -15,7 +15,7 @@
     <form class="stack" (submit)="submit($event)">
       @if (mode() === "new") {
         <section class="card stack">
-          <h2 id="space-heading">Who is it for?</h2>
+          <h2 id="space-heading">Publish to</h2>
           <mat-radio-group class="spaces" aria-labelledby="space-heading" [value]="space()" (change)="setSpace($event.value)">
             @for (option of spaces(); track option.namespace) {
               <mat-radio-button [value]="option.namespace">{{ option.label }}</mat-radio-button>
@@ -34,7 +34,7 @@
 
       @if (suggesting()) {
         <section class="card stack">
-          <h2>What did you change?</h2>
+          <h2>Your changes</h2>
           <mat-form-field appearance="outline">
             <mat-label>Tell the owners what you changed and why</mat-label>
             <textarea matInput rows="4" required maxlength="4096" [value]="message()" (input)="setMessage($event)"></textarea>

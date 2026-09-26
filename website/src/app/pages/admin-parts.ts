@@ -44,10 +44,6 @@ import { describeKinds } from "../shared/package-card";
       display: grid;
       gap: 1rem;
     }
-    h2 {
-      font: var(--mat-sys-title-large);
-      margin: 0;
-    }
     .grow {
       flex: 1 1 20rem;
       p {

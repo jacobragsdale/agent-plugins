@@ -34,7 +34,7 @@ function destination(result: LinkResult): { readonly commands: readonly string[]
   selector: "app-link",
   imports: [RouterLink, MatButtonModule, MatProgressBarModule, Icon],
   template: `
-    <div class="page">
+    <div class="page narrow">
       @if (preview.hasValue()) {
         @let link = preview.value();
         @if (link.kind === "invite") {
@@ -62,11 +62,6 @@ function destination(result: LinkResult): { readonly commands: readonly string[]
         <mat-progress-bar mode="indeterminate" aria-label="Opening the link" />
       }
     </div>
-  `,
-  styles: `
-    .page {
-      max-width: 720px;
-    }
   `
 })
 export class LinkPage {

@@ -1,81 +1,42 @@
-<section class="hero">
-  <div class="page hero-inner">
-    <div class="hero-copy">
-      <p class="eyebrow">For Claude, ChatGPT, Microsoft 365 Copilot, and more</p>
-      <h1>Skills for your AI assistants, shared across the company.</h1>
+<div class="page stack">
+  <div class="intro">
+    <div class="copy">
+      <h1>Skills for the AI assistants on your PC</h1>
       <p class="lead">
-        A skill teaches your assistant how to do one job well, like summarizing meetings the way your team likes. Find skills your colleagues made, add them in one click, or share your own.
+        A skill teaches an assistant one job, like turning rough notes into a standup update. Install one here and Agent Plugins adds it to Claude, ChatGPT, and Microsoft 365 Copilot.
       </p>
       <div class="row">
-        <a mat-flat-button routerLink="/browse">
-          <app-icon name="search" />
-          Browse skills
-        </a>
-        <a mat-stroked-button href="#download">
-          <app-icon name="download" />
-          Get the app
-        </a>
-        @if (session.me()) {
-          <a mat-button routerLink="/publish">
-            <app-icon name="add" />
-            Share a skill
-          </a>
-        }
+        <a mat-flat-button routerLink="/browse">Browse skills</a>
+        <a mat-button routerLink="/help/publish">Use the command line</a>
       </div>
     </div>
-    <div class="hero-art" aria-hidden="true">
-      <img ngSrc="icon.svg" alt="" width="200" height="200" priority />
-    </div>
-  </div>
-</section>
 
-<div class="page stack">
-  <section aria-labelledby="how-heading">
-    <h2 id="how-heading">How it works</h2>
-    <ol class="steps">
-      <li class="card">
-        <span class="step">1</span>
-        <h3>Install Agent Plugins</h3>
-        <p class="muted">A small app for your PC. It finds the AI assistants you already use.</p>
-      </li>
-      <li class="card">
-        <span class="step">2</span>
-        <h3>Pick the skills you want</h3>
-        <p class="muted">Click Install here or in the app, and it's added to each of your assistants. Bundles add several at once.</p>
-      </li>
-      <li class="card">
-        <span class="step">3</span>
-        <h3>Share what works for you</h3>
-        <p class="muted">Upload a skill you already have, for everyone, your team, or just the people you pick. Start a team to publish together.</p>
-      </li>
-    </ol>
-  </section>
-
-  <section id="download" aria-labelledby="download-heading">
-    <h2 id="download-heading">Download</h2>
-    @if (release.isLoading()) {
-      <p class="muted">Checking for the latest version…</p>
-    } @else if (release.error()) {
-      <p class="notice">Downloads are temporarily unavailable. Try again later, or ask your IT team for the installer.</p>
-    } @else if (release.value(); as current) {
-      <div class="downloads">
+    <section id="download" class="card download" aria-labelledby="download-heading">
+      <h2 id="download-heading">Get the app</h2>
+      @if (release.isLoading()) {
+        <p class="muted">Checking for the latest version…</p>
+      } @else if (release.error()) {
+        <p class="muted">Downloads are unavailable right now. Try again later, or ask your IT team for the installer.</p>
+      } @else if (release.value(); as current) {
         @for (download of downloads(); track download.platform.id) {
           <app-download-card [download]="download" />
         }
-      </div>
-      <p class="muted">Version {{ current.version }}</p>
-    }
-  </section>
+        <p class="meta">Version {{ current.version }}</p>
+      }
+    </section>
+  </div>
 
-  <section class="card technical-strip" aria-labelledby="tech-heading">
-    <app-icon name="code" />
-    <div>
-      <h2 id="tech-heading">For technical users</h2>
-      <p class="muted">
-        Publish from a terminal or a coding agent with the <code>agent-plugins</code> command, or read the <a routerLink="/help/source-manifest">source manifest</a> and
-        <a routerLink="/help/source-repository">source repository</a> references.
-      </p>
-      <a mat-stroked-button routerLink="/help/publish">Publishing from the command line</a>
-    </div>
-  </section>
+  @if (popular().length > 0) {
+    <section class="stack" aria-labelledby="popular-heading">
+      <div class="page-head">
+        <h2 id="popular-heading">Most used</h2>
+        <a mat-button routerLink="/browse">All skills</a>
+      </div>
+      <div class="grid">
+        @for (item of popular(); track item.id) {
+          <app-package-card [item]="item" />
+        }
+      </div>
+    </section>
+  }
 </div>

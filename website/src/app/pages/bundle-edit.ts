@@ -124,10 +124,6 @@ export class BundleIdentity {
     </ul>
   `,
   styles: `
-    h2 {
-      font: var(--mat-sys-title-large);
-      margin: 0;
-    }
     ul {
       list-style: none;
       margin: 0;
@@ -192,10 +188,10 @@ export class BundleMembers {
   selector: "app-bundle-edit",
   imports: [RouterLink, MatButtonModule, MatFormFieldModule, MatInputModule, MatProgressBarModule, Icon, BundleIdentity, BundleMembers],
   template: `
-    <div class="page stack">
+    <div class="page stack narrow">
       <header>
         <h1>{{ editing() ? "Edit bundle" : "New bundle" }}</h1>
-        <p class="lead">Group skills that work well together, yours or anyone's. People install them all at once, or just the ones they want.</p>
+        <p class="lead">Group skills, yours or anyone's, so people can install them together.</p>
       </header>
 
       @if (ready()) {
@@ -232,14 +228,6 @@ export class BundleMembers {
         <mat-progress-bar mode="indeterminate" aria-label="Loading" />
       }
     </div>
-  `,
-  styles: `
-    .page {
-      max-width: 880px;
-    }
-    .danger {
-      color: var(--mat-sys-error);
-    }
   `
 })
 export class BundleEditPage {

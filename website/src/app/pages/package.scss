@@ -1,17 +1,7 @@
-.back {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  color: var(--muted);
-  text-decoration: none;
-  font: var(--mat-sys-label-large);
-  width: fit-content;
-}
-
 .columns {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 20rem;
-  gap: 1.5rem;
+  grid-template-columns: minmax(0, 1fr) 18rem;
+  gap: 2rem;
   align-items: start;
 }
 
@@ -26,4 +16,11 @@
 }
 .tab {
   padding-top: 1rem;
+}
+
+// On a narrow screen the install panel comes before the files.
+@media (max-width: 900px) {
+  app-package-side {
+    order: -1;
+  }
 }

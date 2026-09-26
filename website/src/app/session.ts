@@ -171,7 +171,9 @@ export class Session {
 
 /** Admin pages load only for admins; everyone else lands on the home page. */
 export const adminOnly: CanMatchFn = async () => {
+  // inject() works only before the first await.
   const session = inject(Session);
+  const router = inject(Router);
   const state = await session.ready();
-  return state.kind === "signed-in" && state.me.admin ? true : inject(Router).createUrlTree(["/"]);
+  return state.kind === "signed-in" && state.me.admin ? true : router.createUrlTree(["/"]);
 };

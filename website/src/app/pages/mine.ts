@@ -26,7 +26,6 @@ interface Row {
 interface Group {
   readonly space: Space;
   readonly label: string;
-  readonly badge: string;
   readonly rows: readonly Row[];
   readonly bundles: readonly Bundle[];
 }
@@ -40,9 +39,9 @@ function laneLabel(space: Space): string {
     case "official":
       return "Official";
     case "team":
-      return "Team space";
+      return "Team";
     case "personal":
-      return "Your space";
+      return "Personal";
   }
 }
 
@@ -53,8 +52,9 @@ function laneLabel(space: Space): string {
   template: `
     @if (waiting().length > 0) {
       <section class="card stack">
-        <h2>Waiting on you ({{ waiting().length }})</h2>
-        <p class="muted">People suggested changes to your skills. Open one to read it, then publish it or say why not.</p>
+        <h2>
+          Suggestions waiting for you <span class="count">{{ waiting().length }}</span>
+        </h2>
         <app-suggestion-list [suggestions]="waiting()" [showPackage]="true" />
       </section>
     }
@@ -70,12 +70,9 @@ function laneLabel(space: Space): string {
       display: grid;
       gap: 1rem;
     }
-    h2 {
-      font: var(--mat-sys-title-large);
-      margin: 0;
-    }
-    p {
-      margin: 0;
+    .count {
+      color: var(--muted);
+      font-weight: 400;
     }
   `
 })
@@ -89,103 +86,97 @@ export class MineSuggestions {
   selector: "app-space-section",
   imports: [RouterLink, MatButtonModule, Icon],
   template: `
-    <div class="row">
+    <div class="head">
       <h2>{{ group().space.displayName }}</h2>
-      <span [class]="group().badge">{{ group().label }}</span>
-      <span class="badge"><app-icon [name]="group().space.visibility === 'private' ? 'lock' : 'visibility'" />{{ group().space.visibility === "private" ? "Private" : "Public" }}</span>
+      <span class="meta">{{ group().label }} · {{ group().space.visibility === "private" ? "Private" : "Public" }}</span>
       <span class="spacer"></span>
       @if (group().space.lane === "team") {
         <a mat-button [routerLink]="['/teams', group().space.namespace]"><app-icon name="group" />Team</a>
       }
       @if (group().space.lane !== "team" || group().space.role === "owner") {
-        <button mat-button type="button" (click)="share.emit(group().space)"><app-icon name="share" />Who can see this space</button>
+        <button mat-button type="button" (click)="share.emit(group().space)"><app-icon name="share" />Who can see it</button>
       }
     </div>
-    <ul class="rows">
+    <ul class="list-box">
       @for (row of group().rows; track row.item.id) {
-        <li class="card">
+        <li>
           <div class="text">
             <a class="name" [routerLink]="['/p', row.item.namespace, row.item.packageId]">{{ row.item.name }}</a>
-            <p class="muted">{{ row.item.description }}</p>
-            <div class="row status">
-              <span [class]="row.status.badge"><app-icon [name]="row.icon" />{{ row.status.label }}</span>
-              <span class="muted">{{ row.status.detail }}</span>
-            </div>
+            <p class="muted">{{ row.status.tone === "live" ? row.item.description : row.status.detail }}</p>
           </div>
-          <div class="actions">
-            <span class="muted">Updated {{ row.updated }}</span>
-            <a mat-stroked-button [routerLink]="['/p', row.item.namespace, row.item.packageId]">Open</a>
-          </div>
+          <span [class]="row.status.badge"><app-icon [name]="row.icon" />{{ row.status.label }}</span>
+          <span class="when muted">{{ row.updated }}</span>
         </li>
-      } @empty {
-        <li class="muted empty">Nothing here yet.</li>
       }
       @for (bundle of group().bundles; track bundle.id) {
-        <li class="card">
+        <li>
           <div class="text">
-            <a class="name" [routerLink]="['/b', bundle.namespace, bundle.bundleId]"><app-icon name="layers" /> {{ bundle.name }}</a>
+            <a class="name" [routerLink]="['/b', bundle.namespace, bundle.bundleId]"><app-icon name="layers" />{{ bundle.name }}</a>
             <p class="muted">Bundle · {{ bundle.members.length === 1 ? "1 skill" : bundle.members.length + " skills" }}</p>
           </div>
-          <div class="actions">
-            <a mat-stroked-button [routerLink]="['/b', bundle.namespace, bundle.bundleId, 'edit']">Edit</a>
-          </div>
+          <a mat-button [routerLink]="['/b', bundle.namespace, bundle.bundleId, 'edit']">Edit</a>
         </li>
+      }
+      @if (group().rows.length + group().bundles.length === 0) {
+        <li class="muted">Nothing here yet.</li>
       }
     </ul>
   `,
   styles: `
     :host {
       display: grid;
-      gap: 1rem;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0.5rem;
       margin-top: 1rem;
     }
-    h2 {
-      font: var(--mat-sys-title-large);
-      margin: 0;
-    }
-    .empty {
-      list-style: none;
-    }
-    .rows {
-      list-style: none;
-      margin: 0;
-      padding: 0;
-      display: grid;
-      gap: 0.75rem;
+    .head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.25rem 0.75rem;
     }
     li {
       display: flex;
-      flex-wrap: wrap;
-      gap: 1rem;
       align-items: center;
-      padding: 1rem 1.25rem;
+      gap: 0.5rem 1rem;
     }
     .text {
-      flex: 1 1 24rem;
+      flex: 1;
+      min-width: 0;
       p {
-        margin: 0.25rem 0 0.5rem;
+        margin: 0.125rem 0 0;
+        font: var(--mat-sys-body-medium);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
     }
     .name {
       display: inline-flex;
       align-items: center;
-      gap: 0.3rem;
-      font: var(--mat-sys-title-medium);
+      gap: 0.35rem;
+      font-weight: 600;
       text-decoration: none;
       color: inherit;
       &:hover {
         color: var(--mat-sys-primary);
       }
     }
-    .status {
-      gap: 0.5rem;
+    .when {
+      flex: 0 0 7.5rem;
+      text-align: right;
       font: var(--mat-sys-body-small);
     }
-    .actions {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      font: var(--mat-sys-body-small);
+    @media (max-width: 600px) {
+      li {
+        flex-wrap: wrap;
+      }
+      .text {
+        flex-basis: 100%;
+      }
+      .when {
+        flex-basis: auto;
+      }
     }
   `
 })
@@ -199,15 +190,10 @@ export class SpaceSection {
   imports: [RouterLink, MatButtonModule, MatProgressBarModule, Icon, MineSuggestions, SpaceSection],
   template: `
     <div class="page stack">
-      <header class="row">
-        <div>
-          <h1>My skills</h1>
-          <p class="lead">Everything you've shared, and whether it's live.</p>
-        </div>
-        <span class="spacer"></span>
-        <a mat-stroked-button routerLink="/bundles/new"><app-icon name="layers" />New bundle</a>
-        <a mat-flat-button routerLink="/publish"><app-icon name="add" />Share a skill</a>
-      </header>
+      <div class="page-head">
+        <h1>My skills</h1>
+        <a mat-button routerLink="/bundles/new"><app-icon name="layers" />New bundle</a>
+      </div>
 
       @if (session.state().kind === "signed-out") {
         <div class="card">
@@ -225,12 +211,6 @@ export class SpaceSection {
         }
       }
     </div>
-  `,
-  styles: `
-    h2 {
-      font: var(--mat-sys-title-large);
-      margin: 0;
-    }
   `
 })
 export class MinePage {
@@ -250,7 +230,6 @@ export class MinePage {
     return spaces.map((space) => ({
       space,
       label: laneLabel(space),
-      badge: `badge ${space.lane}`,
       bundles: bundles.filter((bundle) => bundle.namespace === space.namespace),
       rows: packages
         .filter((item) => item.namespace === space.namespace)
