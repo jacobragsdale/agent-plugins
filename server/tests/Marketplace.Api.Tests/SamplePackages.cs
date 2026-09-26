@@ -45,7 +45,7 @@ public static class SamplePackages
         return Zip(files);
     }
 
-    /// <summary>A skill plus an MCP server in one package: the kind of version that always waits for review.</summary>
+    /// <summary>A skill plus an MCP server in one package: the public sees it once an admin approves the server.</summary>
     public static byte[] SkillAndMcpPackage(string ns, string packageId, string description)
     {
         var manifest = $$"""
@@ -110,6 +110,20 @@ public static class SamplePackages
 
     public static string Skill(string name, string description) =>
         $"---\nname: {name}\ndescription: {description}\n---\n\nFollow these steps.\n";
+
+    public static MultipartFormDataContent SuggestionForm(byte[] archive, string? message)
+    {
+        var form = new MultipartFormDataContent();
+        var file = new ByteArrayContent(archive);
+        file.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
+        form.Add(file, "archive", "package.zip");
+        if (message is not null)
+        {
+            form.Add(new StringContent(message), "message");
+        }
+
+        return form;
+    }
 
     public static MultipartFormDataContent PublishForm(byte[] archive, string version, string? tags = null, string? changelog = null)
     {

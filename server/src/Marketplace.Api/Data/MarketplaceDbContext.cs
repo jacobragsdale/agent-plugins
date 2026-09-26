@@ -20,6 +20,20 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
 
     public DbSet<AccessRule> AccessRules => Set<AccessRule>();
 
+    public DbSet<TeamMember> TeamMembers => Set<TeamMember>();
+
+    public DbSet<Person> People => Set<Person>();
+
+    public DbSet<Link> Links => Set<Link>();
+
+    public DbSet<Suggestion> Suggestions => Set<Suggestion>();
+
+    public DbSet<Bundle> Bundles => Set<Bundle>();
+
+    /// <summary>Serializes writes to one namespace until the surrounding transaction ends.</summary>
+    public async Task LockNamespaceAsync(string ns, CancellationToken cancellationToken) =>
+        await Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock(hashtext({ns}))", cancellationToken);
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Publisher>(entity =>
@@ -28,7 +42,63 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
             entity.Property(publisher => publisher.Namespace).HasMaxLength(16);
             entity.Property(publisher => publisher.Account).HasMaxLength(256);
             entity.Property(publisher => publisher.DisplayName).HasMaxLength(120);
+            entity.Property(publisher => publisher.Kind).HasConversion<string>().HasMaxLength(16);
             entity.HasIndex(publisher => publisher.Account);
+        });
+
+        modelBuilder.Entity<TeamMember>(entity =>
+        {
+            entity.HasKey(member => new { member.Namespace, member.Account });
+            entity.Property(member => member.Namespace).HasMaxLength(16);
+            entity.Property(member => member.Account).HasMaxLength(256);
+            entity.HasIndex(member => member.Account);
+        });
+
+        modelBuilder.Entity<Person>(entity =>
+        {
+            entity.HasKey(person => person.Account);
+            entity.Property(person => person.Account).HasMaxLength(256);
+            entity.Property(person => person.DisplayName).HasMaxLength(120);
+        });
+
+        modelBuilder.Entity<Link>(entity =>
+        {
+            entity.HasKey(link => link.Code);
+            entity.Property(link => link.Code).HasMaxLength(32);
+            entity.Property(link => link.Kind).HasMaxLength(16);
+            entity.Property(link => link.Target).HasMaxLength(81);
+            entity.Property(link => link.CreatedBy).HasMaxLength(256);
+            entity.HasIndex(link => new { link.Kind, link.Target }).IsUnique();
+        });
+
+        modelBuilder.Entity<Suggestion>(entity =>
+        {
+            entity.Property(suggestion => suggestion.StoragePath).HasMaxLength(512);
+            entity.Property(suggestion => suggestion.ArchiveDigest).HasMaxLength(64);
+            entity.Property(suggestion => suggestion.ManifestJson).HasColumnType("jsonb");
+            entity.Property(suggestion => suggestion.BaseVersion).HasMaxLength(64);
+            entity.Property(suggestion => suggestion.Message).HasMaxLength(4096);
+            entity.Property(suggestion => suggestion.SuggestedBy).HasMaxLength(256);
+            entity.Property(suggestion => suggestion.State).HasConversion<string>().HasMaxLength(16);
+            entity.Property(suggestion => suggestion.DecidedBy).HasMaxLength(256);
+            entity.Property(suggestion => suggestion.DecisionNote).HasMaxLength(2048);
+            entity.Property(suggestion => suggestion.AcceptedVersion).HasMaxLength(64);
+            entity.HasIndex(suggestion => suggestion.State);
+            entity.HasOne(suggestion => suggestion.Package)
+                .WithMany()
+                .HasForeignKey(suggestion => suggestion.PackageId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<Bundle>(entity =>
+        {
+            entity.HasKey(bundle => new { bundle.Namespace, bundle.BundleId });
+            entity.Property(bundle => bundle.Namespace).HasMaxLength(16);
+            entity.Property(bundle => bundle.BundleId).HasMaxLength(64);
+            entity.Property(bundle => bundle.Name).HasMaxLength(120);
+            entity.Property(bundle => bundle.Description).HasMaxLength(1024);
+            entity.Property(bundle => bundle.UpdatedBy).HasMaxLength(256);
+            entity.Ignore(bundle => bundle.CanonicalId);
         });
 
         modelBuilder.Entity<Package>(entity =>
@@ -37,6 +107,9 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
             entity.Property(package => package.PackageId).HasMaxLength(64);
             entity.Property(package => package.Name).HasMaxLength(120);
             entity.Property(package => package.Description).HasMaxLength(1024);
+            entity.Property(package => package.RevokedBy).HasMaxLength(256);
+            entity.Property(package => package.McpApprovedBy).HasMaxLength(256);
+            entity.Property(package => package.McpDeclineNote).HasMaxLength(2048);
             entity.HasIndex(package => new { package.Namespace, package.PackageId }).IsUnique();
             entity.Ignore(package => package.CanonicalId);
         });
@@ -49,9 +122,6 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
             entity.Property(version => version.ManifestJson).HasColumnType("jsonb");
             entity.Property(version => version.PublishedBy).HasMaxLength(256);
             entity.Property(version => version.Changelog).HasMaxLength(4096);
-            entity.Property(version => version.ReviewState).HasConversion<string>().HasMaxLength(16);
-            entity.Property(version => version.ReviewedBy).HasMaxLength(256);
-            entity.Property(version => version.ReviewNote).HasMaxLength(2048);
             entity.HasIndex(version => new { version.PackageId, version.Version }).IsUnique();
             entity.HasOne(version => version.Package)
                 .WithMany(package => package.Versions)
@@ -91,6 +161,7 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
         {
             entity.HasKey(rule => rule.Target);
             entity.Property(rule => rule.Target).HasMaxLength(81);
+            entity.Property(rule => rule.Visibility).HasConversion<string>().HasMaxLength(16);
             entity.Property(rule => rule.UpdatedBy).HasMaxLength(256);
         });
 

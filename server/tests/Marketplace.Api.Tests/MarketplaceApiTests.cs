@@ -9,7 +9,7 @@ using Xunit;
 
 namespace Marketplace.Api.Tests;
 
-public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassFixture<MarketplaceApiFactory>
+public sealed partial class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassFixture<MarketplaceApiFactory>
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
@@ -20,6 +20,7 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
         var health = await client.GetFromJsonAsync<JsonElement>("/api/health", Json, TestContext.Current.CancellationToken);
         Assert.Equal("0.1.0", health.GetProperty("minimumClientVersion").GetString());
         Assert.Contains("DevHeader", health.GetProperty("authSchemes").EnumerateArray().Select(scheme => scheme.GetString()));
+        Assert.False(health.GetProperty("adGroups").GetBoolean());
     }
 
     [Fact]
@@ -47,7 +48,7 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
         var archive = SamplePackages.SkillPackage("pubone", "greet");
         using var form = SamplePackages.PublishForm(archive, "1.0.0", "greeting, demo", "First release.");
         var published = await PublishLiveAsync(client, "pubone", "greet", form);
-        Assert.Equal("pending", published.GetProperty("reviewState").GetString());
+        Assert.False(published.GetProperty("waitingForPublicReview").GetBoolean());
         Assert.Equal("pubone/greet", published.GetProperty("id").GetString());
         Assert.Equal("1.0.0", published.GetProperty("version").GetString());
         Assert.Contains("pubone/greet/1.0.0.zip", factory.Store.Paths);
@@ -316,7 +317,8 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
         Assert.Equal(HttpStatusCode.OK, set.StatusCode);
         var document = await set.Content.ReadFromJsonAsync<JsonElement>(Json, TestContext.Current.CancellationToken);
         Assert.Equal("gatekeeper", document.GetProperty("target").GetString());
-        Assert.Equal(["TEST\\friend"], document.GetProperty("users").EnumerateArray().Select(user => user.GetString()).ToArray());
+        Assert.Equal(["TEST\\friend"], document.GetProperty("users").EnumerateArray().Select(user => user.GetProperty("account").GetString()).ToArray());
+        Assert.Equal("private", document.GetProperty("visibility").GetString());
 
         using var stranger = factory.ClientFor("TEST\\stranger2");
         await AssertHidden(stranger, "gatekeeper", "tool");
@@ -399,141 +401,18 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
     }
 
     [Fact]
-    public async Task Team_namespace_belongs_to_the_group()
-    {
-        using var outsider = factory.ClientFor("TEST\\outsider");
-        using var denied = SamplePackages.PublishForm(SamplePackages.SkillPackage("team-platform", "deploy"), "1.0.0");
-        Assert.Equal(HttpStatusCode.Forbidden, (await outsider.PostAsync("/api/packages/team-platform/deploy/versions", denied, TestContext.Current.CancellationToken)).StatusCode);
-
-        using var member = factory.ClientFor("TEST\\platformer", "platform team");
-        var me = await member.GetFromJsonAsync<JsonElement>("/api/me", Json, TestContext.Current.CancellationToken);
-        Assert.Contains("team-platform", me.GetProperty("namespaces").EnumerateArray().Select(ns => ns.GetString()));
-        Assert.Equal(["platform team"], me.GetProperty("groups").EnumerateArray().Select(group => group.GetString()).ToArray());
-        using var allowed = SamplePackages.PublishForm(SamplePackages.SkillPackage("team-platform", "deploy"), "1.0.0");
-        await PublishLiveAsync(member, "team-platform", "deploy", allowed);
-
-        var catalog = await outsider.GetFromJsonAsync<JsonElement>("/api/catalog", Json, TestContext.Current.CancellationToken);
-        var source = catalog.GetProperty("sources").EnumerateArray().Single(candidate => candidate.GetProperty("sourceId").GetString() == "team-platform");
-        Assert.Equal("Platform Team", source.GetProperty("publisher").GetString());
-        var index = await outsider.GetFromJsonAsync<JsonElement>("/api/index", Json, TestContext.Current.CancellationToken);
-        var entry = index.GetProperty("packages").EnumerateArray().Single(candidate => candidate.GetProperty("id").GetString() == "team-platform/deploy");
-        Assert.Equal("team", entry.GetProperty("lane").GetString());
-        Assert.Equal("Platform Team", entry.GetProperty("publisher").GetProperty("displayName").GetString());
-        Assert.False(entry.GetProperty("restricted").GetBoolean());
-
-        using var second = factory.ClientFor("TEST\\platformer2", "Platform Team");
-        Assert.Equal(HttpStatusCode.OK, (await second.PutAsJsonAsync("/api/access/team-platform", new { groups = new[] { "Platform Team" } }, Json, TestContext.Current.CancellationToken)).StatusCode);
-        await AssertHidden(outsider, "team-platform", "deploy");
-        await AssertVisible(member, "team-platform", "deploy");
-    }
-
-    [Fact]
-    public async Task First_version_waits_for_review_and_only_the_owner_sees_it()
+    public async Task An_admins_mcp_server_needs_no_approval()
     {
         var ct = TestContext.Current.CancellationToken;
-        using var owner = factory.ClientFor("TEST\\reviewee");
-        using var stranger = factory.ClientFor("TEST\\onlooker");
         using var admin = factory.ClientFor("TEST\\admin");
-        using (var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("reviewee", "draft"), "1.0.0"))
+        using (var form = SamplePackages.PublishForm(SamplePackages.SkillAndMcpPackage("official", "adminpick", "Picked by an admin."), "1.0.0"))
         {
-            var response = await owner.PostAsync("/api/packages/reviewee/draft/versions", form, ct);
-            Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-            Assert.Equal("pending", (await response.Content.ReadFromJsonAsync<JsonElement>(Json, ct)).GetProperty("reviewState").GetString());
+            Assert.False((await PublishLiveAsync(admin, "official", "adminpick", form)).GetProperty("waitingForPublicReview").GetBoolean());
         }
 
-        await AssertHidden(stranger, "reviewee", "draft");
-        Assert.Equal(HttpStatusCode.NotFound, (await stranger.GetAsync("/api/packages/reviewee/draft/versions/1.0.0/files", ct)).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await owner.GetAsync("/api/sources/reviewee/archive", ct)).StatusCode);
-        Assert.DoesNotContain("reviewee/draft", IndexIds(await owner.GetFromJsonAsync<JsonElement>("/api/index", Json, ct), "reviewee/"));
-
-        var detail = await owner.GetFromJsonAsync<JsonElement>("/api/packages/reviewee/draft", Json, ct);
-        Assert.Equal(JsonValueKind.Null, detail.GetProperty("liveVersion").ValueKind);
-        Assert.Equal("pending", detail.GetProperty("versions")[0].GetProperty("reviewState").GetString());
-        var mine = await owner.GetFromJsonAsync<JsonElement>("/api/mine", Json, ct);
-        Assert.Contains(mine.GetProperty("packages").EnumerateArray(), package => package.GetProperty("id").GetString() == "reviewee/draft");
-        Assert.Equal("personal", mine.GetProperty("spaces")[0].GetProperty("lane").GetString());
-        var files = await owner.GetFromJsonAsync<JsonElement>("/api/packages/reviewee/draft/versions/1.0.0/files", Json, ct);
-        Assert.Equal(["agent-plugins.json", "skills/draft/SKILL.md"], files.EnumerateArray().Select(file => file.GetProperty("path").GetString()).ToArray());
-
-        var queue = await admin.GetFromJsonAsync<JsonElement>("/api/admin/reviews", Json, ct);
-        var pending = queue.EnumerateArray().Single(review => review.GetProperty("id").GetString() == "reviewee/draft");
-        Assert.True(pending.GetProperty("firstVersion").GetBoolean());
-        Assert.Equal(HttpStatusCode.Forbidden, (await owner.GetAsync("/api/admin/reviews", ct)).StatusCode);
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await admin.PostAsJsonAsync("/api/admin/reviews/reviewee/draft/1.0.0", new { decision = "reject" }, Json, ct)).StatusCode);
-        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/reviewee/draft/1.0.0", new { decision = "reject", note = "Describe when to use it." }, Json, ct)).StatusCode);
-        Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsJsonAsync("/api/admin/reviews/reviewee/draft/1.0.0", new { decision = "approve" }, Json, ct)).StatusCode);
-        var rejected = (await owner.GetFromJsonAsync<JsonElement>("/api/packages/reviewee/draft", Json, ct)).GetProperty("versions")[0];
-        Assert.Equal("rejected", rejected.GetProperty("reviewState").GetString());
-        Assert.Equal("Describe when to use it.", rejected.GetProperty("reviewNote").GetString());
-
-        using (var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("reviewee", "draft"), "1.0.1"))
-        {
-            Assert.Equal("pending", (await PublishLiveAsync(owner, "reviewee", "draft", form)).GetProperty("reviewState").GetString());
-        }
-
-        await AssertVisible(stranger, "reviewee", "draft");
-        var strangerDetail = await stranger.GetFromJsonAsync<JsonElement>("/api/packages/reviewee/draft", Json, ct);
-        Assert.Equal(["1.0.1"], strangerDetail.GetProperty("versions").EnumerateArray().Select(version => version.GetProperty("version").GetString()).ToArray());
-        Assert.Equal(HttpStatusCode.NotFound, (await stranger.GetAsync("/api/packages/reviewee/draft/versions/1.0.0/files", ct)).StatusCode);
-        var skill = await stranger.GetAsync("/api/packages/reviewee/draft/versions/1.0.1/files/skills/draft/SKILL.md", ct);
-        Assert.Equal("text/plain; charset=utf-8", skill.Content.Headers.ContentType?.ToString());
-        Assert.Contains("name: draft", await skill.Content.ReadAsStringAsync(ct));
-        Assert.Equal(HttpStatusCode.NotFound, (await stranger.GetAsync("/api/packages/reviewee/draft/versions/1.0.1/files/../secret", ct)).StatusCode);
-
-        using (var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("reviewee", "draft", "Greets people warmly."), "1.1.0"))
-        {
-            Assert.Equal("approved", (await PublishLiveAsync(owner, "reviewee", "draft", form)).GetProperty("reviewState").GetString());
-        }
-
-        var entry = (await stranger.GetFromJsonAsync<JsonElement>("/api/index", Json, ct)).GetProperty("packages").EnumerateArray().Single(candidate => candidate.GetProperty("id").GetString() == "reviewee/draft");
-        Assert.Equal("1.1.0", entry.GetProperty("version").GetString());
-        Assert.Equal("Greets people warmly.", entry.GetProperty("description").GetString());
-    }
-
-    [Fact]
-    public async Task Versions_with_an_mcp_server_always_wait_and_leave_the_listing_alone()
-    {
-        var ct = TestContext.Current.CancellationToken;
-        using var owner = factory.ClientFor("TEST\\mcpowner");
-        using (var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("mcpowner", "db"), "1.0.0"))
-        {
-            await PublishLiveAsync(owner, "mcpowner", "db", form);
-        }
-
-        var etag = (await owner.GetAsync("/api/sources/mcpowner/archive", ct)).Headers.ETag?.Tag;
-        using (var form = SamplePackages.PublishForm(SamplePackages.SkillAndMcpPackage("mcpowner", "db", "Queries the database."), "1.1.0", "database"))
-        {
-            var response = await owner.PostAsync("/api/packages/mcpowner/db/versions", form, ct);
-            Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-            Assert.Equal("pending", (await response.Content.ReadFromJsonAsync<JsonElement>(Json, ct)).GetProperty("reviewState").GetString());
-        }
-
-        var before = (await owner.GetFromJsonAsync<JsonElement>("/api/index", Json, ct)).GetProperty("packages").EnumerateArray().Single(candidate => candidate.GetProperty("id").GetString() == "mcpowner/db");
-        Assert.Equal("1.0.0", before.GetProperty("version").GetString());
-        Assert.NotEqual("Queries the database.", before.GetProperty("description").GetString());
-        Assert.Empty(before.GetProperty("tags").EnumerateArray());
-        Assert.Equal(etag, (await owner.GetAsync("/api/sources/mcpowner/archive", ct)).Headers.ETag?.Tag);
-        using var admin = factory.ClientFor("TEST\\admin");
-        var pending = (await admin.GetFromJsonAsync<JsonElement>("/api/admin/reviews", Json, ct)).EnumerateArray().Single(review => review.GetProperty("id").GetString() == "mcpowner/db");
-        Assert.False(pending.GetProperty("firstVersion").GetBoolean());
-        Assert.Equal("1.0.0", pending.GetProperty("liveVersion").GetString());
-
-        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/mcpowner/db/1.1.0", new { decision = "approve" }, Json, ct)).StatusCode);
-        var after = (await owner.GetFromJsonAsync<JsonElement>("/api/index", Json, ct)).GetProperty("packages").EnumerateArray().Single(candidate => candidate.GetProperty("id").GetString() == "mcpowner/db");
-        Assert.Equal("1.1.0", after.GetProperty("version").GetString());
-        Assert.Equal("Queries the database.", after.GetProperty("description").GetString());
-        Assert.Equal(["database"], after.GetProperty("tags").EnumerateArray().Select(tag => tag.GetString()).ToArray());
-        Assert.NotEqual(etag, (await owner.GetAsync("/api/sources/mcpowner/archive", ct)).Headers.ETag?.Tag);
-    }
-
-    [Fact]
-    public async Task Admin_publishes_go_live_without_review()
-    {
-        using var admin = factory.ClientFor("TEST\\admin");
-        using var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("official", "adminpick"), "1.0.0");
-        var response = await admin.PostAsync("/api/packages/official/adminpick/versions", form, TestContext.Current.CancellationToken);
-        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-        Assert.Equal("approved", (await response.Content.ReadFromJsonAsync<JsonElement>(Json, TestContext.Current.CancellationToken)).GetProperty("reviewState").GetString());
+        using var stranger = factory.ClientFor("TEST\\adminpickfan");
+        await AssertVisible(stranger, "official", "adminpick");
+        Assert.Equal("approved", (await stranger.GetFromJsonAsync<JsonElement>("/api/packages/official/adminpick", Json, ct)).GetProperty("publicReview").GetProperty("state").GetString());
     }
 
     [Fact]
@@ -705,6 +584,8 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
         var officialMe = await official.GetFromJsonAsync<JsonElement>("/api/me", Json, ct);
         Assert.Equal("u-official", officialMe.GetProperty("namespace").GetString());
         Assert.DoesNotContain("official", officialMe.GetProperty("namespaces").EnumerateArray().Select(ns => ns.GetString()));
+        using var founder = factory.ClientFor("TEST\\platform.founder");
+        Assert.Equal(HttpStatusCode.Created, (await founder.PostAsJsonAsync("/api/teams", new { @namespace = "team-platform", displayName = "Platform Team" }, Json, ct)).StatusCode);
         using var team = factory.ClientFor("TEST\\team.platform");
         Assert.Equal("u-team-platform", (await team.GetFromJsonAsync<JsonElement>("/api/me", Json, ct)).GetProperty("namespace").GetString());
 
@@ -833,20 +714,12 @@ public sealed class MarketplaceApiTests(MarketplaceApiFactory factory) : IClassF
     private static JsonElement IndexEntry(JsonElement index, string id) =>
         index.GetProperty("packages").EnumerateArray().Single(candidate => candidate.GetProperty("id").GetString() == id);
 
-    /// <summary>Publishes and, when the version waits for review, approves it as an admin.</summary>
-    private async Task<JsonElement> PublishLiveAsync(HttpClient client, string ns, string packageId, MultipartFormDataContent form)
+    /// <summary>Publishes; every version goes live at once.</summary>
+    private static async Task<JsonElement> PublishLiveAsync(HttpClient client, string ns, string packageId, MultipartFormDataContent form)
     {
         var response = await client.PostAsync($"/api/packages/{ns}/{packageId}/versions", form, TestContext.Current.CancellationToken);
         Assert.True(response.StatusCode == HttpStatusCode.Created, await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
-        var published = await response.Content.ReadFromJsonAsync<JsonElement>(Json, TestContext.Current.CancellationToken);
-        if (published.GetProperty("reviewState").GetString() == "pending")
-        {
-            using var admin = factory.ClientFor("TEST\\admin");
-            var review = await admin.PostAsJsonAsync($"/api/admin/reviews/{ns}/{packageId}/{published.GetProperty("version").GetString()}", new { decision = "approve" }, Json, TestContext.Current.CancellationToken);
-            Assert.Equal(HttpStatusCode.NoContent, review.StatusCode);
-        }
-
-        return published;
+        return await response.Content.ReadFromJsonAsync<JsonElement>(Json, TestContext.Current.CancellationToken);
     }
 
     /// <summary>HEAD answers with the ETag the GET served, and a GET carrying the HEAD's ETag answers 304 with it.</summary>

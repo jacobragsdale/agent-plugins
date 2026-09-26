@@ -29,15 +29,29 @@ public sealed record IndexPackage(
     DateTime PublishedAt,
     int Installs,
     int InstalledBase,
-    bool Restricted);
+    bool Restricted,
+    bool SharedWithYou);
 
-public sealed record IndexDocument(DateTime GeneratedAt, IReadOnlyList<IndexPackage> Packages);
+public sealed record IndexBundle(
+    string Id,
+    string Namespace,
+    string BundleId,
+    string Name,
+    string Description,
+    IndexPublisher Publisher,
+    string Lane,
+    string[] Members,
+    DateTime UpdatedAt,
+    bool Restricted,
+    bool SharedWithYou);
+
+/// <summary><see cref="Revoked"/>: pulled packages the caller could see or last reported installed, for clients to uninstall.</summary>
+public sealed record IndexDocument(DateTime GeneratedAt, IReadOnlyList<IndexPackage> Packages, IReadOnlyList<IndexBundle> Bundles, IReadOnlyList<string> Revoked);
 
 public sealed class CatalogService(
     MarketplaceDbContext db,
     AccessService access,
     IOptions<ServerOptions> server,
-    IOptions<AuthOptions> auth,
     TimeProvider timeProvider)
 {
     private static readonly JsonSerializerOptions CatalogJson = new(JsonSerializerDefaults.Web) { WriteIndented = true };
@@ -90,9 +104,8 @@ public sealed class CatalogService(
 
     public async Task<IndexDocument> IndexAsync(MarketplaceIdentity identity, CancellationToken cancellationToken)
     {
-        // Only live versions: LatestVersion picks among the approved, non-yanked ones.
         var packages = await db.Packages.AsNoTracking()
-            .Include(package => package.Versions.Where(version => !version.Yanked && version.ReviewState == ReviewState.Approved))
+            .Include(package => package.Versions.Where(version => !version.Yanked))
             .ToListAsync(cancellationToken);
         var publishers = await db.Publishers.ToDictionaryAsync(publisher => publisher.Namespace, cancellationToken);
         var stats = await StatsAsync(cancellationToken);
@@ -101,7 +114,7 @@ public sealed class CatalogService(
         foreach (var package in packages.OrderBy(package => package.Namespace, StringComparer.Ordinal).ThenBy(package => package.PackageId, StringComparer.Ordinal))
         {
             var latest = PublishService.LatestVersion(package);
-            if (latest is null || !AccessService.IsVisible(rules, identity, package.Namespace, package.PackageId))
+            if (latest is null || !AccessService.IsVisible(rules, identity, package.Namespace, package.PackageId, PublishService.Gated(package)))
             {
                 continue;
             }
@@ -115,18 +128,49 @@ public sealed class CatalogService(
                 package.Name,
                 package.Description,
                 latest.Version,
-                new IndexPublisher(publisher?.Account ?? package.Namespace, publisher?.DisplayName ?? package.Namespace),
-                IdentityResolver.Lane(auth.Value, package.Namespace),
+                Publisher(package.Namespace, publisher),
+                IdentityResolver.Lane(package.Namespace, publisher),
                 package.Tags,
                 latest.ComponentKinds,
                 latest.PublishedAt,
                 installs,
                 installedBase,
-                rules.ContainsKey(package.CanonicalId) || rules.ContainsKey(package.Namespace)));
+                AccessService.Effective(rules, package.Namespace, package.PackageId).Private,
+                AccessService.SharedWith(rules, identity, package.Namespace, package.PackageId)));
         }
 
-        return new IndexDocument(timeProvider.GetUtcNow().UtcDateTime, entries);
+        var visible = entries.Select(entry => entry.Id).ToHashSet(StringComparer.Ordinal);
+        var bundles = (await db.Bundles.AsNoTracking().OrderBy(bundle => bundle.Namespace).ThenBy(bundle => bundle.BundleId).ToListAsync(cancellationToken))
+            .Where(bundle => AccessService.IsVisible(rules, identity, bundle.Namespace, bundle.BundleId))
+            .Select(bundle => (bundle, members: bundle.Members.Where(visible.Contains).ToArray()))
+            .Where(pair => pair.members.Length > 0)
+            .Select(pair => new IndexBundle(
+                pair.bundle.CanonicalId,
+                pair.bundle.Namespace,
+                pair.bundle.BundleId,
+                pair.bundle.Name,
+                pair.bundle.Description,
+                Publisher(pair.bundle.Namespace, publishers.GetValueOrDefault(pair.bundle.Namespace)),
+                IdentityResolver.Lane(pair.bundle.Namespace, publishers.GetValueOrDefault(pair.bundle.Namespace)),
+                pair.members,
+                pair.bundle.UpdatedAt,
+                AccessService.Effective(rules, pair.bundle.Namespace, pair.bundle.BundleId).Private,
+                AccessService.SharedWith(rules, identity, pair.bundle.Namespace, pair.bundle.BundleId)))
+            .ToList();
+
+        // Someone who lost access still gets the removal for what their PC reported installed.
+        var installed = await db.Heartbeats.AsNoTracking().Where(heartbeat => heartbeat.Account == identity.Account).Select(heartbeat => heartbeat.Installed).SingleOrDefaultAsync(cancellationToken) ?? [];
+        var revoked = packages
+            .Where(package => package.RevokedAt is not null
+                && (installed.Contains(package.CanonicalId) || AccessService.IsVisible(rules, identity, package.Namespace, package.PackageId)))
+            .Select(package => package.CanonicalId)
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        return new IndexDocument(timeProvider.GetUtcNow().UtcDateTime, entries, bundles, revoked);
     }
+
+    private static IndexPublisher Publisher(string ns, Publisher? publisher) =>
+        new(publisher?.Account ?? ns, publisher?.DisplayName ?? ns);
 
     /// <summary>Install events over all time and the installed base from heartbeats in the last 30 days.</summary>
     public async Task<Dictionary<string, (int Installs, int InstalledBase)>> StatsAsync(CancellationToken cancellationToken)

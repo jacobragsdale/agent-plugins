@@ -33,6 +33,9 @@ public sealed record PackageStats(
 
 public sealed record ActiveUsers(int Day, int Week, int Month);
 
+/// <summary>The caller's desktop app, from its latest heartbeat and the installs and uninstalls reported since.</summary>
+public sealed record AppView(string Version, string Os, DateTime LastSeenAt, string[] Installed);
+
 public sealed record TopPackage(string Id, int InstalledBase);
 
 public sealed record AdminSummary(
@@ -51,6 +54,9 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
     private static readonly HashSet<string> Kinds = ["heartbeat", "install", "update", "uninstall"];
     private static readonly TimeSpan FutureTolerance = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan MaxAge = TimeSpan.FromDays(30);
+
+    /// <summary>An app not heard from for this long is treated as gone.</summary>
+    private static readonly TimeSpan AppWindow = TimeSpan.FromDays(30);
 
     public async Task<EventsAccepted> RecordAsync(string account, EventsBatch batch, CancellationToken cancellationToken)
     {
@@ -189,6 +195,32 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
         return new EventsAccepted(accepted, duplicates, problems.Count, problems.ToArray());
     }
 
+    public async Task<AppView?> AppAsync(string account, CancellationToken cancellationToken)
+    {
+        var heartbeat = await db.Heartbeats.AsNoTracking().SingleOrDefaultAsync(candidate => candidate.Account == account, cancellationToken);
+        if (heartbeat is null || heartbeat.OccurredAt < timeProvider.GetUtcNow().UtcDateTime - AppWindow)
+        {
+            return null;
+        }
+
+        var changes = await db.Events.AsNoTracking()
+            .Where(item => item.Account == account && item.OccurredAt > heartbeat.OccurredAt && (item.Kind == "install" || item.Kind == "uninstall"))
+            .OrderBy(item => item.OccurredAt)
+            .Select(item => new { item.Kind, item.PackageId })
+            .ToListAsync(cancellationToken);
+        var installed = heartbeat.Installed.ToList();
+        foreach (var change in changes)
+        {
+            installed.Remove(change.PackageId!);
+            if (change.Kind == "install")
+            {
+                installed.Add(change.PackageId!);
+            }
+        }
+
+        return new AppView(heartbeat.ClientVersion, heartbeat.OsBuild, heartbeat.OccurredAt, installed.ToArray());
+    }
+
     public async Task<PackageStats> PackageStatsAsync(string canonicalId, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;
@@ -264,7 +296,7 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
         return new AdminSummary(
             new ActiveUsers(Active(1), Active(7), Active(30)),
             await db.Publishers.CountAsync(cancellationToken),
-            await db.Packages.CountAsync(package => package.Versions.Any(version => !version.Yanked && version.ReviewState == ReviewState.Approved), cancellationToken),
+            await db.Packages.CountAsync(package => package.RevokedAt == null && package.Versions.Any(version => !version.Yanked), cancellationToken),
             recent.GroupBy(heartbeat => heartbeat.ClientVersion, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal),
             recent.SelectMany(heartbeat => heartbeat.Agents.Distinct(StringComparer.Ordinal)).GroupBy(agent => agent, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal),
             installedBase,

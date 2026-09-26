@@ -32,7 +32,7 @@ Production registers only `Negotiate` (Kerberos). The container needs:
 
 1. An AD service account with the SPN `HTTP/<server fqdn>` (`setspn -S HTTP/marketplace.corp.example svc-marketplace`).
 2. A keytab for that account (`ktpass`), mounted at `/etc/krb5.keytab` with `KRB5_KTNAME` pointing at it, and a `krb5.conf` for the realm.
-3. `Auth__LdapDomain=corp.example` if team namespaces (`Auth__TeamNamespaces__0__Namespace`, `__Group`, `__DisplayName`), group-based admin, or group access lists are wanted. Groups arrive as the AD group's CN.
+3. `Auth__LdapDomain=corp.example` if group-based admin or AD groups in share lists are wanted. Groups arrive as the AD group's CN. Teams need no directory: anyone creates one in the portal, the app, or the CLI.
 
 Negotiate on Linux is Kerberos-only: clients must use the fully qualified name in the URL, and clocks must agree within five minutes. The app's preflight checks both.
 

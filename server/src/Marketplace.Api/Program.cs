@@ -10,6 +10,7 @@ using Marketplace.Api.Endpoints;
 using Marketplace.Api.Events;
 using Marketplace.Api.Packages;
 using Marketplace.Api.Storage;
+using Marketplace.Api.Teams;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Negotiate;
 using Microsoft.AspNetCore.Http.Features;
@@ -39,19 +40,6 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 });
 
 var authOptions = builder.Configuration.GetSection(AuthOptions.Section).Get<AuthOptions>() ?? new AuthOptions();
-foreach (var team in authOptions.TeamNamespaces)
-{
-    if (!IdentityResolver.SourceIdPattern().IsMatch(team.Namespace) || team.Namespace == MarketplaceIdentity.OfficialNamespace || string.IsNullOrWhiteSpace(team.Group))
-    {
-        throw new InvalidOperationException($"Auth:TeamNamespaces entry '{team.Namespace}' needs a valid namespace other than 'official' and a group.");
-    }
-}
-
-if (authOptions.TeamNamespaces.Select(team => team.Namespace).Distinct(StringComparer.Ordinal).Count() != authOptions.TeamNamespaces.Length)
-{
-    throw new InvalidOperationException("Auth:TeamNamespaces lists a namespace twice.");
-}
-
 var devHeader = builder.Environment.IsDevelopment() || authOptions.AllowDevHeader;
 var schemes = new List<string>();
 if (authOptions.EnableNegotiate)
@@ -124,6 +112,9 @@ builder.Services.AddScoped<PublishService>();
 builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<AccessService>();
 builder.Services.AddScoped<EventsService>();
+builder.Services.AddScoped<TeamService>();
+builder.Services.AddScoped<SuggestionService>();
+builder.Services.AddScoped<BundleService>();
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<ProblemExceptionHandler>();
 // Malformed bodies and route values throw so ProblemExceptionHandler can say what was wrong, in every environment.
@@ -152,7 +143,15 @@ var databaseOptions = app.Configuration.GetSection(DatabaseOptions.Section).Get<
 if (databaseOptions.MigrateOnStartup)
 {
     using var scope = app.Services.CreateScope();
-    await scope.ServiceProvider.GetRequiredService<MarketplaceDbContext>().Database.MigrateAsync();
+    var db = scope.ServiceProvider.GetRequiredService<MarketplaceDbContext>();
+    var pending = await db.Database.GetPendingMigrationsAsync();
+    await db.Database.MigrateAsync();
+
+    // SelfService made pending versions live and rejected ones withdrawn, so the stored archives are stale.
+    if (pending.Any(migration => migration.EndsWith("_SelfService", StringComparison.Ordinal)))
+    {
+        await scope.ServiceProvider.GetRequiredService<PublishService>().RegenerateAllAsync(CancellationToken.None);
+    }
 }
 
 app.Run();

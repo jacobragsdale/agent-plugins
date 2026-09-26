@@ -1,12 +1,10 @@
-using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Marketplace.Api.Access;
 using Marketplace.Api.Auth;
-using Marketplace.Api.Configuration;
 using Marketplace.Api.Data;
 using Marketplace.Api.Storage;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
 
 namespace Marketplace.Api.Packages;
 
@@ -30,6 +28,7 @@ public sealed record UploadRequest(
     string? Name,
     string? Description);
 
+/// <summary><see cref="WaitingForPublicReview"/>: everyone but the namespace's owners sees it once an admin approves its MCP server.</summary>
 public sealed record PublishedVersion(
     string Id,
     string Namespace,
@@ -41,10 +40,10 @@ public sealed record PublishedVersion(
     DateTime PublishedAt,
     string[] ComponentKinds,
     string[] Tags,
-    ReviewState ReviewState);
+    bool WaitingForPublicReview);
 
-/// <summary>A pending version waiting for an admin, with what the reviewer needs to judge it.</summary>
-public sealed record PendingReview(
+/// <summary>A public package whose MCP server waits for an admin before anyone outside its namespace sees it.</summary>
+public sealed record PublicReview(
     string Id,
     string Namespace,
     string PackageId,
@@ -53,15 +52,17 @@ public sealed record PendingReview(
     string PublishedBy,
     DateTime PublishedAt,
     string? Changelog,
-    string[] ComponentKinds,
-    bool FirstVersion,
-    string? LiveVersion);
+    string[] ComponentKinds);
 
+/// <summary>
+/// Publishing, withdrawing, and revoking. Every publish goes live at once; the one gate left is an admin
+/// letting the public see a package's MCP server, which is visibility, not a version state (ADR 0007).
+/// </summary>
 public sealed partial class PublishService(
     MarketplaceDbContext db,
     IArtifactStore store,
     IPackageValidator validator,
-    IOptions<AuthOptions> auth,
+    AccessService access,
     TimeProvider timeProvider,
     ILogger<PublishService> logger)
 {
@@ -75,66 +76,84 @@ public sealed partial class PublishService(
     public async Task<PublishedVersion> PublishAsync(MarketplaceIdentity identity, PublishRequest request, CancellationToken cancellationToken)
     {
         CheckTarget(identity, request.Namespace, request.PackageId);
-
-        if (!SemVer.TryParse(request.Version, out var semver))
-        {
-            throw new ProblemException(422, request.Version.Contains('-')
-                ? $"{request.Version} is a pre-release. The marketplace takes release versions only (major.minor.patch, for example 1.2.0)."
-                : $"{request.Version} is not a version number. Use major.minor.patch, for example 1.2.0.");
-        }
-
+        var semver = ParseVersion(request.Version);
         var tags = NormalizeTags(request.Tags);
         if (request.Changelog is { Length: > MaxChangelog } changelog)
         {
             throw new ProblemException(422, $"The changelog is at most {MaxChangelog:N0} characters; this one has {changelog.Length:N0}.");
         }
 
-        var inspected = ArchiveInspector.Inspect(request.Archive);
+        var inspected = await CheckArchiveAsync(request.Namespace, request.PackageId, request.Archive, cancellationToken);
+        return await CommitAsync(identity, identity.Account, request.Namespace, request.PackageId, semver, tags, request.Changelog, request.Archive, inspected, cancellationToken);
+    }
 
-        if (inspected.SourceId != request.Namespace)
+    /// <summary>Inspects and validates a source zip for <c>ns/packageId</c>: its manifest must name them, and the Rust validator must pass it.</summary>
+    public async Task<InspectedArchive> CheckArchiveAsync(string ns, string packageId, ReadOnlyMemory<byte> archive, CancellationToken cancellationToken)
+    {
+        var inspected = ArchiveInspector.Inspect(archive);
+        if (inspected.SourceId != ns)
         {
-            throw new ProblemException(422, $"agent-plugins.json declares source.id {inspected.SourceId}; the namespace is {request.Namespace}.");
+            throw new ProblemException(422, $"agent-plugins.json declares source.id {inspected.SourceId}; the namespace is {ns}.");
         }
 
-        if (inspected.PackageId != request.PackageId)
+        if (inspected.PackageId != packageId)
         {
-            throw new ProblemException(422, $"agent-plugins.json declares package {inspected.PackageId}; the request names {request.PackageId}.");
+            throw new ProblemException(422, $"agent-plugins.json declares package {inspected.PackageId}; the request names {packageId}.");
         }
 
-        var outcome = await ValidateAsync(request.Archive, inspected.RootPrefix, cancellationToken);
+        var outcome = await ValidateAsync(archive, inspected.RootPrefix, cancellationToken);
         if (!outcome.Accepted)
         {
-            var errors = outcome.Errors.Count > 0 ? outcome.Errors : [new ValidationError("", "The package has no valid install.")];
+            var errors = outcome.Errors.Count > 0 ? outcome.Errors : [new ValidationError("", "The package failed validation.")];
             throw new ProblemException(422, "The package failed validation.", errors);
         }
 
+        return inspected;
+    }
+
+    /// <summary>
+    /// Stores a checked archive as a new version and makes it live. <paramref name="identity"/> is who acts
+    /// (the owner, or an owner accepting a suggestion); <paramref name="publishedBy"/> is who it is credited to.
+    /// </summary>
+    public async Task<PublishedVersion> CommitAsync(
+        MarketplaceIdentity identity,
+        string publishedBy,
+        string ns,
+        string packageId,
+        SemVer semver,
+        string[] tags,
+        string? changelog,
+        ReadOnlyMemory<byte> archive,
+        InspectedArchive inspected,
+        CancellationToken cancellationToken)
+    {
         var now = timeProvider.GetUtcNow().UtcDateTime;
-        var storagePath = $"{request.Namespace}/{request.PackageId}/{semver}.zip";
+        var storagePath = $"{ns}/{packageId}/{semver}.zip";
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        await LockNamespaceAsync(request.Namespace, cancellationToken);
+        await db.LockNamespaceAsync(ns, cancellationToken);
 
         var package = await db.Packages
             .Include(candidate => candidate.Versions)
-            .SingleOrDefaultAsync(candidate => candidate.Namespace == request.Namespace && candidate.PackageId == request.PackageId, cancellationToken);
+            .SingleOrDefaultAsync(candidate => candidate.Namespace == ns && candidate.PackageId == packageId, cancellationToken);
         if (package?.Versions.Any(existing => existing.Version == semver.ToString()) == true)
         {
-            var highest = package.Versions.Select(existing => SemVer.Parse(existing.Version)).Max()!;
-            var next = highest with { Patch = highest.Patch + 1 };
-            throw new ProblemException(409, $"{request.Namespace}/{request.PackageId} {semver} was already published, and version numbers are never reused (even after a yank or a rejection). Publish {next} or later.");
+            throw new ProblemException(409, $"{ns}/{packageId} {semver} was already published, and version numbers are never reused (even after a withdrawal). Publish {NextPatch(package)} or later.");
         }
 
-        var publisher = await ClaimPublisherAsync(identity, request.Namespace, now, cancellationToken);
-        var stored = await StoreAsync(storagePath, request.Archive, $"{request.Namespace}/{request.PackageId} {semver}", cancellationToken);
+        if (package is null && await db.Bundles.AnyAsync(bundle => bundle.Namespace == ns && bundle.BundleId == packageId, cancellationToken))
+        {
+            throw new ProblemException(409, $"{ns} already has a bundle called {packageId}. Pick another name.");
+        }
 
-        // A package's first version and every version with an MCP server wait for an admin (ADR 0006).
-        var approved = identity.IsAdmin || (package is not null && LatestVersion(package) is not null && !inspected.ComponentKinds.Contains(McpServerKind));
+        var publisher = await ClaimPublisherAsync(identity, ns, now, cancellationToken);
+        var stored = await StoreAsync(storagePath, archive, $"{ns}/{packageId} {semver}", cancellationToken);
         var isNew = package is null;
         package ??= db.Packages.Add(new Package
         {
-            Namespace = request.Namespace,
-            PackageId = request.PackageId,
-            Name = request.PackageId,
-            Description = request.PackageId,
+            Namespace = ns,
+            PackageId = packageId,
+            Name = packageId,
+            Description = packageId,
             CreatedAt = now,
         }).Entity;
 
@@ -148,16 +167,20 @@ public sealed partial class PublishService(
             ManifestJson = inspected.PackageManifest.ToJsonString(),
             ComponentKinds = inspected.ComponentKinds.ToArray(),
             Tags = tags,
-            PublishedBy = identity.Account,
+            PublishedBy = publishedBy,
             PublishedAt = now,
-            Changelog = request.Changelog is { Length: > 0 } text ? text : null,
-            ReviewState = approved ? ReviewState.Approved : ReviewState.Pending,
-            ReviewedBy = approved ? identity.Account : null,
-            ReviewedAt = approved ? now : null,
+            Changelog = changelog is { Length: > 0 } text ? text : null,
         };
         package.Versions.Add(version);
 
-        // The listing follows the live version; a brand-new package takes its pending version's so the owner sees a name.
+        // A new version is a new request to the public: a decline does not carry over. An admin's own MCP server needs nobody.
+        package.McpDeclineNote = null;
+        if (identity.IsAdmin && package.McpApprovedBy is null && version.ComponentKinds.Contains(McpServerKind))
+        {
+            package.McpApprovedBy = identity.Account;
+            package.McpApprovedAt = now;
+        }
+
         if (isNew || LatestVersion(package) == version)
         {
             ApplyListing(package, version, now);
@@ -165,23 +188,22 @@ public sealed partial class PublishService(
 
         publisher.LastPublishedAt = now;
         await db.SaveChangesAsync(cancellationToken);
-        if (approved)
-        {
-            await RegenerateNamespaceAsync(request.Namespace, new Dictionary<string, ReadOnlyMemory<byte>> { [storagePath] = request.Archive }, cancellationToken);
-        }
-
+        await RegenerateNamespaceAsync(ns, new Dictionary<string, ReadOnlyMemory<byte>> { [storagePath] = archive }, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        logger.LogInformation("{Account} published {Namespace}/{Package} {Version} ({State}).", identity.Account, request.Namespace, request.PackageId, semver, version.ReviewState);
-        return ToPublished(package, version);
+
+        var waiting = Gated(package) && !AccessService.Effective(await access.RulesAsync(cancellationToken), ns, packageId).Private;
+        logger.LogInformation("{Account} published {Namespace}/{Package} {Version} for {PublishedBy}.", identity.Account, ns, packageId, semver, publishedBy);
+        return new PublishedVersion(package.CanonicalId, ns, packageId, version.Version, version.ArchiveDigest, version.SizeBytes, version.PublishedBy, version.PublishedAt, version.ComponentKinds, package.Tags, waiting);
     }
 
     /// <summary>
     /// Turns an upload into a publishable source zip. A zip with a manifest passes through; anything
-    /// else goes through <c>validate-source stage</c>, the same wrapping the CLI does.
+    /// else goes through <c>validate-source stage</c>, the same wrapping the CLI does. The caller checks
+    /// who may upload to the target.
     /// </summary>
-    public async Task<byte[]> PrepareUploadAsync(MarketplaceIdentity identity, UploadRequest upload, CancellationToken cancellationToken)
+    public async Task<byte[]> PrepareUploadAsync(UploadRequest upload, CancellationToken cancellationToken)
     {
-        CheckTarget(identity, upload.Namespace, upload.PackageId);
+        CheckIds(upload.Namespace, upload.PackageId);
         if (upload.Files.Count > MaxUploadFiles)
         {
             throw new ProblemException(422, $"An upload holds at most {MaxUploadFiles:N0} files; this one has {upload.Files.Count:N0}.");
@@ -234,39 +256,29 @@ public sealed partial class PublishService(
         }
     }
 
-    /// <summary>The review queue, oldest first.</summary>
-    public async Task<List<PendingReview>> PendingAsync(CancellationToken cancellationToken)
+    /// <summary>Public packages whose MCP server waits for an admin, oldest first.</summary>
+    public async Task<List<PublicReview>> PublicReviewsAsync(CancellationToken cancellationToken)
     {
         var packages = await db.Packages.AsNoTracking()
-            .Include(package => package.Versions)
-            .Where(package => package.Versions.Any(version => version.ReviewState == ReviewState.Pending && !version.Yanked))
+            .Include(package => package.Versions.Where(version => !version.Yanked))
+            .Where(package => package.RevokedAt == null && package.McpApprovedBy == null && package.McpDeclineNote == null)
             .ToListAsync(cancellationToken);
+        var rules = await access.RulesAsync(cancellationToken);
         return packages
-            .SelectMany(package => package.Versions
-                .Where(version => version.ReviewState == ReviewState.Pending && !version.Yanked)
-                .Select(version => new PendingReview(
-                    package.CanonicalId,
-                    package.Namespace,
-                    package.PackageId,
-                    package.Name,
-                    version.Version,
-                    version.PublishedBy,
-                    version.PublishedAt,
-                    version.Changelog,
-                    version.ComponentKinds,
-                    !package.Versions.Any(other => other.ReviewState == ReviewState.Approved),
-                    LatestVersion(package)?.Version)))
+            .Where(package => Gated(package) && !AccessService.Effective(rules, package.Namespace, package.PackageId).Private)
+            .Select(package => (package, live: LatestVersion(package)!))
+            .Select(pair => new PublicReview(pair.package.CanonicalId, pair.package.Namespace, pair.package.PackageId, pair.package.Name, pair.live.Version, pair.live.PublishedBy, pair.live.PublishedAt, pair.live.Changelog, pair.live.ComponentKinds))
             .OrderBy(review => review.PublishedAt)
             .ToList();
     }
 
-    /// <summary>Approves or rejects a pending version. Approval makes it live and rebuilds the namespace archive.</summary>
-    public async Task ReviewAsync(MarketplaceIdentity identity, string ns, string packageId, string versionText, bool approve, string? note, CancellationToken cancellationToken)
+    /// <summary>Lets the public see a package's MCP server, or keeps it from them with a note the owners see.</summary>
+    public async Task DecidePublicAsync(MarketplaceIdentity identity, string ns, string packageId, bool approve, string? note, CancellationToken cancellationToken)
     {
         note = string.IsNullOrWhiteSpace(note) ? null : note.Trim();
         if (!approve && note is null)
         {
-            throw new ProblemException(422, "Say why the version is rejected; the publisher sees the note.");
+            throw new ProblemException(422, "Say why everyone may not see it yet; its owners see the note.");
         }
 
         if (note is { Length: > MaxReviewNote })
@@ -274,33 +286,57 @@ public sealed partial class PublishService(
             throw new ProblemException(422, $"A review note is at most {MaxReviewNote:N0} characters; this one has {note.Length:N0}.");
         }
 
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        await LockNamespaceAsync(ns, cancellationToken);
-        var (package, version) = await FindVersionAsync(ns, packageId, versionText, cancellationToken);
-        if (version.Yanked || version.ReviewState != ReviewState.Pending)
+        var package = await db.Packages.Include(candidate => candidate.Versions)
+            .SingleOrDefaultAsync(candidate => candidate.Namespace == ns && candidate.PackageId == packageId, cancellationToken);
+        if (package is null || LatestVersion(package)?.ComponentKinds.Contains(McpServerKind) != true)
         {
-            var state = version.Yanked ? "yanked" : version.ReviewState == ReviewState.Approved ? "already approved" : "already rejected";
-            throw new ProblemException(409, $"{package.CanonicalId} {version.Version} is not waiting for review: it is {state}.");
+            throw ProblemException.NotFound($"An MCP server in {ns}/{packageId}");
         }
 
-        var now = timeProvider.GetUtcNow().UtcDateTime;
-        version.ReviewState = approve ? ReviewState.Approved : ReviewState.Rejected;
-        version.ReviewedBy = identity.Account;
-        version.ReviewedAt = now;
-        version.ReviewNote = note;
-        if (approve && LatestVersion(package) == version)
-        {
-            ApplyListing(package, version, now);
-        }
-
+        package.McpApprovedBy = approve ? identity.Account : null;
+        package.McpApprovedAt = approve ? timeProvider.GetUtcNow().UtcDateTime : null;
+        package.McpDeclineNote = approve ? null : note;
         await db.SaveChangesAsync(cancellationToken);
-        if (approve)
+        logger.LogInformation("{Account} {Decision} the MCP server in {Package} for everyone.", identity.Account, approve ? "approved" : "declined", package.CanonicalId);
+    }
+
+    /// <summary>
+    /// Pulls a package from every PC, or puts it back. A revoked package leaves the catalog, index, and
+    /// archive, and clients uninstall it; restoring does not reinstall it anywhere.
+    /// </summary>
+    public async Task SetRevokedAsync(MarketplaceIdentity identity, string ns, string packageId, bool revoked, CancellationToken cancellationToken)
+    {
+        if (!identity.Owns(ns))
         {
+            throw ProblemException.NotOwner(identity.Account, ns);
+        }
+
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await db.LockNamespaceAsync(ns, cancellationToken);
+        var package = await db.Packages.SingleOrDefaultAsync(candidate => candidate.Namespace == ns && candidate.PackageId == packageId, cancellationToken)
+            ?? throw ProblemException.NotFound($"The package {ns}/{packageId}");
+        if (package.RevokedAt is not null != revoked)
+        {
+            package.RevokedAt = revoked ? timeProvider.GetUtcNow().UtcDateTime : null;
+            package.RevokedBy = revoked ? identity.Account : null;
+            await db.SaveChangesAsync(cancellationToken);
             await RegenerateNamespaceAsync(ns, new Dictionary<string, ReadOnlyMemory<byte>>(), cancellationToken);
+            logger.LogInformation("{Account} {Action} {Package}.", identity.Account, revoked ? "revoked" : "restored", package.CanonicalId);
         }
 
         await transaction.CommitAsync(cancellationToken);
-        logger.LogInformation("{Account} {Decision} {Package} {Version}.", identity.Account, approve ? "approved" : "rejected", package.CanonicalId, version.Version);
+    }
+
+    /// <summary>Rebuilds every namespace archive, after a migration changed which versions are live.</summary>
+    public async Task RegenerateAllAsync(CancellationToken cancellationToken)
+    {
+        var namespaces = await db.Packages.Select(package => package.Namespace)
+            .Union(db.NamespaceArchives.Select(archive => archive.Namespace))
+            .ToListAsync(cancellationToken);
+        foreach (var ns in namespaces)
+        {
+            await RegenerateNamespaceAsync(ns, new Dictionary<string, ReadOnlyMemory<byte>>(), cancellationToken);
+        }
     }
 
     /// <summary>
@@ -315,7 +351,7 @@ public sealed partial class PublishService(
         }
 
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        await LockNamespaceAsync(ns, cancellationToken);
+        await db.LockNamespaceAsync(ns, cancellationToken);
         var (package, version) = await FindVersionAsync(ns, packageId, versionText, cancellationToken);
         if (version.Yanked != yanked)
         {
@@ -328,13 +364,13 @@ public sealed partial class PublishService(
 
             await db.SaveChangesAsync(cancellationToken);
             await RegenerateNamespaceAsync(ns, new Dictionary<string, ReadOnlyMemory<byte>>(), cancellationToken);
-            logger.LogInformation("{Account} {Action} {Package} {Version}.", identity.Account, yanked ? "yanked" : "restored", package.CanonicalId, version.Version);
+            logger.LogInformation("{Account} {Action} {Package} {Version}.", identity.Account, yanked ? "withdrew" : "restored", package.CanonicalId, version.Version);
         }
 
         await transaction.CommitAsync(cancellationToken);
     }
 
-    /// <summary>Rebuilds the namespace archive from the latest non-yanked version of each package.</summary>
+    /// <summary>Rebuilds the namespace archive from the live version of each package.</summary>
     public async Task RegenerateNamespaceAsync(string ns, IReadOnlyDictionary<string, ReadOnlyMemory<byte>> knownArchives, CancellationToken cancellationToken)
     {
         var packages = await db.Packages
@@ -401,27 +437,28 @@ public sealed partial class PublishService(
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    /// <summary>The live version: the highest one that is approved and not yanked.</summary>
+    /// <summary>The live version: the highest one not yanked, unless the package was revoked.</summary>
     public static PackageVersion? LatestVersion(Package package) =>
-        package.Versions
-            .Where(version => !version.Yanked && version.ReviewState == ReviewState.Approved)
-            .Select(version => (version, semver: SemVer.Parse(version.Version)))
-            .OrderByDescending(pair => pair.semver)
-            .Select(pair => pair.version)
-            .FirstOrDefault();
+        package.RevokedAt is not null
+            ? null
+            : package.Versions.Where(version => !version.Yanked).MaxBy(version => SemVer.Parse(version.Version));
 
-    public static PublishedVersion ToPublished(Package package, PackageVersion version) => new(
-        package.CanonicalId,
-        package.Namespace,
-        package.PackageId,
-        version.Version,
-        version.ArchiveDigest,
-        version.SizeBytes,
-        version.PublishedBy,
-        version.PublishedAt,
-        version.ComponentKinds,
-        package.Tags,
-        version.ReviewState);
+    /// <summary>The live version has an MCP server no admin has let the public see.</summary>
+    public static bool Gated(Package package) =>
+        package.McpApprovedBy is null && LatestVersion(package)?.ComponentKinds.Contains(McpServerKind) == true;
+
+    /// <summary>The patch after the highest version ever used, the suggested next version.</summary>
+    public static SemVer NextPatch(Package? package) =>
+        package?.Versions.Select(version => SemVer.Parse(version.Version)).Max() is { } highest
+            ? highest with { Patch = highest.Patch + 1 }
+            : new SemVer(1, 0, 0);
+
+    public static SemVer ParseVersion(string text) =>
+        SemVer.TryParse(text, out var semver)
+            ? semver
+            : throw new ProblemException(422, text.Contains('-')
+                ? $"{text} is a pre-release. The marketplace takes release versions only (major.minor.patch, for example 1.2.0)."
+                : $"{text} is not a version number. Use major.minor.patch, for example 1.2.0.");
 
     /// <summary>Lowercases and deduplicates tags; an invalid tag or too many is a 422, never silently dropped.</summary>
     public static string[] NormalizeTags(IEnumerable<string> tags)
@@ -471,13 +508,18 @@ public sealed partial class PublishService(
         }
     }
 
-    private static void CheckTarget(MarketplaceIdentity identity, string ns, string packageId)
+    public static void CheckTarget(MarketplaceIdentity identity, string ns, string packageId)
     {
         if (!identity.Owns(ns))
         {
             throw ProblemException.NotOwner(identity.Account, ns);
         }
 
+        CheckIds(ns, packageId);
+    }
+
+    private static void CheckIds(string ns, string packageId)
+    {
         if (!IdentityResolver.SourceIdPattern().IsMatch(ns))
         {
             throw new ProblemException(422, $"{ns} is not a valid namespace.");
@@ -499,14 +541,15 @@ public sealed partial class PublishService(
     }
 
     /// <summary>
-    /// The namespace's publisher row, created on its first publish. Official and team namespaces are
-    /// credited to the namespace itself. A personal namespace is claimed by the account that first
-    /// publishes to it, so only its owner may create it, not an admin publishing on their behalf.
+    /// The namespace's publisher row, created on its first publish (a team's exists from its creation).
+    /// <c>official</c> is credited to the namespace itself. A personal namespace is claimed by the account
+    /// that first publishes to it, so only its owner may create it, not an admin publishing on their behalf.
+    /// Call it inside a transaction holding the namespace lock.
     /// </summary>
-    private async Task<Publisher> ClaimPublisherAsync(MarketplaceIdentity identity, string ns, DateTime now, CancellationToken cancellationToken)
+    public async Task<Publisher> ClaimPublisherAsync(MarketplaceIdentity identity, string ns, DateTime now, CancellationToken cancellationToken)
     {
-        var personal = IdentityResolver.Lane(auth.Value, ns) == "personal";
         var publisher = await db.Publishers.FindAsync([ns], cancellationToken);
+        var personal = publisher?.Kind == PublisherKind.Personal || (publisher is null && ns != MarketplaceIdentity.OfficialNamespace);
         if (publisher is null)
         {
             if (personal && ns != identity.Namespace)
@@ -519,6 +562,7 @@ public sealed partial class PublishService(
                 Namespace = ns,
                 Account = personal ? identity.Account : ns,
                 DisplayName = string.Empty,
+                Kind = personal ? PublisherKind.Personal : PublisherKind.Official,
                 FirstSeenAt = now,
             }).Entity;
         }
@@ -528,11 +572,14 @@ public sealed partial class PublishService(
             throw new ProblemException(409, $"{ns} was just claimed by another account. Reload to get your own namespace, then publish there.");
         }
 
-        // Keep the display name current, but an admin publishing into someone's namespace is not its owner.
-        if (!personal || ns == identity.Namespace)
+        // Keep a person's display name current, but an admin publishing into someone's namespace is not its owner. A team keeps its own name.
+        if (publisher.Kind == PublisherKind.Official)
         {
-            var displayName = IdentityResolver.NamespaceDisplayName(auth.Value, identity, ns);
-            publisher.DisplayName = displayName.Length <= 120 ? displayName : displayName[..120];
+            publisher.DisplayName = "Official";
+        }
+        else if (personal && ns == identity.Namespace)
+        {
+            publisher.DisplayName = identity.DisplayName.Length <= 120 ? identity.DisplayName : identity.DisplayName[..120];
         }
 
         return publisher;
@@ -560,9 +607,6 @@ public sealed partial class PublishService(
             return new StoredArtifact(storagePath, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(archive.Span)), archive.Length);
         }
     }
-
-    private async Task LockNamespaceAsync(string ns, CancellationToken cancellationToken) =>
-        await db.Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock(hashtext({ns}))", cancellationToken);
 
     /// <summary>Copies a version's name, description, and tags onto the package listing.</summary>
     private static void ApplyListing(Package package, PackageVersion version, DateTime now)

@@ -8,6 +8,9 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Marketplace.Api.Auth;
 
+/// <summary>A team the caller belongs to.</summary>
+public sealed record TeamMembership(string Namespace, string DisplayName, bool Owner);
+
 /// <summary>The caller as the marketplace sees it, derived from the Windows logon.</summary>
 public sealed record MarketplaceIdentity(
     string Account,
@@ -19,10 +22,21 @@ public sealed record MarketplaceIdentity(
 {
     public const string OfficialNamespace = "official";
 
+    /// <summary>Settled from the database by <c>ResolveMarketplaceIdentityAsync</c>; their namespaces are in <see cref="Namespaces"/>.</summary>
+    public IReadOnlyList<TeamMembership> Teams { get; init; } = [];
+
     public bool Owns(string ns) => Namespaces.Contains(ns, StringComparer.Ordinal) || IsAdmin;
+
+    public bool InTeam(string ns) => Teams.Any(team => team.Namespace == ns);
+
+    /// <summary>Owners manage a team's members, invite link, name, and visibility; admins may too.</summary>
+    public bool IsTeamOwner(string ns) => IsAdmin || Teams.Any(team => team.Namespace == ns && team.Owner);
 
     /// <summary>AD group names are case-insensitive, so every group comparison is.</summary>
     public bool InGroup(string group) => Groups.Contains(group, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Whether a stored team member entry names the caller; see <see cref="IdentityResolver.EntryMatches"/>.</summary>
+    public bool Is(string entry) => IdentityResolver.EntryMatches(entry, Account);
 }
 
 public static partial class IdentityResolver
@@ -37,7 +51,7 @@ public static partial class IdentityResolver
 
         var username = Username(account);
         var ns = NamespaceFor(username);
-        if (IsReserved(options, ns))
+        if (ns == MarketplaceIdentity.OfficialNamespace)
         {
             ns = NamespaceFor("u-" + username);
         }
@@ -55,11 +69,6 @@ public static partial class IdentityResolver
             namespaces.Add(MarketplaceIdentity.OfficialNamespace);
         }
 
-        namespaces.AddRange(options.TeamNamespaces
-            .Where(team => groups.Contains(team.Group, StringComparer.OrdinalIgnoreCase))
-            .Select(team => team.Namespace)
-            .Where(candidate => !namespaces.Contains(candidate, StringComparer.Ordinal)));
-
         var displayName = principal.FindFirst(ClaimTypes.GivenName) is { Value.Length: > 0 } given
             ? $"{given.Value} {principal.FindFirst(ClaimTypes.Surname)?.Value}".Trim()
             : username;
@@ -67,24 +76,47 @@ public static partial class IdentityResolver
     }
 
     /// <summary>
-    /// Settles the caller's personal namespace against the publishers table. The derived name can be
-    /// shared: <c>christopher.johnson</c> and <c>christopher.johnston</c> both truncate to
-    /// <c>christopher-john</c>. The first account to publish claims it; everyone else gets the first
-    /// numbered alternative (<c>christopher-jo-2</c>, …) that they have claimed or that is still free.
+    /// Settles the caller's personal namespace against the publishers table, then adds their teams. The
+    /// derived name can be shared: <c>christopher.johnson</c> and <c>christopher.johnston</c> both truncate
+    /// to <c>christopher-john</c>. The first account to publish claims it; everyone else gets the first
+    /// numbered alternative (<c>christopher-jo-2</c>, …) that they have claimed or that is still free. A
+    /// derived name that is a team's becomes <c>u-&lt;name&gt;</c>.
     /// </summary>
-    public static async Task<MarketplaceIdentity> ClaimPersonalNamespaceAsync(MarketplaceIdentity identity, MarketplaceDbContext db, AuthOptions options, CancellationToken cancellationToken)
+    public static async Task<MarketplaceIdentity> SettleAsync(MarketplaceIdentity identity, MarketplaceDbContext db, CancellationToken cancellationToken)
     {
-        var candidates = PersonalCandidates(options, identity.Namespace);
+        var derived = identity.Namespace;
+        if (await db.Publishers.AnyAsync(publisher => publisher.Namespace == derived && publisher.Kind == PublisherKind.Team, cancellationToken))
+        {
+            derived = NamespaceFor("u-" + Username(identity.Account));
+        }
+
+        var candidates = PersonalCandidates(derived);
         var owners = await db.Publishers.AsNoTracking()
             .Where(publisher => candidates.Contains(publisher.Namespace))
             .ToDictionaryAsync(publisher => publisher.Namespace, publisher => publisher.Account, StringComparer.Ordinal, cancellationToken);
         var ns = candidates.FirstOrDefault(candidate => owners.TryGetValue(candidate, out var owner) && IsClaimant(owner, identity.Account))
             ?? candidates.FirstOrDefault(candidate => !owners.ContainsKey(candidate));
 
+        var account = identity.Account.ToLowerInvariant();
+        var username = Username(identity.Account).ToLowerInvariant();
+        var teams = await db.TeamMembers.AsNoTracking()
+            .Where(member => member.Account.ToLower() == account || member.Account.ToLower() == username)
+            .Join(db.Publishers, member => member.Namespace, publisher => publisher.Namespace, (member, publisher) => new { member.Namespace, publisher.DisplayName, member.IsOwner })
+            .ToListAsync(cancellationToken);
+        var memberships = teams
+            .GroupBy(team => team.Namespace, StringComparer.Ordinal)
+            .Select(group => new TeamMembership(group.Key, group.First().DisplayName, group.Any(team => team.IsOwner)))
+            .OrderBy(team => team.Namespace, StringComparer.Ordinal)
+            .ToArray();
+
         // ponytail: nine accounts deriving one name leaves the tenth without a personal namespace; add Auth:NamespaceOverrides if it happens.
-        return ns is null ? identity with { Namespaces = [.. identity.Namespaces.Skip(1)] }
-            : ns == identity.Namespace ? identity
-            : identity with { Namespace = ns, Namespaces = [ns, .. identity.Namespaces.Skip(1)] };
+        IEnumerable<string> personal = ns is null ? [] : [ns];
+        return identity with
+        {
+            Namespace = ns ?? identity.Namespace,
+            Namespaces = [.. personal, .. identity.Namespaces.Skip(1), .. memberships.Select(team => team.Namespace)],
+            Teams = memberships,
+        };
     }
 
     /// <summary>
@@ -93,17 +125,16 @@ public static partial class IdentityResolver
     /// </summary>
     public static bool IsClaimant(string owner, string account) => string.Equals(owner, account, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The derived namespace, then <c>-2</c> to <c>-9</c> variants that fit 16 characters, skipping reserved names.</summary>
-    public static string[] PersonalCandidates(AuthOptions options, string derived) =>
+    /// <summary>
+    /// The derived namespace, then <c>-2</c> to <c>-9</c> variants that fit 16 characters. A team's row
+    /// names the team as its account, so a team namespace is never free for a person.
+    /// </summary>
+    public static string[] PersonalCandidates(string derived) =>
         Enumerable.Range(2, 8)
             .Select(number => $"{derived[..Math.Min(derived.Length, 14)].TrimEnd('-')}-{number}")
             .Prepend(derived)
-            .Where(candidate => !IsReserved(options, candidate) && SourceIdPattern().IsMatch(candidate))
+            .Where(candidate => candidate != MarketplaceIdentity.OfficialNamespace && SourceIdPattern().IsMatch(candidate))
             .ToArray();
-
-    /// <summary><c>official</c> and every team namespace belong to their lane, never to one person.</summary>
-    public static bool IsReserved(AuthOptions options, string ns) =>
-        ns == MarketplaceIdentity.OfficialNamespace || options.TeamNamespaces.Any(team => team.Namespace == ns);
 
     /// <summary><c>CORP\jacob</c> and <c>jacob@corp.example</c> both yield <c>jacob</c>.</summary>
     public static string Username(string account)
@@ -176,17 +207,21 @@ public static partial class IdentityResolver
         string.Equals(candidate, account, StringComparison.OrdinalIgnoreCase)
         || string.Equals(Username(candidate.Trim()), username, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>official, team (a configured AD-group namespace), or personal.</summary>
-    public static string Lane(AuthOptions options, string ns) =>
-        ns == MarketplaceIdentity.OfficialNamespace ? "official"
-        : options.TeamNamespaces.Any(team => team.Namespace == ns) ? "team"
-        : "personal";
+    /// <summary>
+    /// Whether a stored team member entry names <paramref name="account"/>. Stricter than
+    /// <see cref="AccountMatches"/>, because membership grants publishing: an entry with a domain
+    /// (<c>CORP\jane</c>, <c>jane@corp</c>) matches that account only, a bare <c>jane</c> any account
+    /// whose username is jane.
+    /// </summary>
+    public static bool EntryMatches(string entry, string account) =>
+        string.Equals(entry, account, StringComparison.OrdinalIgnoreCase)
+        || (!entry.Contains('\\') && !entry.Contains('@') && string.Equals(entry, Username(account), StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>How a namespace is shown: "Official", the team's configured name, or the caller's own name.</summary>
-    public static string NamespaceDisplayName(AuthOptions options, MarketplaceIdentity identity, string ns) =>
-        ns == MarketplaceIdentity.OfficialNamespace ? "Official"
-        : options.TeamNamespaces.FirstOrDefault(team => team.Namespace == ns)?.DisplayName is { Length: > 0 } teamName ? teamName
-        : identity.DisplayName;
+    /// <summary>official, team, or personal, from the namespace's row; a namespace nobody claimed yet is personal.</summary>
+    public static string Lane(string ns, Publisher? publisher) =>
+        ns == MarketplaceIdentity.OfficialNamespace ? "official"
+        : publisher?.Kind == PublisherKind.Team ? "team"
+        : "personal";
 
     [GeneratedRegex("^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){1,15}$")]
     public static partial Regex SourceIdPattern();

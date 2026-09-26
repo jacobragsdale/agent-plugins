@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Npgsql;
 using Testcontainers.PostgreSql;
 using Xunit;
 
@@ -32,6 +33,16 @@ public sealed class MarketplaceApiFactory : WebApplicationFactory<Program>, IAsy
 
     public async ValueTask InitializeAsync() => await _postgres.StartAsync();
 
+    /// <summary>A second, empty database on the same server, for tests that drive migrations themselves.</summary>
+    public async Task<string> CreateDatabaseAsync(string name)
+    {
+        await using var connection = new NpgsqlConnection(_postgres.GetConnectionString());
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand($"CREATE DATABASE \"{name}\"", connection);
+        await command.ExecuteNonQueryAsync();
+        return new NpgsqlConnectionStringBuilder(_postgres.GetConnectionString()) { Database = name }.ConnectionString;
+    }
+
     public override async ValueTask DisposeAsync()
     {
         await base.DisposeAsync();
@@ -54,9 +65,6 @@ public sealed class MarketplaceApiFactory : WebApplicationFactory<Program>, IAsy
         builder.UseSetting("Auth:EnableNegotiate", "false");
         builder.UseSetting("Auth:AdminAccounts:0", "TEST\\admin");
         builder.UseSetting("Auth:OfficialPublishers:0", "TEST\\curator");
-        builder.UseSetting("Auth:TeamNamespaces:0:Namespace", "team-platform");
-        builder.UseSetting("Auth:TeamNamespaces:0:Group", "Platform Team");
-        builder.UseSetting("Auth:TeamNamespaces:0:DisplayName", "Platform Team");
         builder.UseSetting("Client:MinimumVersion", "0.1.0");
         builder.UseSetting("Client:LatestVersion", "0.2.0");
         if (ValidatorPath is not null)
