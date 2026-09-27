@@ -479,6 +479,17 @@ public sealed partial class MarketplaceApiTests
         Assert.Equal("10.0.26100", app.GetProperty("os").GetString());
         Assert.Equal(["appuser/two"], app.GetProperty("installed").EnumerateArray().Select(id => id.GetString()).ToArray());
 
+        // The same person spelled in another case sees the same PC, and its next heartbeat updates that PC.
+        using var shouted = factory.ClientFor("TEST\\APPUSER");
+        Assert.Equal("0.2.0", (await shouted.GetFromJsonAsync<JsonElement>("/api/me", Json, ct)).GetProperty("app").GetProperty("version").GetString());
+        var again = new { events = new object[] { new { kind = "heartbeat", occurredAt = now, clientVersion = "0.2.1", osBuild = "10.0.26100", agents = new[] { "cursor" }, installed = new[] { "appuser/two" } } } };
+        Assert.Equal(HttpStatusCode.Accepted, (await shouted.PostAsJsonAsync("/api/events", again, Json, ct)).StatusCode);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MarketplaceDbContext>();
+            Assert.Equal(1, await db.Heartbeats.CountAsync(heartbeat => heartbeat.Account.ToLower() == "test\\appuser", ct));
+        }
+
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<MarketplaceDbContext>();

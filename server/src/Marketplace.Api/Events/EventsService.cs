@@ -193,7 +193,8 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
 
         foreach (var heartbeat in heartbeats.Values)
         {
-            var current = await db.Heartbeats.FindAsync([account, heartbeat.Device], cancellationToken);
+            // One PC, however the account's case was spelled when it reported.
+            var current = await db.Heartbeats.FirstOrDefaultAsync(candidate => candidate.Account.ToLower() == account.ToLower() && candidate.Device == heartbeat.Device, cancellationToken);
             if (current is null)
             {
                 db.Heartbeats.Add(heartbeat);
@@ -218,14 +219,14 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
     /// <summary>The account's most recently heard-from desktop app.</summary>
     public async Task<AppView?> AppAsync(string account, CancellationToken cancellationToken)
     {
-        var heartbeat = await db.Heartbeats.AsNoTracking().Where(candidate => candidate.Account == account).OrderByDescending(candidate => candidate.OccurredAt).FirstOrDefaultAsync(cancellationToken);
+        var heartbeat = await db.Heartbeats.AsNoTracking().Where(candidate => candidate.Account.ToLower() == account.ToLower()).OrderByDescending(candidate => candidate.OccurredAt).FirstOrDefaultAsync(cancellationToken);
         if (heartbeat is null || heartbeat.OccurredAt < timeProvider.GetUtcNow().UtcDateTime - AppWindow)
         {
             return null;
         }
 
         var changes = await db.Events.AsNoTracking()
-            .Where(item => item.Account == account && item.OccurredAt > heartbeat.OccurredAt && (item.Kind == "install" || item.Kind == "uninstall"))
+            .Where(item => item.Account.ToLower() == account.ToLower() && item.OccurredAt > heartbeat.OccurredAt && (item.Kind == "install" || item.Kind == "uninstall"))
             .OrderBy(item => item.OccurredAt)
             .Select(item => new { item.Kind, item.PackageId })
             .ToListAsync(cancellationToken);

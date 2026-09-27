@@ -176,7 +176,7 @@ public sealed class CatalogService(
             .ToList();
 
         // Someone who lost access still gets the removal for what any of their PCs reported installed.
-        var installed = (await db.Heartbeats.AsNoTracking().Where(heartbeat => heartbeat.Account == identity.Account).Select(heartbeat => heartbeat.Installed).ToListAsync(cancellationToken))
+        var installed = (await db.Heartbeats.AsNoTracking().Where(heartbeat => heartbeat.Account.ToLower() == identity.Account.ToLower()).Select(heartbeat => heartbeat.Installed).ToListAsync(cancellationToken))
             .SelectMany(ids => ids)
             .ToHashSet(StringComparer.Ordinal);
         var revoked = packages
