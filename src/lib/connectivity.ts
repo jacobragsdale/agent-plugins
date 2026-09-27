@@ -39,7 +39,7 @@ export function offlineBanner(state: AppState | null, offlineHint: boolean): str
     return null;
   }
   const retry = "Agent Plugins will retry automatically.";
-  return state.checkedAtEpochSeconds === 0 ? `Offline — showing saved packages. ${retry}` : `Offline — showing packages as of ${formatEpoch(state.checkedAtEpochSeconds)}. ${retry}`;
+  return state.checkedAtEpochSeconds === 0 ? `Offline — showing saved skills. ${retry}` : `Offline — showing skills as of ${formatEpoch(state.checkedAtEpochSeconds)}. ${retry}`;
 }
 
 /** Checks that fail whenever the machine is offline; the offline banner already says so. */
@@ -55,8 +55,8 @@ export function headerProblems(problems: readonly PreflightCheck[], offline: boo
   return problems.filter((check) => !(offline && OFFLINE_CHECKS.includes(check.id)) && !(certificate && check.id === "server.health"));
 }
 
-export const OFFLINE_EMPTY = "You're offline, and no packages are saved on this computer yet. They'll appear here once Agent Plugins can reach the server. It will keep trying on its own.";
-export const NOTHING_PUBLISHED = "No packages published yet.";
+export const OFFLINE_EMPTY = "You're offline, and no skills are saved on this computer yet. They'll appear here once Agent Plugins can reach the server. It will keep trying on its own.";
+export const NOTHING_PUBLISHED = "No skills published yet.";
 
 /** Why a search or the local-changes filter shows nothing, or null when it shows something (or no filter is on). */
 export function noMatchesText(query: string, driftOnly: boolean, shown: number): string | null {
@@ -65,9 +65,9 @@ export function noMatchesText(query: string, driftOnly: boolean, shown: number):
     return null;
   }
   if (needle.length === 0) {
-    return "No packages have local changes.";
+    return "No skills have local changes.";
   }
-  return driftOnly ? `No packages with local changes match “${needle}”.` : `No packages match “${needle}”.`;
+  return driftOnly ? `No skills with local changes match “${needle}”.` : `No skills match “${needle}”.`;
 }
 
 /** What fills the page: the spinner, a sentence saying why it is empty, or the package list. */

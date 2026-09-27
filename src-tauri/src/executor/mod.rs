@@ -208,7 +208,7 @@ fn written_in(desired: &DesiredResource) -> Option<&Path> {
     }
 }
 
-/// A skill folder that cannot be written to, such as a OneDrive folder that a
+/// A skill folder that cannot be written to, such as a synced folder that a
 /// policy or a sync error keeps read-only. It stays so until someone fixes it,
 /// so it is a warning rather than a quiet retry.
 fn folder_problem<'a>(
@@ -277,6 +277,32 @@ fn document_locked(path: &Path) -> bool {
 #[cfg(not(windows))]
 fn document_locked(_path: &Path) -> bool {
     false
+}
+
+/// How long a backup of a person's edited copy is kept. It may hold a whole
+/// settings file with their secrets in it, so it does not stay forever.
+const BACKUP_KEEP: std::time::Duration = std::time::Duration::from_secs(30 * 86_400);
+
+/// Removes backups older than `BACKUP_KEEP`, oldest first. Each backup is one
+/// folder per change under `~/.agents/.agent-plugins-backups`.
+pub(crate) fn prune_backups(paths: &SystemPaths) {
+    let root = paths.home.join(".agents").join(".agent-plugins-backups");
+    let Ok(entries) = fs::read_dir(&root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > BACKUP_KEEP);
+        if old {
+            if let Err(error) = remove_any(&entry.path()) {
+                eprintln!("{error}");
+            }
+        }
+    }
 }
 
 /// Removes staging that an interrupted run left next to agent files and in
@@ -363,8 +389,7 @@ pub(crate) fn install_components(
     let existing = ledger_state.items.get(&item.id).cloned();
     let operate_on = resolve_operate_on(item, component_ids)?;
     let mut plan = planner::plan(paths, snapshot, item, None, Some(&operate_on))?;
-    let preview = planner::preview(item, &plan);
-    if preview.requires_approval && !trust_approved {
+    if planner::needs_approval(item, &plan, &ledger_state) && !trust_approved {
         return Err(format!(
             "{} contains an MCP server and requires explicit Tier 3 approval.",
             item.id
@@ -559,7 +584,7 @@ pub(crate) fn install_batch(
             .get(&item.id)
             .map(|record| planner::selected_component_ids(record, item));
         let mut plan = planner::plan(paths, request.snapshot, item, None, selected.as_deref())?;
-        if planner::preview(item, &plan).requires_approval && !trust_approved {
+        if planner::needs_approval(item, &plan, &original) && !trust_approved {
             return Err(format!(
                 "{} contains an MCP server and requires explicit Tier 3 approval.",
                 item.id
@@ -959,6 +984,18 @@ fn remove_leftover_source_skills(
     backup_paths
 }
 
+/// Stops managing an installed package and leaves its files where they are,
+/// so a person keeps their own edited copy. Nothing is removed or backed up;
+/// the package can be installed again later like any other.
+pub(crate) fn forget(paths: &SystemPaths, installation_id: &str) -> Result<(), String> {
+    let (_lock, mut ledger_state) = ledger_for_change(paths)?;
+    if !ledger_state.items.contains_key(installation_id) {
+        return Err(format!("{installation_id} is not installed."));
+    }
+    detach_installation(&mut ledger_state, installation_id);
+    ledger::write(&paths.app_data(), &ledger_state)
+}
+
 #[cfg(test)]
 pub(crate) fn uninstall(
     paths: &SystemPaths,
@@ -1242,6 +1279,25 @@ fn detach_installation(
         .collect()
 }
 
+/// Whether installing `plan` has to replace a skill folder Agent Plugins did
+/// not put there, which only Replace does. Settings entries are left to the
+/// install itself: checking them would read every app's settings file for
+/// every card, and a same-named entry is rare.
+pub(crate) fn blocked_by_unmanaged(ledger: &InstallationLedger, plan: &OperationPlan) -> bool {
+    plan.resources
+        .values()
+        .any(|planned| match &planned.desired {
+            DesiredResource::Path(desired) => {
+                ledger
+                    .resource_by_identity(&planned.desired.identity())
+                    .is_none()
+                    && path_entry_exists(&desired.path)
+                    && !identical_to_desired(desired, &desired.path)
+            }
+            _ => false,
+        })
+}
+
 fn preflight_new_resources(
     ledger: &InstallationLedger,
     plan: &OperationPlan,
@@ -1262,7 +1318,7 @@ fn preflight_new_resources(
         match &planned.desired {
             DesiredResource::Path(desired) if path_entry_exists(&desired.path) => {
                 // A folder that already holds exactly this content, such as a
-                // OneDrive copy another computer installed, is taken over.
+                // copy synced from another computer, is taken over.
                 if !replace_unmanaged && !identical_to_desired(desired, &desired.path) {
                     return Err(format!(
                         "{} already exists and is not an owned destination.",
@@ -1457,7 +1513,6 @@ mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
-            onedrive_commercial: None,
         }
     }
 

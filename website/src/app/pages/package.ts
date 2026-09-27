@@ -1,12 +1,13 @@
-import { Component, computed, inject, input, linkedSignal, resource } from "@angular/core";
+import { Component, computed, effect, inject, input, linkedSignal, resource } from "@angular/core";
 import { MatButtonModule } from "@angular/material/button";
 import { MatDialog } from "@angular/material/dialog";
 import { MatProgressBarModule } from "@angular/material/progress-bar";
 import { MatSnackBar } from "@angular/material/snack-bar";
 import { MatTabsModule } from "@angular/material/tabs";
+import { Title } from "@angular/platform-browser";
 import { RouterLink } from "@angular/router";
 import { z } from "zod";
-import type { PackageVersion } from "../api";
+import type { PackageVersion, ReportKind } from "../api";
 import { Api, ApiError, versionFiles } from "../api";
 import { newestFirst } from "../format";
 import { Session } from "../session";
@@ -18,14 +19,29 @@ import { SharedBanner } from "../shared/shared-banner";
 import { packageStatus } from "../shared/status";
 import { SuggestionList } from "../shared/suggestion-list";
 import { runTask } from "../shared/tasks";
-import { OwnerPanel, PackageHeader, PackageSide, PackageUsage, VersionFiles, VersionList } from "./package-parts";
+import { OwnerPanel, PackageHeader, PackageReports, PackageSide, PackageUsage, VersionFiles, VersionList } from "./package-parts";
 
 /** Just enough of agent-plugins.json to list a pack's skills. */
 const manifestSchema = z.object({ packages: z.array(z.object({ components: z.array(z.object({ kind: z.string(), id: z.string().optional() })) })) });
 
 @Component({
   selector: "app-package",
-  imports: [RouterLink, MatButtonModule, MatProgressBarModule, MatTabsModule, Icon, PackageHeader, OwnerPanel, VersionFiles, VersionList, PackageUsage, PackageSide, SuggestionList, SharedBanner],
+  imports: [
+    RouterLink,
+    MatButtonModule,
+    MatProgressBarModule,
+    MatTabsModule,
+    Icon,
+    PackageHeader,
+    OwnerPanel,
+    VersionFiles,
+    VersionList,
+    PackageUsage,
+    PackageReports,
+    PackageSide,
+    SuggestionList,
+    SharedBanner
+  ],
   templateUrl: "./package.html",
   styleUrl: "./package.scss"
 })
@@ -35,21 +51,14 @@ export class PackagePage {
   /** Who shared it, when the page was opened from a share link. */
   public readonly shared = input<string>();
 
-  private readonly session = inject(Session);
+  protected readonly session = inject(Session);
   private readonly api = inject(Api);
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
 
   protected readonly detail = resource({ params: () => ({ ns: this.ns(), pkg: this.pkg() }), loader: ({ params }) => this.api.package(params.ns, params.pkg) });
 
-  /** Publisher, lane, and install counts come from the index, which lists live packages only. */
-  protected readonly listing = resource({
-    params: () => ({ id: `${this.ns()}/${this.pkg()}` }),
-    loader: async ({ params }) => (await this.api.index()).packages.find((item) => item.id === params.id) ?? null
-  });
-
   protected readonly loadProblem = computed(() => (this.detail.error() === undefined ? null : ApiError.from(this.detail.error())));
-  protected readonly entry = computed(() => (this.listing.hasValue() ? this.listing.value() : null));
 
   protected readonly owner = computed(() => {
     if (this.detail.hasValue()) {
@@ -63,7 +72,7 @@ export class PackagePage {
   protected readonly live = computed(() => this.detail.hasValue() && this.detail.value().liveVersion !== null && !this.detail.value().revoked);
   protected readonly canReport = computed(() => this.session.me() !== null && !this.owner());
   protected readonly canSuggest = computed(() => this.canReport() && this.live());
-  protected readonly space = computed(() => spaceWords(this.session.me(), this.ns(), this.entry()?.publisher.displayName ?? this.ns()));
+  protected readonly space = computed(() => spaceWords(this.session.me(), this.ns(), this.detail.value()?.publisher.displayName ?? this.ns()));
 
   /** Owners see every suggestion; anyone else sees their own, so the tab shows only when there is something. */
   protected readonly suggestions = resource({
@@ -85,6 +94,17 @@ export class PackagePage {
   });
 
   protected readonly packSkills = computed(() => (this.skills.hasValue() ? this.skills.value() : []));
+
+  /** The live version is one SKILL.md (beside the manifest the server writes), so the browser editor can change it. */
+  protected readonly liveFiles = resource({
+    params: () => (this.owner() && this.live() ? { files: versionFiles(this.ns(), this.pkg(), this.detail.value()?.liveVersion ?? "") } : undefined),
+    loader: ({ params }) => this.api.files(params.files)
+  });
+
+  protected readonly editable = computed(() => {
+    const files = this.liveFiles.hasValue() ? this.liveFiles.value().filter((file) => file.path !== "agent-plugins.json") : [];
+    return files.length === 1 && files[0]?.path.endsWith("SKILL.md") === true;
+  });
 
   protected readonly stats = resource({
     params: () => (this.owner() && this.detail.hasValue() && this.detail.value().liveVersion !== null ? { ns: this.ns(), pkg: this.pkg() } : undefined),
@@ -116,6 +136,20 @@ export class PackagePage {
   protected readonly ownerStatus = computed(() => (this.owner() && this.detail.hasValue() ? packageStatus(this.detail.value()) : null));
   protected readonly kinds = computed(() => describeKinds(this.shownVersion()?.componentKinds ?? []));
 
+  constructor() {
+    const title = inject(Title);
+    effect(() => {
+      const name = this.detail.value()?.name;
+      if (name !== undefined) {
+        title.setTitle(`${name} · Agent Plugins`);
+      }
+    });
+  }
+
+  protected purge(version: PackageVersion): void {
+    runTask(this.confirmPurge(version));
+  }
+
   protected withdraw(version: PackageVersion): void {
     runTask(this.confirmWithdraw(version));
   }
@@ -124,8 +158,29 @@ export class PackagePage {
     runTask(this.confirmRestore(version));
   }
 
-  protected report(): void {
-    runTask(this.sendReport());
+  protected report(kind: ReportKind): void {
+    runTask(this.sendReport(kind));
+  }
+
+  private async confirmPurge(version: PackageVersion): Promise<void> {
+    const confirmed = await prompt(this.dialog, {
+      title: `Purge version ${version.version}?`,
+      message:
+        "Its files are deleted for good, from storage and from every suggestion based on it, and its number can't be used again. PCs that have it keep their copy until the next version reaches them; remove the package from every PC as well if the files must go everywhere.",
+      confirm: "Purge",
+      danger: true
+    });
+    if (confirmed === undefined) {
+      return;
+    }
+
+    try {
+      await this.api.purgeVersion(this.ns(), this.pkg(), version.version);
+      this.snackBar.open(`Version ${version.version} purged.`, undefined, { duration: 4000 });
+      this.detail.reload();
+    } catch (error) {
+      this.snackBar.open(ApiError.from(error).message, "Dismiss");
+    }
   }
 
   private async confirmWithdraw(version: PackageVersion): Promise<void> {
@@ -133,7 +188,7 @@ export class PackagePage {
     const confirmed = await prompt(this.dialog, {
       title: `Withdraw version ${version.version}?`,
       message: live
-        ? "People who don't have it yet won't be able to install it. The previous version, if any, becomes the live one again."
+        ? "The previous version, if any, becomes the live one again, and PCs that have this one go back to it at their next check."
         : "It will no longer be offered to anyone. You can restore it later.",
       confirm: "Withdraw",
       danger: true
@@ -146,7 +201,6 @@ export class PackagePage {
       await this.api.withdraw(this.ns(), this.pkg(), version.version);
       this.snackBar.open(`Version ${version.version} withdrawn.`, undefined, { duration: 4000 });
       this.detail.reload();
-      this.listing.reload();
     } catch (error) {
       this.snackBar.open(ApiError.from(error).message, "Dismiss");
     }
@@ -166,26 +220,35 @@ export class PackagePage {
       await this.api.restore(this.ns(), this.pkg(), version.version);
       this.snackBar.open(`Version ${version.version} restored.`, undefined, { duration: 4000 });
       this.detail.reload();
-      this.listing.reload();
     } catch (error) {
       this.snackBar.open(ApiError.from(error).message, "Dismiss");
     }
   }
 
-  private async sendReport(): Promise<void> {
-    const reason = await prompt(this.dialog, {
-      title: "Report a problem",
-      message: "Tell the admins what's wrong: it doesn't work, it's harmful, or it contains something private. They'll take a look.",
-      confirm: "Send report",
-      field: { label: "What's wrong?", hint: "Up to 2,048 characters", required: true }
-    });
+  private async sendReport(kind: ReportKind): Promise<void> {
+    const reason = await prompt(
+      this.dialog,
+      kind === "problem"
+        ? {
+            title: "Report a problem",
+            message: "Tell the owners and the admins what's wrong: it doesn't work, it's harmful, or it contains something private.",
+            confirm: "Send report",
+            field: { label: "What's wrong?", hint: "Up to 2,048 characters", required: true }
+          }
+        : {
+            title: "Tell the owners",
+            message: "What works, what it gets wrong, what you wish it did. No files needed.",
+            confirm: "Send",
+            field: { label: "Your feedback", hint: "Up to 2,048 characters", required: true }
+          }
+    );
     if (reason === undefined) {
       return;
     }
 
     try {
-      await this.api.report(this.ns(), this.pkg(), reason);
-      this.snackBar.open("Thanks. The admins have your report.", undefined, { duration: 4000 });
+      await this.api.report(this.ns(), this.pkg(), reason, kind);
+      this.snackBar.open(kind === "problem" ? "Thanks. The owners and the admins have your report." : "Thanks. The owners have your feedback.", undefined, { duration: 4000 });
     } catch (error) {
       this.snackBar.open(ApiError.from(error).message, "Dismiss");
     }

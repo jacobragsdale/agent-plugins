@@ -4,6 +4,12 @@
       "additionalProperties": false,
       "properties": {
         "description": { "maxLength": 1024, "minLength": 1, "type": "string" },
+        "digest": {
+          "description": "Marketplace listing: the archive's current ETag for this caller, so an\nunchanged source is not asked for again.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": ["string", "null"]
+        },
         "name": { "maxLength": 120, "minLength": 1, "type": "string" },
         "packageCount": { "description": "Marketplace listing: how many packages the source currently publishes.", "format": "uint32", "minimum": 0, "type": ["integer", "null"] },
         "publisher": { "description": "Marketplace listing: the publisher's display name.", "maxLength": 120, "minLength": 1, "type": ["string", "null"] },

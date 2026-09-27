@@ -24,7 +24,7 @@ export const connectivitySchema = z.enum(["online", "offline", "degraded"]);
 /** When a fetch last succeeded; null when it never has. */
 const lastSuccessSchema = z.number().int().nonnegative().nullable().default(null);
 export const catalogErrorSchema = z.object({ path: z.string().min(1), message: z.string().min(1) }).readonly();
-export const targetIdSchema = z.enum(["cursor", "claude-code", "codex", "opencode", "grok-build", "github-copilot", "claude-desktop", "chatgpt", "m365-copilot"]);
+export const targetIdSchema = z.enum(["github-copilot", "cursor", "claude-code", "claude-desktop", "opencode", "pi", "codex", "chatgpt", "grok-build"]);
 export const agentProfileSchema = z
   .object({
     targetId: targetIdSchema,
@@ -48,7 +48,23 @@ export const componentSchema = z
     description: z.string().min(1),
     manualInvocation: z.boolean(),
     status: itemStatusSchema.optional(),
-    requiresApproval: z.boolean().default(false)
+    requiresApproval: z.boolean().default(false),
+    /** Target ids the person kept this component out of. */
+    excludedApps: z.array(z.string().min(1)).readonly().default([])
+  })
+  .readonly();
+/** One MCP server as the approval prompt shows it. */
+export const connectorSchema = z
+  .object({
+    componentId: z.string().min(1),
+    name: z.string().min(1),
+    summary: z.string().min(1),
+    detail: z.string().min(1),
+    environment: z.array(z.string().min(1)).readonly(),
+    missingEnvironment: z.array(z.string().min(1)).readonly(),
+    missingProgram: z.string().min(1).nullable(),
+    apps: z.array(z.string().min(1)).readonly(),
+    changed: z.boolean()
   })
   .readonly();
 export const capabilitySchema = z.discriminatedUnion("level", [
@@ -71,7 +87,10 @@ export const marketplaceMetaSchema = z
     installedBase: z.number().int().nonnegative(),
     restricted: z.boolean(),
     /** Visible only because someone shared it with this person. */
-    sharedWithYou: z.boolean().default(false)
+    sharedWithYou: z.boolean().default(false),
+    changelog: z.string().min(1).nullable().default(null),
+    /** Whether an admin let everyone see its MCP server; null without one. */
+    mcpApproved: z.boolean().nullable().default(null)
   })
   .readonly();
 export const itemSchema = z
@@ -94,6 +113,9 @@ export const itemSchema = z
     status: itemStatusSchema,
     requiresApproval: z.boolean().default(false),
     riskDetails: z.array(z.string().min(1)).readonly().default([]),
+    connectors: z.array(connectorSchema).readonly().default([]),
+    /** The person holds this package's background updates. */
+    held: z.boolean().default(false),
     marketplace: marketplaceMetaSchema.nullable().default(null)
   })
   .transform((item) => ({
@@ -104,7 +126,8 @@ export const itemSchema = z
       description: component.description,
       manualInvocation: component.manualInvocation,
       status: component.status ?? item.status,
-      requiresApproval: component.requiresApproval
+      requiresApproval: component.requiresApproval,
+      excludedApps: component.excludedApps
     }))
   }))
   .readonly();
@@ -144,7 +167,9 @@ export const repositorySchema = z
     sources: z.array(listedSourceSchema).readonly()
   })
   .readonly();
-export const itemReferenceSchema = z.object({ id: z.string().min(1), sourceId: z.string().min(2), localId: z.string().min(1) }).readonly();
+export const itemReferenceSchema = z
+  .object({ id: z.string().min(1), sourceId: z.string().min(2), localId: z.string().min(1), fromVersion: z.string().min(1).optional(), toVersion: z.string().min(1).optional() })
+  .readonly();
 export const itemFailureSchema = z.object({ id: z.string().min(1), message: z.string().min(1) }).readonly();
 export const autoUpdateReportSchema = z
   .object({
@@ -170,9 +195,14 @@ export const identitySchema = z
     namespaces: z.array(z.string().min(1)).readonly().default([]),
     teams: z.array(teamRefSchema).readonly().default([]),
     /** Suggested changes to their packages that wait for them in the portal. */
-    suggestionsWaiting: z.number().int().nonnegative().default(0)
+    suggestionsWaiting: z.number().int().nonnegative().default(0),
+    /** Open reports and feedback on their packages. */
+    reportsWaiting: z.number().int().nonnegative().default(0),
+    unreadNotifications: z.number().int().nonnegative().default(0)
   })
   .readonly();
+/** Marketplace news that arrived since the last sync; `link` is a portal path. */
+export const notificationSchema = z.object({ id: z.number().int().nonnegative(), kind: z.string(), text: z.string().min(1), link: z.string().min(1).nullable().default(null) }).readonly();
 /** A group of existing packages people install together; `members` are canonical ids. */
 export const bundleStateSchema = z
   .object({
@@ -236,7 +266,10 @@ export const appStateSchema = z
     marketplaceUrl: z.string().min(1).nullable().default(null),
     downloadUrl: z.string().min(1).nullable().default(null),
     identity: identitySchema.nullable().default(null),
-    preflight: preflightReportSchema.nullable().default(null)
+    preflight: preflightReportSchema.nullable().default(null),
+    notifications: tolerantArray(notificationSchema, "notification").default([]),
+    /** The app's log file, for "Open logs". */
+    logPath: z.string().min(1).nullable().default(null)
   })
   .readonly();
 export const preparedSourceSchema = z
@@ -318,6 +351,8 @@ export const savedBundleSchema = z.object({ id: z.string().min(3), name: z.strin
 export type AppState = z.infer<typeof appStateSchema>;
 export type CatalogItem = z.infer<typeof itemSchema>;
 export type CatalogComponent = CatalogItem["components"][number];
+export type Connector = z.infer<typeof connectorSchema>;
+export type MarketplaceNotification = z.infer<typeof notificationSchema>;
 export type ItemStatus = z.infer<typeof itemStatusSchema>;
 export type IpcErrorKind = z.infer<typeof ipcErrorKindSchema>;
 export type SourceStatus = z.infer<typeof sourceStatusSchema>;

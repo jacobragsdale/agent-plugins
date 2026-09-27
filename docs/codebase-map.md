@@ -15,30 +15,32 @@ docs/          This documentation set, with ADRs under decisions/
 
 A source becomes files on disk in one direction. Each stage may use the stage above it and nothing below.
 
-| Stage        | Modules                                                                                        | Responsibility                                                                                      |
-| ------------ | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Acquire      | `locator.rs`, `artifact.rs`, `sources.rs`, `source.rs`, `repository.rs`                        | Resolve an HTTPS locator, download, verify, extract safely, and cache a snapshot.                   |
-| Normalize    | `manifest.rs`, `catalog.rs`, `mcp.rs`, `digest.rs`                                             | Parse the pinned manifest, materialize skill names, validate MCP documents, digest content.         |
-| Plan         | `adapters.rs`, `agent_profiles.rs`, `planner.rs`, `resource.rs`                                | Detect agents, fan components across targets, coalesce identities, run structural preflight.        |
-| Execute      | `executor/`, `managed_documents.rs`, `fs_retry.rs`                                             | Stage, journal, activate, and roll back. The only writer of planned resources.                      |
-| Own          | `ledger.rs`, `install.rs`                                                                      | Record installations, bindings, and physical resources; derive item status.                         |
-| Serve        | `application/`, `ipc.rs`, `ipc_error.rs`, `app_state.rs`                                       | Sequence use cases behind locks, project state for the UI, and classify errors.                     |
-| Reach out    | `marketplace.rs`, `host_identity.rs`, `preflight.rs`                                           | Identity, marketplace requests, events, and the startup checks.                                     |
-| Host         | `paths.rs`, `startup.rs`, `process.rs`, `parallel.rs`, `qa_paths.rs`, `tray.rs`, `tutorial.rs` | Filesystem roots, environment repair, bounded subprocesses, QA isolation, tray, the skill tutorial. |
-| Entry points | `main.rs`, `lib.rs`, `cli.rs`, `deep_link.rs`, `staging.rs`, `bin/`                            | Window, command registration, headless verbs, website links, publish staging, validator binaries.   |
+| Stage        | Modules                                                                                                     | Responsibility                                                                                                                                                                            |
+| ------------ | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Acquire      | `locator.rs`, `artifact.rs`, `sources.rs`, `source.rs`, `repository.rs`                                     | Resolve an HTTPS locator, download, verify, extract safely, and cache a snapshot.                                                                                                         |
+| Normalize    | `manifest.rs`, `catalog.rs`, `mcp.rs`, `digest.rs`                                                          | Parse the pinned manifest, materialize skill names, validate MCP documents, digest content.                                                                                               |
+| Plan         | `adapters.rs`, `agent_profiles.rs`, `planner.rs`, `resource.rs`, `invocation.rs`, `choices.rs`              | Detect agents, fan components across targets, coalesce identities, run structural preflight. Apply the person's skill invocation, held-update, and connector-app choices.                 |
+| Execute      | `executor/`, `managed_documents.rs`, `fs_retry.rs`                                                          | Stage, journal, activate, and roll back. The only writer of planned resources.                                                                                                            |
+| Own          | `ledger.rs`, `install.rs`                                                                                   | Record installations, bindings, and physical resources; derive item status.                                                                                                               |
+| Serve        | `application/`, `ipc.rs`, `ipc_error.rs`, `app_state.rs`                                                    | Sequence use cases behind locks, project state for the UI, and classify errors.                                                                                                           |
+| Reach out    | `marketplace.rs`, `host_identity.rs`, `preflight.rs`                                                        | Identity, marketplace requests, events, and the startup checks.                                                                                                                           |
+| Host         | `paths.rs`, `startup.rs`, `process.rs`, `parallel.rs`, `qa_paths.rs`, `tray.rs`, `notify.rs`, `tutorial.rs` | Filesystem roots, environment repair and saved connector settings, the log file, bounded subprocesses, QA isolation, tray and Launch at Login, desktop notifications, the skill tutorial. |
+| Entry points | `main.rs`, `lib.rs`, `cli.rs`, `deep_link.rs`, `staging.rs`, `bin/`                                         | Window, command registration, headless verbs, website links, publish staging, validator binaries.                                                                                         |
 
 ### Modules worth knowing before you change anything
 
 | Module                 | Note                                                                                                                                                                                         |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `executor/mod.rs`      | The only filesystem writer for planned resources. `stage.rs` prepares, `journal.rs` recovers, `activate.rs` commits the ledger, `matching.rs` decides whether disk still matches the ledger. |
-| `planner.rs`           | Pure. Fan-out, coalescing, structural preflight, and `requires_approval` — the Tier 3 gate.                                                                                                  |
+| `planner.rs`           | Pure apart from reading the person's choices. Fan-out, coalescing, structural preflight, and `needs_approval` — the Tier 3 gate, which passes MCP entries the ledger already owns unchanged. |
 | `ledger.rs`            | Ledger v4: installations, bindings, resources. A resource dies when its last consumer binding does.                                                                                          |
 | `agent_profiles.rs`    | Detection is the configuration set. Results are cached for 60 seconds; a sync, diagnostics, or window focus clears the cache. A timed-out or failed probe keeps the agent as it was.         |
 | `managed_documents.rs` | Comment-preserving JSONC and TOML edits. Why installing an MCP server does not destroy a user's own config.                                                                                  |
 | `preflight.rs`         | Declarative checks with stable IDs. IDs are retired, never renamed.                                                                                                                          |
 | `ipc_error.rs`         | Turns an internal error string into the `IpcError` every command rejects with. See [IPC errors](#ipc-errors).                                                                                |
 | `fs_retry.rs`          | Retries transient Windows sharing errors for up to 4 seconds, and words I/O errors (`is_locked`, disk full, access denied) for people.                                                       |
+| `choices.rs`           | `package-choices.json`: packages whose updates are held, and the apps each connector is kept out of.                                                                                         |
+| `locator.rs`           | The marketplace and download URLs: the `Software\Policies\AgentPlugins` values, else the build-time constants.                                                                               |
 | `deep_link.rs`         | Parses `agent-plugins://install/…` and `open/…` links strictly, and holds the newest one until the window takes it. `startup.rs` registers the link type per user.                           |
 | `qa_paths.rs`          | Debug-only. `AGENT_PLUGINS_QA_ROOT` relocates every root beneath the temp directory.                                                                                                         |
 
@@ -84,25 +86,27 @@ The `app` feature is on by default. The `tools` feature builds the three tools a
 
 Presentation only. It validates every IPC response with Zod and owns no filesystem or manifest policy.
 
-| File                                                       | Responsibility                                                                    |
-| ---------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `App.tsx`                                                  | State, IPC calls, confirmation flow, and the header.                              |
-| `ipc/client.ts`                                            | The invoke wrapper, `toAppError`, and the one automatic retry.                    |
-| `ipc/schemas.ts`                                           | The Zod schema for every command result and for `IpcError`.                       |
-| `ipc/fixtures/app-state.json`                              | An `AppState` generated by a Rust test; the contract the schemas parse.           |
-| `lib/status.ts`                                            | Status labels and colors, action labels, and every confirmation dialog.           |
-| `lib/connectivity.ts`                                      | **Last checked**, the offline banner text, and the empty-page states.             |
-| `components/ErrorBoundary.tsx`                             | Replaces a crashed window with **Reload**.                                        |
-| `components/ItemCard.tsx`                                  | A package card and its component rows.                                            |
-| `components/SourceGroup.tsx`                               | One source and its bulk actions.                                                  |
-| `components/SystemStatusDialog.tsx`                        | The preflight summary, agent details, and full check list.                        |
-| `components/ManageSourcesDialog.tsx`                       | Catalog sources, added sources, and sources the catalog dropped.                  |
-| `components/TeamsDialog.tsx`, `components/ShareDialog.tsx` | Teams (create, members, invite link) and who can see a space, package, or bundle. |
-| `components/Bundles.tsx`                                   | The Bundles group and the New bundle dialog.                                      |
-| `components/LinkDialogs.tsx`                               | **Open a link** and the confirmation a website link opens.                        |
-| `components/CatalogToolbar.tsx`                            | Search, the drift filter, the status button, and the sync line.                   |
-| `components/AgentSetupNotice.tsx`, `components/Notice.tsx` | Callouts above the catalog, the offline banner, and error **Details**.            |
-| `*.test.ts`                                                | Vitest unit tests beside the module they cover.                                   |
+| File                                                       | Responsibility                                                                                     |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `App.tsx`                                                  | State, IPC calls, confirmation flow, and the header.                                               |
+| `ipc/client.ts`                                            | The invoke wrapper, `toAppError`, and the one automatic retry.                                     |
+| `ipc/schemas.ts`                                           | The Zod schema for every command result and for `IpcError`.                                        |
+| `ipc/fixtures/app-state.json`                              | An `AppState` generated by a Rust test; the contract the schemas parse.                            |
+| `lib/status.ts`                                            | Status labels and colors, action labels, and every confirmation dialog.                            |
+| `lib/connectivity.ts`                                      | **Last checked**, the offline banner text, and the empty-page states.                              |
+| `components/ErrorBoundary.tsx`                             | Replaces a crashed window with **Reload**.                                                         |
+| `components/ItemCard.tsx`                                  | A package card, its notes and **More** menu, and its component rows.                               |
+| `components/SourceGroup.tsx`                               | One source and its bulk actions.                                                                   |
+| `components/SystemStatusDialog.tsx`                        | The preflight summary, agent details, and full check list.                                         |
+| `components/ManageSourcesDialog.tsx`                       | Catalog sources, added sources, and sources the catalog dropped.                                   |
+| `components/TeamsDialog.tsx`, `components/ShareDialog.tsx` | Teams (create, members, invite link) and who can see a space, package, or bundle.                  |
+| `components/Bundles.tsx`                                   | The Bundles group and the New bundle dialog.                                                       |
+| `components/LinkDialogs.tsx`                               | **Open a link** and the confirmation a website link opens.                                         |
+| `components/ApprovalDialog.tsx`                            | **Allow connector?** and **Connector settings**: what each connector runs and the values it needs. |
+| `components/AppsDialog.tsx`                                | **Which apps use it?**: the apps a connector is kept out of.                                       |
+| `components/CatalogToolbar.tsx`                            | Search, the show and sort menus, the drift filter, the **Status** button, and the sync line.       |
+| `components/AgentSetupNotice.tsx`, `components/Notice.tsx` | Callouts above the catalog, the offline banner, and error **Details**.                             |
+| `*.test.ts`                                                | Vitest unit tests beside the module they cover.                                                    |
 
 Adding a command means touching `ipc.rs`, `lib.rs`, and `src/ipc/schemas.ts` together. Changing `AppState` also means regenerating the fixture; see [how to work on Agent Plugins](development.md#change-the-ipc-surface).
 

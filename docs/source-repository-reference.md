@@ -12,20 +12,21 @@ A source repository is a catalog document that lists sources. It is not installa
 }
 ```
 
-| Field                    | Rules                                                                                                                                     |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `version`                | Required integer. Must be `1`.                                                                                                            |
-| `repository.id`          | 2–32 lowercase ASCII letters, digits, or single hyphens; starts with a letter. Does not namespace packages.                               |
-| `repository.name`        | 1–120 characters.                                                                                                                         |
-| `repository.description` | 1–1,024 characters.                                                                                                                       |
-| `sources`                | 0–5,000 entries. Duplicate URLs after canonicalization are fatal. An empty list is a valid, empty marketplace.                            |
-| `sources[].name`         | 1–120 characters. Display only.                                                                                                           |
-| `sources[].description`  | 1–1,024 characters. Display only.                                                                                                         |
-| `sources[].url`          | HTTPS artifact URL of a source archive. No credentials. Query strings are kept.                                                           |
-| `sources[].sourceId`     | Optional hint, same charset as `source.id`. After opt-in, the fetched `agent-plugins.json` is authoritative. A disagreement fails opt-in. |
-| `sources[].publisher`    | Optional marketplace listing field: the publisher's display name, 1–120 characters.                                                       |
-| `sources[].packageCount` | Optional marketplace listing field: how many packages the source currently publishes.                                                     |
-| `sources[].updatedAt`    | Optional marketplace listing field: RFC 3339 time the archive last changed.                                                               |
+| Field                    | Rules                                                                                                                                                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `version`                | Required integer. Must be `1`.                                                                                                                                                                               |
+| `repository.id`          | 2–32 lowercase ASCII letters, digits, or single hyphens; starts with a letter. Does not namespace packages.                                                                                                  |
+| `repository.name`        | 1–120 characters.                                                                                                                                                                                            |
+| `repository.description` | 1–1,024 characters.                                                                                                                                                                                          |
+| `sources`                | 0–5,000 entries. Duplicate URLs after canonicalization are fatal. An empty list is a valid, empty marketplace.                                                                                               |
+| `sources[].name`         | 1–120 characters. Display only.                                                                                                                                                                              |
+| `sources[].description`  | 1–1,024 characters. Display only.                                                                                                                                                                            |
+| `sources[].url`          | HTTPS artifact URL of a source archive. No credentials. Query strings are kept.                                                                                                                              |
+| `sources[].sourceId`     | Optional hint, same charset as `source.id`. After opt-in, the fetched `agent-plugins.json` is authoritative. A disagreement fails opt-in.                                                                    |
+| `sources[].publisher`    | Optional marketplace listing field: the publisher's display name, 1–120 characters.                                                                                                                          |
+| `sources[].packageCount` | Optional marketplace listing field: how many packages the source currently publishes.                                                                                                                        |
+| `sources[].updatedAt`    | Optional marketplace listing field: RFC 3339 time the archive last changed.                                                                                                                                  |
+| `sources[].digest`       | Optional marketplace listing field, 1–128 characters: the archive's current `ETag` for this caller, without quotes. When it equals the ETag of the copy already saved, the app does not request the archive. |
 
 Listing metadata is display-only. Installed names, conflicts, and `sourceKey` come from the opted-in source. Nested catalogs are not accepted.
 
@@ -49,8 +50,8 @@ Refresh of an artifact uses `HEAD` `ETag` and `Last-Modified` when both match th
 
 `sources.json` version 6 stores repositories and sources as artifact locators. Earlier versions, including Git sources, are refused.
 
-`repositoryKey` on a source is optional provenance for the UI. The app has no command to add or remove a catalog: the build-time marketplace URL supplies the only one, and sync adds it when it is missing.
+`repositoryKey` on a source is optional provenance for the UI. The app has no command to add or remove a catalog: the marketplace URL supplies the only one, and sync adds it when it is missing.
 
-The marketplace URL is a build-time constant and its catalog is `{marketplace}/api/catalog`. Sync adds that catalog if it is missing and then adds every source it lists, so marketplace packages need no Manage Sources step. Users can still add and remove listed sources from Manage Sources; they do not paste URLs. Requests to the marketplace origin carry the caller's identity (see [ADR 0004](decisions/0004-internal-marketplace.md)).
+The marketplace URL is the `MarketplaceUrl` policy value when IT sets one ([the rollout guide](rollout-guide.md#point-it-at-your-marketplace)), otherwise a build-time constant, and its catalog is `{marketplace}/api/catalog`. Sync adds that catalog if it is missing and then adds every source it lists, so marketplace packages need no Manage Sources step. Users can still add and remove listed sources from Manage Sources; they do not paste URLs. Requests to the marketplace origin carry the caller's identity (see [ADR 0004](decisions/0004-internal-marketplace.md)).
 
 See [the source manifest reference](manifest-reference.md) for package fields and [architecture](architecture.md) for acquisition.

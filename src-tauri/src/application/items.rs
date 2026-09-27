@@ -6,7 +6,6 @@ use crate::install::{self, ItemStatus, OperationOutcome, SourceRemovalPlan};
 use crate::marketplace::{self, ClientEvent};
 use crate::paths::SystemPaths;
 use crate::planner;
-use crate::resource::DesiredResource;
 use crate::source::{self, ConfiguredSource, SourceSnapshot};
 use crate::sources::{cache_base_dir, config_base_dir};
 use std::collections::BTreeSet;
@@ -181,24 +180,150 @@ pub(super) fn requested_component_ids(
     }
 }
 
+/// Removes a package or one component. `force` removes one the person
+/// changed too, after saving their copy to the backups folder.
 pub(crate) async fn uninstall_item(
     runtime: &RuntimeState,
     source_id: &str,
     local_id: &str,
     component_id: Option<&str>,
+    force: bool,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
     let paths = SystemPaths::from_system()?;
     let config = config_base_dir()?;
-    let source = source::configured_source(&config, source_id)?;
-    let ids = component_id.map(|component_id| vec![component_id.to_string()]);
     let canonical_id = format!("{source_id}/{local_id}");
+    // What is installed decides: a package whose source is no longer
+    // configured, or one installed from a local folder, still comes off.
+    let ledger = crate::executor::read_ledger(&paths)?;
+    let source = match (
+        source::configured_source(&config, source_id),
+        ledger.items.get(&canonical_id),
+    ) {
+        (Ok(source), Some(record)) if source.source_key != record.source_key => {
+            super::project::record_source(&[], record)
+        }
+        (Ok(source), _) => source,
+        (Err(_), Some(record)) => super::project::record_source(&[], record),
+        (Err(error), None) => return Err(error),
+    };
+    let ids = component_id.map(|component_id| vec![component_id.to_string()]);
     let outcome =
-        install::uninstall_item_components(&paths, &source, &canonical_id, ids.as_deref(), false)?;
+        install::uninstall_item_components(&paths, &source, &canonical_id, ids.as_deref(), force)?;
     if ids.is_none() {
+        forget_hold(&paths, &canonical_id);
         report_operation(BulkAction::Uninstall, &[canonical_id]);
     }
     Ok(outcome)
+}
+
+/// A hold belongs to the install it was set on; installing again starts fresh.
+fn forget_hold(paths: &SystemPaths, canonical_id: &str) {
+    let mut choices = crate::choices::read_or_default(paths);
+    if choices.held.remove(canonical_id) {
+        if let Err(error) = crate::choices::write(paths, &choices) {
+            eprintln!("Could not forget the update hold on {canonical_id}: {error}");
+        }
+    }
+}
+
+/// Stops managing a package and leaves its files as they are, so the person
+/// keeps their own edited copy.
+pub(crate) async fn keep_my_version(
+    runtime: &RuntimeState,
+    source_id: &str,
+    local_id: &str,
+) -> Result<(), String> {
+    let _guard = runtime.operation_lock.lock().await;
+    let paths = SystemPaths::from_system()?;
+    let canonical_id = format!("{source_id}/{local_id}");
+    crate::executor::forget(&paths, &canonical_id)?;
+    forget_hold(&paths, &canonical_id);
+    Ok(())
+}
+
+/// Holds a package's background updates, or lets them run again.
+pub(crate) async fn set_held(
+    runtime: &RuntimeState,
+    source_id: &str,
+    local_id: &str,
+    held: bool,
+) -> Result<(), String> {
+    let _guard = runtime.operation_lock.lock().await;
+    let paths = SystemPaths::from_system()?;
+    let mut choices = crate::choices::read(&paths)?;
+    let id = format!("{source_id}/{local_id}");
+    if held {
+        choices.held.insert(id);
+    } else {
+        choices.held.remove(&id);
+    }
+    crate::choices::write(&paths, &choices)
+}
+
+/// Keeps a component out of some apps and applies it at once. Leaving an app
+/// only removes what it had; adding one back installs there, which for an MCP
+/// server needs the approval the window asked for.
+pub(crate) async fn set_excluded_apps(
+    runtime: &RuntimeState,
+    source_id: &str,
+    local_id: &str,
+    component_id: &str,
+    excluded: Vec<String>,
+    trust_approved: bool,
+) -> Result<OperationOutcome, String> {
+    let _guard = runtime.operation_lock.lock().await;
+    let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
+    planner::validate_component_id(&item, component_id)?;
+    if let Some(unknown) = excluded.iter().find(|id| {
+        !crate::agent_profiles::TargetId::ALL
+            .iter()
+            .any(|target| target.as_str() == id.as_str())
+    }) {
+        return Err(format!("{unknown} is not an app Agent Plugins knows."));
+    }
+    let previous = crate::choices::read(&paths)?;
+    let mut next = previous.clone();
+    next.set_excluded(&item.id, component_id, excluded.into_iter().collect());
+    if next == previous {
+        return Ok(OperationOutcome::default());
+    }
+    crate::choices::write(&paths, &next)?;
+    let installed = crate::executor::read_ledger(&paths)?
+        .items
+        .get(&item.id)
+        .is_some_and(|record| {
+            planner::selected_component_ids(record, &item)
+                .iter()
+                .any(|id| id == component_id)
+        });
+    if !installed {
+        return Ok(OperationOutcome::default());
+    }
+    install::install_item_components_approved(
+        &paths,
+        &source,
+        &snapshot,
+        &item,
+        trust_approved,
+        Some(&[component_id.to_string()]),
+    )
+    .inspect_err(|_| {
+        if let Err(error) = crate::choices::write(&paths, &previous) {
+            eprintln!("Could not restore the app choices: {error}");
+        }
+    })
+}
+
+/// Saves connector settings such as API keys where the person's AI apps read
+/// environment variables.
+pub(crate) async fn save_connector_settings(
+    values: std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    for (name, value) in values {
+        crate::startup::save_user_variable(&name, value.trim())?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn bulk_plan(
@@ -646,6 +771,7 @@ fn cached_sources() -> Result<(SystemPaths, Vec<(ConfiguredSource, SourceSnapsho
 pub(crate) fn repair_missing_installs() -> Result<Vec<String>, String> {
     let (paths, sources) = cached_sources()?;
     crate::executor::sweep_stale_staging(&paths);
+    crate::executor::prune_backups(&paths);
     repair_in(&paths, &sources)
 }
 
@@ -682,7 +808,7 @@ fn repair_in(
             }
             // An agent found after the install has no approved MCP entry, so
             // put back everything else rather than nothing, as extending does.
-            if !mcp_entries_owned(&plan, &ledger) {
+            if !planner::mcp_entries_owned(&plan, &ledger, None) {
                 selected.retain(|id| {
                     item.components.iter().any(|component| {
                         component.id == *id && component.kind != CatalogComponentKind::McpServer
@@ -696,7 +822,7 @@ fn repair_in(
             }
             // An MCP entry comes back only when the ledger still holds that
             // exact entry, which the user approved when installing it.
-            let approved = mcp_entries_owned(&plan, &ledger);
+            let approved = planner::mcp_entries_owned(&plan, &ledger, None);
             match install::install_item_components_approved(
                 paths,
                 source,
@@ -723,25 +849,6 @@ fn repair_in(
         }
     }
     Ok(repaired)
-}
-
-/// Whether every MCP entry the plan writes is one the ledger already owns with
-/// the same content, meaning the user approved it when installing.
-fn mcp_entries_owned(
-    plan: &crate::resource::OperationPlan,
-    ledger: &crate::ledger::InstallationLedger,
-) -> bool {
-    plan.resources.values().all(|planned| {
-        !matches!(planned.desired, DesiredResource::StructuredEntry(_))
-            || ledger
-                .resource_by_identity(&planned.desired.identity())
-                .is_some_and(|owned| {
-                    planned
-                        .desired
-                        .desired_digest()
-                        .is_ok_and(|digest| digest == owned.desired_digest)
-                })
-    })
 }
 
 /// After the ledger came back from its older backup, a package whose files
@@ -800,14 +907,25 @@ fn extend_in(
                 continue;
             }
             let retry = crate::executor::take_skipped_agent(&item.id);
-            let ids = planner::selected_component_ids(record, item)
-                .into_iter()
-                .filter(|id| {
-                    retry
-                        || item.components.iter().any(|component| {
-                            component.id == *id && component.kind != CatalogComponentKind::McpServer
-                        })
+            let selected = planner::selected_component_ids(record, item);
+            let is_mcp = |id: &str| {
+                item.components.iter().any(|component| {
+                    component.id == id && component.kind == CatalogComponentKind::McpServer
                 })
+            };
+            // An approved MCP server may be rewritten for the agents that
+            // already have it, when this version of the app spells their
+            // entries differently; it never spreads to a new agent unasked.
+            let mcp_agents_unchanged = record.item_digest == item.digest
+                && planner::plan(paths, snapshot, item, None, Some(&selected)).is_ok_and(|plan| {
+                    plan.bindings
+                        .iter()
+                        .filter(|(_, binding)| is_mcp(&binding.component_id))
+                        .all(|(binding_id, _)| record.binding_ids.contains(binding_id))
+                });
+            let ids = selected
+                .into_iter()
+                .filter(|id| retry || mcp_agents_unchanged || !is_mcp(id))
                 .collect::<Vec<_>>();
             let Ok(plan) = planner::plan(paths, snapshot, item, None, Some(&ids)) else {
                 continue;
@@ -822,7 +940,10 @@ fn extend_in(
                         .is_some_and(|binding| ids.contains(&binding.component_id))
                 })
                 .collect::<BTreeSet<_>>();
-            if ids.is_empty() || current == plan.bindings.keys().collect() {
+            if ids.is_empty()
+                || (current == plan.bindings.keys().collect()
+                    && crate::executor::plan_satisfied(&ledger, &plan).unwrap_or(true))
+            {
                 continue;
             }
             match install::install_item_components_approved(
@@ -830,7 +951,7 @@ fn extend_in(
                 source,
                 snapshot,
                 item,
-                retry,
+                retry || mcp_agents_unchanged,
                 Some(&ids),
             ) {
                 Ok(outcome) => {
@@ -903,7 +1024,6 @@ mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
-            onedrive_commercial: None,
         }
     }
 
@@ -973,6 +1093,80 @@ mod tests {
         );
         assert!(!claude.exists());
         assert!(shared.is_dir());
+    }
+
+    #[test]
+    fn a_retired_app_releases_what_it_was_given() {
+        use crate::agent_profiles::{set_enabled, TargetId};
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        set_enabled(&paths, TargetId::Cursor, true).expect("cursor");
+        set_enabled(&paths, TargetId::ClaudeCode, true).expect("claude");
+        let (source, snapshot) = skill_source(root.path());
+        let item = snapshot.catalog.items["review"].clone();
+        install::install_item_components_approved(&paths, &source, &snapshot, &item, false, None)
+            .expect("install");
+        // Ledgers written before Microsoft 365 Copilot was dropped still name it.
+        let ledger_path = paths.app_data().join("installations.json");
+        let ledger = fs::read_to_string(&ledger_path).expect("ledger");
+        fs::write(&ledger_path, ledger.replace("claude-code", "m365-copilot")).expect("retire");
+        set_enabled(&paths, TargetId::ClaudeCode, false).expect("claude gone");
+        let sources = vec![(source, snapshot)];
+
+        assert_eq!(
+            extend_in(&paths, &sources).expect("release"),
+            std::slice::from_ref(&item.name)
+        );
+        assert!(!paths.home.join(".claude/skills/acme-review").exists());
+        assert!(paths.home.join(".agents/skills/acme-review").is_dir());
+    }
+
+    fn mcp_source(root: &Path) -> (ConfiguredSource, SourceSnapshot) {
+        let (source, mut snapshot) = skill_source(root);
+        fs::create_dir_all(snapshot.path.join("mcp")).expect("mcp dir");
+        fs::write(
+            snapshot.path.join("mcp/database.json"),
+            r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"database":{"type":"stdio","command":"node","args":["server.js"]}}}"#,
+        )
+        .expect("mcp");
+        fs::write(
+            snapshot.path.join("agent-plugins.json"),
+            r#"{"version":2,"source":{"id":"acme","name":"Acme","description":"Test"},"packages":[{"id":"review","components":[{"kind":"skill","id":"review","path":"skills/review"},{"kind":"mcpServer","id":"database","path":"mcp/database.json"}]}]}"#,
+        )
+        .expect("manifest");
+        snapshot.catalog =
+            crate::catalog::read_manifest_catalog(&snapshot.path, source::TEST_SOURCE_KEY)
+                .expect("catalog");
+        (source, snapshot)
+    }
+
+    #[test]
+    fn an_approved_mcp_server_follows_its_agents_new_files_but_not_new_agents() {
+        use crate::agent_profiles::{set_enabled, TargetId};
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        set_enabled(&paths, TargetId::GithubCopilot, true).expect("copilot");
+        let (source, snapshot) = mcp_source(root.path());
+        let item = snapshot.catalog.items["review"].clone();
+        install::install_item_components_approved(&paths, &source, &snapshot, &item, true, None)
+            .expect("install");
+        let sources = vec![(source, snapshot)];
+        assert!(extend_in(&paths, &sources).expect("noop").is_empty());
+
+        // VS Code starts for the first time: Copilot's server goes to its file too.
+        fs::create_dir_all(paths.config.join("Code/User")).expect("vscode");
+        assert_eq!(
+            extend_in(&paths, &sources).expect("vscode"),
+            std::slice::from_ref(&item.name)
+        );
+        let vscode = fs::read_to_string(paths.config.join("Code/User/mcp.json")).expect("mcp.json");
+        assert!(vscode.contains("acme-database"));
+
+        // A newly detected agent gets the skill, never the server, without asking.
+        set_enabled(&paths, TargetId::ClaudeCode, true).expect("claude");
+        extend_in(&paths, &sources).expect("claude");
+        assert!(paths.home.join(".claude/skills/acme-review").is_dir());
+        assert!(!paths.home.join(".claude.json").exists());
     }
 
     #[test]

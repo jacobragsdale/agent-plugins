@@ -10,8 +10,8 @@ export function AgentSetupNotice({ visible, onChoose }: Readonly<{ visible: bool
     <Callout.Root className="app-callout" color="blue" role="status">
       <div className="callout-content">
         <Callout.Text>
-          No supported AI app was found. Packages can't be installed until Claude Desktop, ChatGPT, Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or
-          GitHub Copilot is on this machine.
+          No supported AI app was found. Skills can't be installed until GitHub Copilot, Cursor, or Claude (Claude Code or Claude Desktop) is on this computer, or another supported app such as
+          OpenCode, pi, Codex, ChatGPT, or Grok Build.
         </Callout.Text>
         <Button className="callout-action" size="1" onClick={onChoose}>
           View AI apps

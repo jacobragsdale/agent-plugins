@@ -1,11 +1,14 @@
 import { Component, computed, inject, input, output, resource, signal } from "@angular/core";
 import { MatButtonModule } from "@angular/material/button";
-import { MatDialog } from "@angular/material/dialog";
+import { MAT_DIALOG_DATA, MatDialog, MatDialogModule } from "@angular/material/dialog";
+import { MatButtonToggleModule } from "@angular/material/button-toggle";
 import { MatProgressBarModule } from "@angular/material/progress-bar";
 import { MatSnackBar } from "@angular/material/snack-bar";
 import { Router, RouterLink } from "@angular/router";
+import { firstValueFrom } from "rxjs";
 import type { Suggestion } from "../api";
 import { Api, ApiError, suggestionFiles } from "../api";
+import type { Bump } from "../format";
 import { formatAge, nextVersion } from "../format";
 import { Session } from "../session";
 import { prompt } from "../shared/dialogs";
@@ -15,7 +18,45 @@ import { describeKinds } from "../shared/package-card";
 import { suggestionStates } from "../shared/suggestion-list";
 import { runTask } from "../shared/tasks";
 
-const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
+interface AcceptData {
+  readonly name: string;
+  readonly by: string;
+  readonly versions: readonly string[];
+}
+
+/** Publishing a suggestion: the same three kinds of change as a new version, and the number that follows. */
+@Component({
+  selector: "app-accept-dialog",
+  imports: [MatDialogModule, MatButtonModule, MatButtonToggleModule],
+  template: `
+    <h2 mat-dialog-title>Publish this change to {{ data.name }}?</h2>
+    <mat-dialog-content class="stack">
+      <p>It becomes the new version, credited to {{ data.by }}, and reaches everyone who has it at their next check.</p>
+      <span id="accept-bump" class="label">What kind of change is this?</span>
+      <mat-button-toggle-group aria-labelledby="accept-bump" [value]="bump()" (change)="setBump($event.value)">
+        <mat-button-toggle value="patch">Small fix</mat-button-toggle>
+        <mat-button-toggle value="minor">New feature</mat-button-toggle>
+        <mat-button-toggle value="major">Big change</mat-button-toggle>
+      </mat-button-toggle-group>
+      <p class="muted">This will be version {{ version() }}.</p>
+    </mat-dialog-content>
+    <mat-dialog-actions align="end">
+      <button mat-button type="button" mat-dialog-close>Cancel</button>
+      <button mat-flat-button type="button" [mat-dialog-close]="version()">Publish</button>
+    </mat-dialog-actions>
+  `
+})
+export class AcceptDialog {
+  protected readonly data = inject<AcceptData>(MAT_DIALOG_DATA);
+  protected readonly bump = signal<Bump>("patch");
+  protected readonly version = computed(() => nextVersion(this.data.versions, this.bump()));
+
+  protected setBump(value: unknown): void {
+    if (value === "patch" || value === "minor" || value === "major") {
+      this.bump.set(value);
+    }
+  }
+}
 
 /** What the suggester said, what became of it, and the decision buttons while it waits. */
 @Component({
@@ -155,27 +196,9 @@ export class SuggestionPage {
 
   private async confirmAccept(suggestion: Suggestion): Promise<void> {
     const detail = await this.api.package(suggestion.namespace, suggestion.packageId);
-    const version = await prompt(this.dialog, {
-      title: `Publish this change to ${suggestion.name}?`,
-      message: `It becomes the new version, credited to ${suggestion.suggestedByName}, and reaches everyone who has it at their next check.`,
-      confirm: "Publish",
-      field: {
-        label: "Version",
-        hint: "major.minor.patch; the next small fix is filled in",
-        required: true,
-        single: true,
-        value: nextVersion(
-          detail.versions.map((candidate) => candidate.version),
-          "patch"
-        )
-      }
-    });
+    const data: AcceptData = { name: suggestion.name, by: suggestion.suggestedByName, versions: detail.versions.map((candidate) => candidate.version) };
+    const version = await firstValueFrom(this.dialog.open<AcceptDialog, AcceptData, string>(AcceptDialog, { data, width: "32rem" }).afterClosed());
     if (version === undefined) {
-      return;
-    }
-
-    if (!semver.test(version)) {
-      this.snackBar.open(`${version} is not a version number. Use major.minor.patch, for example 1.2.0.`, "Dismiss");
       return;
     }
 

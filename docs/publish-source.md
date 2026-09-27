@@ -1,6 +1,6 @@
 # Publish a portable multi-agent source
 
-This tutorial publishes one Agent Skill and one MCP server as a manifest v2 package. Agent Plugins will project the package across the agents a user explicitly enables.
+This tutorial publishes one Agent Skill and one MCP server as a manifest v2 package. Agent Plugins projects the package across the agents it detects on each computer.
 
 ## Create the repository
 
@@ -40,7 +40,7 @@ Create `mcp/database.json`:
 { "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "mcpServers": { "database": { "type": "stdio", "command": "npx", "args": ["@acme/database-mcp"] } } }
 ```
 
-The stdio command must be a bare executable on `PATH`. Do not use `./bin/server` or `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` placeholders. Never embed a secret in a sensitive header; reference an environment variable such as `${ACME_TOKEN}`. For every MCP field, see [the source manifest reference](manifest-reference.md#mcp-server-component).
+The stdio command must be a bare executable on `PATH`. Do not use `./bin/server` or `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` placeholders. Never embed a secret; reference an environment variable such as `${ACME_TOKEN}` (in a header, `Bearer ${ACME_TOKEN}`), and each person enters their own value when they install. For every MCP field, see [the source manifest reference](manifest-reference.md#mcp-server-component).
 
 ## Declare the package
 
@@ -77,7 +77,13 @@ npx ajv-cli validate --spec=draft2020 --strict=false \
   -d agent-plugins.json
 ```
 
-Then run the repository-aware validator for source containment, component names, MCP shape, portability, symlinks, and repository limits:
+Then check it the way publishing will, including the credential scan, size limits, and which apps can use each part:
+
+```bash
+agent-plugins validate /path/to/example-source
+```
+
+The `validate-source` binary runs the repository-aware checks alone (source containment, component names, MCP shape, portability, symlinks, and repository limits), and also takes an HTTPS archive:
 
 ```bash
 cargo run --manifest-path /path/to/agent-plugins/src-tauri/Cargo.toml \
@@ -100,14 +106,13 @@ Host the archive at a stable HTTPS URL that you overwrite when you want users to
 
 ## Publish and verify
 
-Upload the archive to the HTTPS URL and list it in a [source repository](publish-source-repository.md). In Agent Plugins:
+The shipped app subscribes to one catalog, its marketplace's, and adds every source that catalog lists; it has no way to add another catalog or a pasted URL. To reach its users, publish the source to the marketplace instead: `agent-plugins publish /path/to/example-source --version 1.0.0` uploads the declared paths as one package ([Publish to the marketplace](publish-to-marketplace.md)). A self-hosted archive and [source repository](publish-source-repository.md) serve builds configured for them.
+
+To try the package on your own computer without publishing, run `agent-plugins install --local /path/to/example-source --approve-mcp`. It installs as `local/review`. Then:
 
 1. Open **System status** and confirm the agents this machine found.
-2. Open **Manage Sources**. Select **Add** on the listed source.
-3. Confirm. Packages become available; nothing is installed yet.
-4. Select **Install** on the package.
-5. Review every target capability and physical resource. Shared `~/.agents/skills` projections should appear once with several detected consumers. Claude Code adds a separate `~/.claude/skills` copy. MCP install is Tier 3; Install shows the command the server would run and asks before it writes anything.
-6. Confirm the transaction and inspect the target after its documented reload boundary.
+2. Inspect each target after its reload boundary. Shared `~/.agents/skills` projections should appear once with several detected consumers. Claude Code adds a separate `~/.claude/skills` copy. The MCP server appears in each target's own file, spelled for that target ([MCP spelling](adapter-contract.md#mcp-spelling)).
+3. Remove it with `agent-plugins uninstall local/review`.
 
 Static file presence proves the desired state was written, not that an agent loaded it. For runtime evidence, use the target's own skill/config inspection surface in a disposable home and record the target version.
 

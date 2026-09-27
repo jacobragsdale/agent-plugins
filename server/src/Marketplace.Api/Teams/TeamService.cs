@@ -1,6 +1,7 @@
 using Marketplace.Api.Access;
 using Marketplace.Api.Auth;
 using Marketplace.Api.Data;
+using Marketplace.Api.Notifications;
 using Marketplace.Api.Packages;
 using Microsoft.EntityFrameworkCore;
 
@@ -23,6 +24,8 @@ public sealed record InviteRequest(bool? Reset);
 
 public sealed record InviteView(string Invite);
 
+public sealed record TransferRequest(string? Account);
+
 public sealed record DirectoryView(PersonView[] People, TeamRef[] Teams);
 
 /// <summary>What a link leads to. <see cref="TargetKind"/> is <c>team</c>, <c>space</c>, <c>package</c>, or <c>bundle</c>.</summary>
@@ -35,7 +38,7 @@ public sealed record RedeemedLink(string Kind, string TargetKind, string Target,
 /// owners also manage members, the invite link, the name, and the team's visibility. A team is a
 /// publisher row of kind team, created with the team, whose account is the namespace itself.
 /// </summary>
-public sealed class TeamService(MarketplaceDbContext db, AccessService access, PublishService publish, TimeProvider timeProvider)
+public sealed class TeamService(MarketplaceDbContext db, AccessService access, PublishService publish, NotificationService notifications, TimeProvider timeProvider)
 {
     public const int MaxDirectoryResults = 10;
     private const string GoneLink = "This link no longer works. Ask the person who sent it for a new one.";
@@ -71,6 +74,7 @@ public sealed class TeamService(MarketplaceDbContext db, AccessService access, P
             db.AccessRules.Add(new AccessRule { Target = ns, Visibility = Visibility.Private, UpdatedBy = identity.Account, UpdatedAt = now });
         }
 
+        db.Audit(identity.Account, "team.create", ns, displayName, now);
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return await ViewAsync(identity, ns, cancellationToken);
@@ -105,6 +109,7 @@ public sealed class TeamService(MarketplaceDbContext db, AccessService access, P
     {
         var team = await OwnedTeamAsync(identity, ns, cancellationToken);
         team.DisplayName = DisplayName(request.DisplayName);
+        db.Audit(identity.Account, "team.rename", ns, team.DisplayName, timeProvider.GetUtcNow().UtcDateTime);
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         await db.LockNamespaceAsync(ns, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
@@ -118,18 +123,20 @@ public sealed class TeamService(MarketplaceDbContext db, AccessService access, P
     /// <summary>Adds a member, or changes whether an existing one is an owner.</summary>
     public async Task<TeamView> SetMemberAsync(MarketplaceIdentity identity, string ns, MemberRequest request, CancellationToken cancellationToken)
     {
-        await OwnedTeamAsync(identity, ns, cancellationToken);
+        var team = await OwnedTeamAsync(identity, ns, cancellationToken);
         var account = request.Account?.Trim() ?? string.Empty;
         if (account.Length is 0 or > AccessService.MaxEntryLength)
         {
             throw new ProblemException(422, $"Name the person by their Windows account, up to {AccessService.MaxEntryLength} characters.");
         }
 
+        var now = timeProvider.GetUtcNow().UtcDateTime;
         var members = await db.TeamMembers.Where(member => member.Namespace == ns).ToListAsync(cancellationToken);
         var existing = members.FirstOrDefault(member => string.Equals(member.Account, account, StringComparison.OrdinalIgnoreCase));
         if (existing is null)
         {
-            db.TeamMembers.Add(new TeamMember { Namespace = ns, Account = account, IsOwner = request.Owner ?? false, JoinedAt = timeProvider.GetUtcNow().UtcDateTime });
+            db.TeamMembers.Add(new TeamMember { Namespace = ns, Account = account, IsOwner = request.Owner ?? false, JoinedAt = now });
+            notifications.Notify([account], identity.Account, "team.added", $"{identity.DisplayName} added you to {team.DisplayName}. You can publish there now.", $"/teams/{ns}");
         }
         else
         {
@@ -137,6 +144,7 @@ public sealed class TeamService(MarketplaceDbContext db, AccessService access, P
             RequireAnOwner(members);
         }
 
+        db.Audit(identity.Account, "team.member.set", ns, $"{account}{(request.Owner == true ? " (owner)" : string.Empty)}", now);
         await db.SaveChangesAsync(cancellationToken);
         return await ViewAsync(identity, ns, cancellationToken);
     }
@@ -166,10 +174,11 @@ public sealed class TeamService(MarketplaceDbContext db, AccessService access, P
 
         RequireAnOwner(members.Except(removed).ToList());
         db.TeamMembers.RemoveRange(removed);
+        db.Audit(identity.Account, "team.member.remove", ns, string.Join(", ", removed.Select(member => member.Account)), timeProvider.GetUtcNow().UtcDateTime);
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    /// <summary>The invite link. Any member gets or creates it; only owners reset it.</summary>
+    /// <summary>The invite link, which makes whoever opens it a publisher: only owners get, create, or reset it.</summary>
     public async Task<InviteView> InviteAsync(MarketplaceIdentity identity, string ns, bool reset, CancellationToken cancellationToken)
     {
         if (!identity.InTeam(ns) && !identity.IsAdmin)
@@ -177,33 +186,88 @@ public sealed class TeamService(MarketplaceDbContext db, AccessService access, P
             throw ProblemException.NotFound($"The team {ns}");
         }
 
-        if (reset && !identity.IsTeamOwner(ns))
+        if (!identity.IsTeamOwner(ns))
         {
-            throw new ProblemException(403, "Only the team's owners can reset its invite link.");
+            throw new ProblemException(403, "Only the team's owners can share its invite link, because joining lets people publish.");
         }
 
         await TeamAsync(ns, cancellationToken);
         return new InviteView(await access.LinkAsync(Link.Invite, ns, identity.Account, reset, cancellationToken));
     }
 
-    /// <summary>Deletes a team that never published a package or bundle, with its members, links, and rules.</summary>
+    /// <summary>
+    /// Deletes a team that never published a package or bundle, with its members, links, and rules. An admin may
+    /// also delete one that did: its packages are revoked so every PC removes them, and the namespace stays
+    /// reserved with no members, because installed skill names are built from it.
+    /// </summary>
     public async Task DeleteAsync(MarketplaceIdentity identity, string ns, CancellationToken cancellationToken)
     {
         var team = await OwnedTeamAsync(identity, ns, cancellationToken);
+        var now = timeProvider.GetUtcNow().UtcDateTime;
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         await db.LockNamespaceAsync(ns, cancellationToken);
-        if (await db.Packages.AnyAsync(package => package.Namespace == ns, cancellationToken)
-            || await db.Bundles.AnyAsync(bundle => bundle.Namespace == ns, cancellationToken))
+        var packages = await db.Packages.Where(package => package.Namespace == ns).ToListAsync(cancellationToken);
+        var used = packages.Count > 0 || await db.Bundles.AnyAsync(bundle => bundle.Namespace == ns, cancellationToken);
+        if (used && !identity.IsAdmin)
         {
             throw new ProblemException(409, $"{team.DisplayName} has packages or bundles, so it can't be deleted.");
         }
 
         var prefix = ns + "/";
+        foreach (var package in packages.Where(package => package.RevokedAt is null))
+        {
+            package.RevokedAt = now;
+            package.RevokedBy = identity.Account;
+            package.RevokedByAdmin = true;
+        }
+
+        await db.Bundles.Where(bundle => bundle.Namespace == ns).ExecuteDeleteAsync(cancellationToken);
         await db.TeamMembers.Where(member => member.Namespace == ns).ExecuteDeleteAsync(cancellationToken);
         await db.Links.Where(link => link.Target == ns || link.Target.StartsWith(prefix)).ExecuteDeleteAsync(cancellationToken);
         await db.AccessRules.Where(rule => rule.Target == ns || rule.Target.StartsWith(prefix)).ExecuteDeleteAsync(cancellationToken);
         await db.NamespaceArchives.Where(archive => archive.Namespace == ns).ExecuteDeleteAsync(cancellationToken);
-        db.Publishers.Remove(team);
+        if (!used)
+        {
+            db.Publishers.Remove(team);
+        }
+        else
+        {
+            // The name stays reserved, and private: its revoked ids go only to people who had them installed.
+            db.AccessRules.Add(new AccessRule { Target = ns, Visibility = Visibility.Private, UpdatedBy = identity.Account, UpdatedAt = now });
+        }
+
+        db.Audit(identity.Account, "team.delete", ns, used ? $"revoked {packages.Count} packages" : null, now);
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// An admin hands a personal namespace to someone else, for a departed owner: it becomes a team the new
+    /// account owns, so the namespace, and every installed skill name built from it, stays the same.
+    /// </summary>
+    public async Task TransferAsync(MarketplaceIdentity identity, string ns, TransferRequest request, CancellationToken cancellationToken)
+    {
+        var account = request.Account?.Trim() ?? string.Empty;
+        if (account.Length is 0 or > AccessService.MaxEntryLength)
+        {
+            throw new ProblemException(422, $"Name the new owner by their Windows account, up to {AccessService.MaxEntryLength} characters.");
+        }
+
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await db.LockNamespaceAsync(ns, cancellationToken);
+        var publisher = await db.Publishers.FindAsync([ns], cancellationToken) ?? throw ProblemException.NotFound($"The namespace {ns}");
+        if (publisher.Kind != PublisherKind.Personal)
+        {
+            throw new ProblemException(409, $"{ns} is not a personal namespace. Change a team's owners on its team page.");
+        }
+
+        var previous = publisher.Account;
+        publisher.Kind = PublisherKind.Team;
+        publisher.Account = ns;
+        db.TeamMembers.Add(new TeamMember { Namespace = ns, Account = account, IsOwner = true, JoinedAt = now });
+        db.Audit(identity.Account, "namespace.transfer", ns, $"from {previous} to {account}", now);
+        notifications.Notify([account], identity.Account, "team.added", $"An admin gave you {publisher.DisplayName} ({ns}). You own it as a team now.", $"/teams/{ns}");
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
     }
@@ -226,7 +290,8 @@ public sealed class TeamService(MarketplaceDbContext db, AccessService access, P
             .Select(person => new PersonView(person.Account, person.DisplayName))
             .ToArrayAsync(cancellationToken);
         var teams = await db.Publishers.AsNoTracking()
-            .Where(publisher => publisher.Kind == PublisherKind.Team && (EF.Functions.ILike(publisher.Namespace, pattern, escape) || EF.Functions.ILike(publisher.DisplayName, pattern, escape)))
+            .Where(publisher => publisher.Kind == PublisherKind.Team && db.TeamMembers.Any(member => member.Namespace == publisher.Namespace)
+                && (EF.Functions.ILike(publisher.Namespace, pattern, escape) || EF.Functions.ILike(publisher.DisplayName, pattern, escape)))
             .OrderBy(publisher => publisher.Namespace)
             .ToListAsync(cancellationToken);
         var rules = await access.RulesAsync(cancellationToken);
@@ -257,7 +322,9 @@ public sealed class TeamService(MarketplaceDbContext db, AccessService access, P
             changed = !identity.InTeam(preview.Target);
             if (changed)
             {
-                db.TeamMembers.Add(new TeamMember { Namespace = preview.Target, Account = identity.Account, JoinedAt = timeProvider.GetUtcNow().UtcDateTime });
+                var now = timeProvider.GetUtcNow().UtcDateTime;
+                db.TeamMembers.Add(new TeamMember { Namespace = preview.Target, Account = identity.Account, JoinedAt = now });
+                db.Audit(identity.Account, "link.redeem", preview.Target, "invite", now);
                 await db.SaveChangesAsync(cancellationToken);
             }
         }

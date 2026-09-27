@@ -1,6 +1,6 @@
 # How to fix a failed install
 
-Use this when Agent Plugins refuses an operation, an agent does not see what you installed, or the status button turns red. Each section starts from what you actually saw. For the meaning of a badge or a check, see [the app reference](app-reference.md) and [the preflight reference](preflight-reference.md).
+Use this when Agent Plugins refuses an operation, an agent does not see what you installed, a connector does not work, or the **Status** button turns red. Each section starts from what you actually saw. For the meaning of a badge or a check, see [the app reference](app-reference.md) and [the preflight reference](preflight-reference.md).
 
 Before anything else, select **Refresh**. A stale snapshot explains a surprising number of these, and a sync re-detects your agents, re-reads the catalog, puts back missing files, and re-runs every check.
 
@@ -17,9 +17,11 @@ dir $env:USERPROFILE\.claude\skills
 
 The directory is named `<sourceId>-<skillName>`.
 
-**The directory is there.** Your agent has not re-read it. Reload at that agent's own boundary: reload the window in Cursor, start a new session in Claude Code or Codex, quit and reopen Claude Desktop or ChatGPT, start a new Cowork conversation in Microsoft 365 Copilot once OneDrive has synced, or use the client's configuration surface for OpenCode, Grok Build, and Copilot. Nothing in Agent Plugins can force this.
+**The directory is there.** Your agent has not re-read it. Reload at that agent's own boundary: reload VS Code (or start a new Copilot CLI session) for GitHub Copilot, reload the window in Cursor, start a new session in Claude Code, OpenCode, pi, Codex, or Grok Build, and switch to Codex in the ChatGPT app. The notice after the install says what to type in each. Nothing in Agent Plugins can force this.
 
-**The directory is missing.** Select **Refresh**. The card reads **Restoring on next check** until a sync re-creates the files from the saved copy, and the background report then says `Restored: <package>`. If the card says **Changed on this computer** instead, another file of the package was edited; see the next section.
+**The app is Claude Desktop.** Claude Desktop does not read skills from this computer; its Chat and Cowork tabs use the skills on your claude.ai account (Customize > Skills). The card says so with `Can't be added here` when Claude Desktop is your only app. It does take connectors.
+
+**The directory is missing.** Select **Refresh**. The card reads **Restoring on next check** until a sync re-creates the files from the saved copy; it does this quietly. If the card says **Changed on this computer** instead, another file of the package was edited; see the next section.
 
 **Only Claude Code is missing it.** Claude Code reads `~/.claude/skills`, not the shared directory. If **System status** does not list Claude Code under Agents, Agent Plugins never wrote that copy — install or repair Claude Code and select **Refresh**.
 
@@ -31,28 +33,32 @@ To see everything in this state at once, open **System status**, expand **All ch
 
 Then choose:
 
-- **Keep your edit.** Do nothing. The package stays as it is and stops receiving updates.
-- **Move your edit somewhere Agent Plugins does not own.** Copy the changed file out of the skill directory into your own skill, then restore the original below.
+- **Make it yours.** Choose **More** > **Keep my version…**. Agent Plugins stops managing the package and leaves your files as they are: no more updates, restores, or removal. Install the package again later if you want the published one back. `agent-plugins keep <ns>/<package>` does the same.
 - **Restore the original.** Select **Restore original…** and confirm **Back up and restore**. Your changed copy goes to `~/.agents/.agent-plugins-backups`, and **Open folder** in the result notice shows it.
+- **Remove it.** Choose **More** > **Remove…**, or run `agent-plugins uninstall <ns>/<package> --force`. Your changed copy is backed up first.
+
+Doing nothing also works: the package stays as it is and stops receiving updates. Backups older than 30 days are deleted.
+
+A `__pycache__` folder, `.DS_Store`, or similar leftover in a skill folder does not count as a change.
 
 ## An install fails with an error message
 
 The notice's first line says what failed; the reason is under **Details**. Match it here.
 
-| Message                                                                   | Cause                                                                                | Fix                                                                                                           |
-| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| `… requires explicit Tier 3 approval`                                     | The package installs an MCP server and the approval was declined or never asked for. | Install it from the app and select **Allow and install**, or pass `--approve-mcp` to `agent-plugins install`. |
-| `… contains local changes`                                                | An owned file was edited outside the app.                                            | See _Changed on this computer_ above.                                                                         |
-| `… could not be checked, so it cannot be …`                               | An owned file or an agent's settings file could not be read.                         | Follow the rest of the message: fix or remove the named file, or check that you can read it, then try again.  |
-| `… another app is using it …`                                             | A file stayed locked through the automatic retry.                                    | Close the app the message names, or whatever has that folder open, then try again.                            |
-| `… the disk is full`                                                      | No space left on the drive being written.                                            | Free up space, then try again.                                                                                |
-| `A newer version of Agent Plugins manages the packages on this computer.` | A newer build wrote the ledger. This build shows it but will not change it.          | Update Agent Plugins.                                                                                         |
-| `… is owned by a different source`                                        | Another source already installed a package with this ID.                             | Uninstall the other copy, or remove the source that owns it, then install again.                              |
-| `… conflicts with another package in this batch`                          | Two packages in one **Install all** declare `conflictsWith` each other.              | Install them individually and keep only one.                                                                  |
-| `… can't be installed while … is installed; uninstall … first.`           | The two packages declare `conflictsWith`.                                            | Uninstall the named package, then install again.                                                              |
-| `None of the AI apps on this computer can use …`                          | Every detected app reports the component unsupported; the reasons follow.            | Follow the reason, for example add a remote connector in the app's own settings.                              |
-| `Configuration entry … is unmanaged` / `Instruction block … is unmanaged` | An agent's config file already has an entry at the key this package wants.           | Remove that entry from the agent's own config file by hand, then install again.                               |
-| `… is already managed; use the normal update operation`                   | A replace was requested for a package the app already owns.                          | Use **Update** instead.                                                                                       |
+| Message                                                                                   | Cause                                                                                | Fix                                                                                                                                                                     |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `… requires explicit Tier 3 approval`                                                     | The package installs an MCP server and the approval was declined or never asked for. | Install it from the app and select **Allow and install**, or pass `--approve-mcp` to `agent-plugins install`.                                                           |
+| `… contains local changes`                                                                | An owned file was edited outside the app.                                            | See _Changed on this computer_ above.                                                                                                                                   |
+| `… could not be checked, so it cannot be …`                                               | An owned file or an agent's settings file could not be read.                         | Follow the rest of the message: fix or remove the named file, or check that you can read it, then try again.                                                            |
+| `… another app is using it …`                                                             | A file stayed locked through the automatic retry.                                    | Close the app the message names, or whatever has that folder open, then try again.                                                                                      |
+| `… the disk is full`                                                                      | No space left on the drive being written.                                            | Free up space, then try again.                                                                                                                                          |
+| `A newer version of Agent Plugins manages the packages on this computer.`                 | A newer build wrote the ledger. This build shows it but will not change it.          | Update Agent Plugins.                                                                                                                                                   |
+| `… is owned by a different source`                                                        | Another source already installed a package with this ID.                             | Uninstall the other copy, or remove the source that owns it, then install again.                                                                                        |
+| `… conflicts with another package in this batch`                                          | Two packages in one **Install all** declare `conflictsWith` each other.              | Install them individually and keep only one.                                                                                                                            |
+| `… can't be installed while … is installed; uninstall … first.`                           | The two packages declare `conflictsWith`.                                            | Uninstall the named package, then install again.                                                                                                                        |
+| `None of the AI apps on this computer can use …`                                          | Every detected app reports the component unsupported; the reasons follow.            | Follow the reason, for example add a remote connector in the app's own settings.                                                                                        |
+| `Configuration entry … is unmanaged` / `… already exists and is not an owned destination` | A folder or config entry you or another tool created is where the package goes.      | The card shows **Files already there**: select **Replace…** to back it up and replace it, or remove it by hand and install again. On the command line, add `--replace`. |
+| `… is already managed; use the normal update operation`                                   | A replace was requested for a package the app already owns.                          | Use **Update** instead.                                                                                                                                                 |
 
 Each of these leaves your machine unchanged: the operation either fails before anything is written or rolls back completely.
 
@@ -63,31 +69,40 @@ The package installed for every other app; the amber result notice names the app
 | Notice                                                                             | Fix                                                                                                                                                                              |
 | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `<App> uses a settings file that Agent Plugins could not read: <path>.`            | Fix the error the message quotes, or remove the file if you do not use it, then select **Refresh**. The sync adds the package to that app, as long as Agent Plugins stayed open. |
-| `<App> did not get the package: Agent Plugins isn't allowed to write to <folder>.` | Get write access to that folder — for Microsoft 365 Copilot it is in OneDrive — then select **Refresh**, or install the package again.                                           |
+| `<App> did not get the package: Agent Plugins isn't allowed to write to <folder>.` | Get write access to that folder, then select **Refresh**, or install the package again.                                                                                          |
 
 An app that merely had its settings file open is skipped without a notice; the next sync adds the package to it, as long as Agent Plugins stays open until then.
 
 ## A package stays Update available
 
-Background updates that fail are retried on later syncs without a notice. A package that keeps its **Update available** badge either failed every time or includes an MCP server: select **Update** to apply it, and approve the connector if asked. If it fails, the error says why — look it up in the table above.
+Background updates that fail are retried on later syncs without a notice. A package that keeps its **Update available** badge failed every time, is held (the card shows **Updates held**; **More** > **Resume automatic updates** undoes it), or changes an MCP server you allowed: select **Update** to apply it, and allow the connector when asked. If it fails, the error says why — look it up in the table above.
+
+## A connector does not work
+
+Check the card first:
+
+- `Needs <program>, which isn't on this computer` — the connector starts a program you don't have, such as Node.js for `npx`. Install it, or ask IT to, then quit and reopen the AI app.
+- `Needs <NAME> before it works.` — the connector reads a setting such as an API key. Select **Set…**, paste the value from the publisher's instructions, save, then quit and reopen the AI app. **More** > **Connector settings…** changes a value later.
+
+If the card shows neither, check which apps got it: the notice after the install lists them, and **Apps…** (or **More** > **Choose apps…**) shows them. Claude Desktop takes only connectors that start a program and read no setting from your environment; add others in Claude Desktop under Settings > Connectors. pi does not use connectors at all.
 
 ## The window says Offline
 
-The amber notice `Offline — showing packages as of <time>` means the last sync reached no server. Installed packages keep working, and Agent Plugins retries within minutes on its own. A source that alone could not be refreshed — its server was down, or answered with an error — shows a grey **Saved copy from <time>** badge instead, whose tooltip gives the reason.
+The amber notice `Offline — showing skills as of <time>` means the last sync reached no server. Installed packages keep working, and Agent Plugins retries within minutes on its own. A source that alone could not be refreshed — its server was down, or answered with an error — shows a grey **Saved copy from <time>** badge instead, whose tooltip gives the reason.
 
 If it persists, connect to the corporate network or VPN and select **Try now**. If one server stays unreachable while others answer, open **System status** and read the **Marketplace server** row.
 
-## The status button is red
+## The Status button is red
 
 Open it. The panel leads with three rows — Windows sign-in, marketplace server, agents — and shows the failing check's detail and its remediation. Select **Run diagnostics** to re-run every check against the machine as it is now.
 
-| Row                | Common failure                                                         | What to do                                                                                                                                                                        |
-| ------------------ | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows sign-in    | Not domain-joined, or no Kerberos ticket for the server.               | Connect to the corporate network or VPN and sign in again. `klist` should show a ticket-granting ticket.                                                                          |
-| Marketplace server | `The security certificate of <server> isn't trusted by this computer`. | Check the computer's date and time. Otherwise your network inspects secure connections: ask IT to add its certificate authority to Windows.                                       |
-| Marketplace server | DNS, TLS, or the server itself is unreachable.                         | Check the URL in the row resolves and answers. A failed server leaves the app offline, on the last snapshot it validated.                                                         |
-| Marketplace server | The client is older than the server's minimum.                         | Select **Update Agent Plugins**, which opens the download site when this build configures one and otherwise tells you to ask your administrator.                                  |
-| Agents             | No supported AI app found.                                             | Install Claude Desktop, ChatGPT, or Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then select **Refresh**. |
+| Row                | Common failure                                                                        | What to do                                                                                                                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows sign-in    | Not joined to the domain or Microsoft Entra ID, or no Kerberos ticket for the server. | Connect to the corporate network or VPN and sign in again. `klist` should show a ticket-granting ticket.                                                                          |
+| Marketplace server | `The security certificate of <server> isn't trusted by this computer`.                | Check the computer's date and time. Otherwise your network inspects secure connections: ask IT to add its certificate authority to Windows.                                       |
+| Marketplace server | DNS, TLS, or the server itself is unreachable.                                        | Check the URL in the row resolves and answers. A failed server leaves the app offline, on the last snapshot it validated.                                                         |
+| Marketplace server | The client is older than the server's minimum.                                        | Select **Update Agent Plugins**, which opens the marketplace's download page, or the address IT set.                                                                              |
+| Agents             | No supported AI app found.                                                            | Install GitHub Copilot, Cursor, or Claude (Claude Code or Claude Desktop), or another supported app such as OpenCode, pi, Codex, ChatGPT, or Grok Build, then select **Refresh**. |
 
 An agent listed as `couldn't check just now` is not a failure: its detection timed out, and Agent Plugins keeps configuring it and checks again.
 
@@ -99,11 +114,11 @@ If a check fails and the message tells you nothing you can act on, the check's I
 
 Two checks mean every install and update will fail until they are fixed. The catalog still loads and syncs.
 
-| Check           | Meaning                                                                                                                    | Fix                                                                                                                                                                                        |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `host.homeDirs` | Agent Plugins' own data or cache directory is unwritable.                                                                  | Get write access to `%APPDATA%\agent-plugins` and `%LOCALAPPDATA%\agent-plugins`. An unwritable agent skill directory is only a warning: skills cannot go to that agent.                   |
-| `agents.ledger` | `installations.json` exists but cannot be read, for example because of its permissions or a lock.                          | Close anything that has the file open and check you can read it. Otherwise select **Reset**, which works without a readable ledger: it removes what it can find and clears the app's data. |
-| `agents.ledger` | A newer version of Agent Plugins wrote `installations.json`, for example on another computer sharing your roaming profile. | Select **Update Agent Plugins** and install the newer version.                                                                                                                             |
+| Check           | Meaning                                                                                                                    | Fix                                                                                                                                                                                                                                 |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `host.homeDirs` | Agent Plugins' own data or cache directory is unwritable.                                                                  | Get write access to `%APPDATA%\agent-plugins` and `%LOCALAPPDATA%\agent-plugins`. An unwritable agent skill directory is only a warning: skills cannot go to that agent.                                                            |
+| `agents.ledger` | `installations.json` exists but cannot be read, for example because of its permissions or a lock.                          | Close anything that has the file open and check you can read it. Otherwise select **Reset…** under **Advanced** in **System status**, which works without a readable ledger: it removes what it can find and clears the app's data. |
+| `agents.ledger` | A newer version of Agent Plugins wrote `installations.json`, for example on another computer sharing your roaming profile. | Select **Update Agent Plugins** and install the newer version.                                                                                                                                                                      |
 
 A ledger that is merely damaged does not fail this check: Agent Plugins sets it aside as `installations.json.corrupt-<timestamp>` and falls back to `installations.json.previous` on its own. The same applies to `sources.json` and `agent-profiles.json`.
 
@@ -115,7 +130,7 @@ If you expected to keep access, see [A package or source you expected is missing
 
 ## A source disappeared from Manage sources
 
-Sources you added that the catalog no longer lists move to **Other sources**, where the only action is **Remove**. Removing one uninstalls everything it installed. If you expected a source to be there and it is not, the catalog owner has to list it — the app does not take pasted URLs.
+**Manage sources…** is under **Advanced** in **System status**. Sources you added that the catalog no longer lists move to **Other sources**, where the only action is **Remove**. Removing one uninstalls everything it installed. If you expected a source to be there and it is not, the catalog owner has to list it — the app does not take pasted URLs.
 
 A source retired as not found disappears on its own once nothing from it is installed, and **Manage sources** says `Removed the retired source <name>.`
 
@@ -153,4 +168,4 @@ Collect this before asking for help:
 agent-plugins whoami
 ```
 
-plus the failing check IDs from **System status**, the exact error text and its **Details**, and the package ID. The report behind the status button is the same one the app sends with its heartbeat, so quoting check IDs lets someone match your machine to what the server already sees. Any `*.corrupt-<timestamp>` file in `%APPDATA%\agent-plugins` is a damaged copy the app set aside; include it too.
+plus the failing check IDs from **System status**, the exact error text and its **Details**, the package ID, and the log: **System status** > **Advanced** > **Open log** shows `agent-plugins.log` in its folder. The report behind the **Status** button is the same one the app sends with its heartbeat, so quoting check IDs lets someone match your machine to what the server already sees. Any `*.corrupt-<timestamp>` file in `%APPDATA%\agent-plugins` is a damaged copy the app set aside; include it too.

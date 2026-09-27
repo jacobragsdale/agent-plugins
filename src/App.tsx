@@ -4,6 +4,12 @@ import { Badge, Button, Callout, Heading, Spinner, Text } from "@radix-ui/themes
 import { listen } from "@tauri-apps/api/event";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentSetupNotice, TutorialNotice } from "./components/AgentSetupNotice";
+import { ApprovalDialog } from "./components/ApprovalDialog";
+import type { ApprovalEntry, ApprovalRequest, ConnectorSettings } from "./components/ApprovalDialog";
+import { AppsDialog } from "./components/AppsDialog";
+import type { AppsRequest } from "./components/AppsDialog";
+import { CardExtrasContext } from "./components/ItemCard";
+import type { CardExtras } from "./components/ItemCard";
 import { BundleDialog, BundleGroup } from "./components/Bundles";
 import type { BundleEdit } from "./components/Bundles";
 import { LinkInstallDialog, OpenLinkDialog } from "./components/LinkDialogs";
@@ -16,7 +22,7 @@ import { ErrorMessage, Notices, OfflineBanner } from "./components/Notice";
 import type { InfoNotice } from "./components/Notice";
 import { SourceGroup } from "./components/SourceGroup";
 import type { SourceAction } from "./components/SourceGroup";
-import { CatalogToolbar, CreateSkillButton, StatusButton, SyncMeta } from "./components/CatalogToolbar";
+import { CatalogFilters, CatalogToolbar, CreateSkillButton, StatusButton, SyncMeta } from "./components/CatalogToolbar";
 import { diagnosticsFailure, diagnosticsResult, seriousProblems, SystemStatusDialog } from "./components/SystemStatusDialog";
 import { DEEP_LINK_EVENT, errorResponse, explainAfterRetry, invokeParsed, SCHEDULED_SYNC_EVENT, toAppError, withRetry } from "./ipc/client";
 import type { AppError } from "./ipc/client";
@@ -53,21 +59,22 @@ import type {
   SourceState
 } from "./ipc/schemas";
 import { catalogBody, headerProblems, isChecking, isOffline, lastCheckedLabel, noMatchesText, offlineBanner } from "./lib/connectivity";
-import { bundleMembers, cardDomId, ownsSpace, resolveLink } from "./lib/marketplace";
+import { bundleMembers, cardDomId, matchesAllWords, ownsSpace, portalUrl, resolveLink } from "./lib/marketplace";
 import type { LinkTarget } from "./lib/marketplace";
 import {
   bulkLabels,
   failuresError,
   hasDetectedAgent,
+  installedNotice,
   itemCommand,
   itemCommandArgs,
   outcomeNotice,
   packageName,
   reportNotice,
-  reviewApproval,
   reviewBulk,
-  reviewBulkApproval,
   reviewBundleDelete,
+  reviewForceRemove,
+  reviewKeepMine,
   reviewBundleUninstall,
   reviewReset,
   reviewSourceRemoval,
@@ -79,8 +86,12 @@ import "./App.css";
 /** Errors remember whether syncing raised them: a later sync may clear its own errors, never an action error the person has not read. */
 type ShownError = AppError & Readonly<{ fromSync: boolean }>;
 
-const SYNC_FAILED = "Couldn't check your sources for updates.";
-const LOAD_FAILED = "Couldn't load your packages.";
+const SYNC_FAILED = "Couldn't check for updates.";
+const LOAD_FAILED = "Couldn't load your skills.";
+
+/** What the catalog shows: everything, or one kind of card. */
+type CatalogFilter = "all" | "installed" | "updates" | "official" | "team" | "shared";
+type CatalogSort = "name" | "used";
 
 function fromAction(error: AppError): ShownError {
   return { ...error, fromSync: false };
@@ -153,6 +164,11 @@ export default function App(): JSX.Element {
   const [bundleEdit, setBundleEdit] = useState<BundleEdit | null>(null);
   const [linkRequest, setLinkRequest] = useState<LinkRequest | null>(null);
   const [busyBundles, setBusyBundles] = useState<ReadonlyMap<string, SourceAction>>(new Map());
+  const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
+  const approvalAnswer = useRef<((settings: ConnectorSettings | null) => void) | null>(null);
+  const [appsRequest, setAppsRequest] = useState<AppsRequest | null>(null);
+  const [catalogFilter, setCatalogFilter] = useState<CatalogFilter>("all");
+  const [catalogSort, setCatalogSort] = useState<CatalogSort>("name");
   // Links resolve against the newest state, which an async handler can't read from its closure.
   const stateRef = useRef<AppState | null>(null);
   const linkSeq = useRef(0);
@@ -348,9 +364,8 @@ export default function App(): JSX.Element {
 
   const itemsBySource = useMemo(() => {
     const grouped = new Map<string, CatalogItem[]>();
-    const needle = query.trim().toLowerCase();
     for (const item of state?.items ?? []) {
-      if (needle.length > 0 && !matchesQuery(item, needle)) {
+      if (!matchesQuery(item, query) || !matchesFilter(item, catalogFilter)) {
         continue;
       }
       if (driftOnly && item.status !== "modified") {
@@ -360,26 +375,32 @@ export default function App(): JSX.Element {
       items.push(item);
       grouped.set(item.sourceKey, items);
     }
+    if (catalogSort === "used") {
+      for (const items of grouped.values()) {
+        items.sort((left, right) => (usersOf(right) === usersOf(left) ? left.name.localeCompare(right.name) : usersOf(right) - usersOf(left)));
+      }
+    }
     return grouped;
-  }, [driftOnly, query, state]);
+  }, [catalogFilter, catalogSort, driftOnly, query, state]);
 
-  const filtering = query.trim().length > 0 || driftOnly;
+  const filtering = query.trim().length > 0 || driftOnly || catalogFilter !== "all";
 
   const visibleBundles = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (driftOnly) {
+    if (driftOnly || catalogFilter !== "all") {
       return [];
     }
-    return (state?.bundles ?? []).filter((bundle) => needle.length === 0 || `${bundle.id} ${bundle.name} ${bundle.description} ${bundle.publisher}`.toLowerCase().includes(needle));
-  }, [driftOnly, query, state]);
+    return (state?.bundles ?? []).filter((bundle) => matchesAllWords(`${bundle.id} ${bundle.name} ${bundle.description} ${bundle.publisher}`, query));
+  }, [catalogFilter, driftOnly, query, state]);
 
   const visibleSources = useMemo(() => {
     const sources = state?.sources ?? [];
-    if (!filtering) {
-      return sources;
+    const shown = filtering ? sources.filter((source) => (itemsBySource.get(source.sourceKey) ?? []).length > 0) : sources;
+    if (catalogSort !== "used") {
+      return shown;
     }
-    return sources.filter((source) => (itemsBySource.get(source.sourceKey) ?? []).length > 0);
-  }, [filtering, itemsBySource, state]);
+    const most = (source: SourceState): number => Math.max(0, ...(itemsBySource.get(source.sourceKey) ?? []).map((item) => item.marketplace?.installedBase ?? 0));
+    return [...shown].sort((left, right) => most(right) - most(left));
+  }, [catalogSort, filtering, itemsBySource, state]);
 
   async function rerunPreflight(): Promise<void> {
     setPreflightRunning(true);
@@ -484,11 +505,11 @@ export default function App(): JSX.Element {
       setInfo(null);
       // An MCP server runs a command on this machine, so it is installed only
       // after the person says so. The backend refuses without this approval.
-      if (plan.trustApproved && !(await reviewApproval(item.name, item.riskDetails))) {
+      if (plan.trustApproved && !(await approveConnectors([{ item, componentId: componentId ?? null }]))) {
         return;
       }
       const outcome = await retrying(() => invokeParsed(plan.command, operationOutcomeSchema, itemCommandArgs(item, componentId, { trustApproved: plan.trustApproved })));
-      const notice = outcomeNotice(plan.backupLead, outcome);
+      const notice = plan.command === "uninstall_item" ? outcomeNotice(plan.backupLead, outcome) : installedNotice(item, componentId, state?.agentProfiles ?? [], plan, outcome);
       if (notice !== null) {
         setInfo(notice);
       }
@@ -518,6 +539,122 @@ export default function App(): JSX.Element {
     }
   }
 
+  /** Opens the connector dialog and waits for the person's answer; null means they cancelled. */
+  async function askConnectors(request: ApprovalRequest): Promise<ConnectorSettings | null> {
+    approvalAnswer.current?.(null);
+    return new Promise((resolve) => {
+      approvalAnswer.current = resolve;
+      setApprovalRequest(request);
+    });
+  }
+
+  function answerConnectors(settings: ConnectorSettings | null): void {
+    approvalAnswer.current?.(settings);
+    approvalAnswer.current = null;
+    setApprovalRequest(null);
+  }
+
+  /** Asks before connectors are installed, saving any API keys typed in. False means the person said no. */
+  async function approveConnectors(entries: readonly ApprovalEntry[]): Promise<boolean> {
+    const settings = await askConnectors({ entries, mode: "install" });
+    if (settings === null) {
+      return false;
+    }
+    if (Object.keys(settings).length > 0) {
+      await invokeParsed("save_connector_settings", unitSchema, { values: settings });
+    }
+    return true;
+  }
+
+  async function editConnectorSettings(item: CatalogItem): Promise<void> {
+    const settings = await askConnectors({ entries: [{ item, componentId: null }], mode: "settings" });
+    if (settings === null || Object.keys(settings).length === 0) {
+      return;
+    }
+    try {
+      await invokeParsed("save_connector_settings", unitSchema, { values: settings });
+      setInfo(infoText(`Saved. Quit and reopen your AI apps so ${item.name} picks up the change.`));
+    } catch (reason) {
+      showActionError(toAppError(reason, "Couldn't save the connector settings."));
+    } finally {
+      await refreshAfterOperation();
+    }
+  }
+
+  /** Runs one card action with the card busy, then shows the machine as it is now. */
+  async function onCard(item: CatalogItem, failure: string, task: () => Promise<void>): Promise<void> {
+    setBusyItems((current) => toggled(current, item.id, true));
+    setError(null);
+    setInfo(null);
+    try {
+      await task();
+    } catch (reason) {
+      showActionError(toAppError(reason, failure));
+    } finally {
+      setBusyItems((current) => toggled(current, item.id, false));
+      await refreshAfterOperation();
+    }
+  }
+
+  function cardExtrasFor(marketplaceUrl: string | null): CardExtras {
+    return {
+      onDetails:
+        marketplaceUrl === null
+          ? null
+          : (item) => {
+              openUrl(portalUrl(marketplaceUrl, `/p/${item.sourceId}/${item.localId}`)).catch((reason: unknown) => {
+                showActionError(toAppError(reason, "Couldn't open the marketplace."));
+              });
+            },
+      onKeepMine: async (item) => {
+        if (!(await reviewKeepMine(item.name))) {
+          return;
+        }
+        await onCard(item, `Couldn't keep your copy of ${item.name}.`, async () => {
+          await invokeParsed("keep_my_version", unitSchema, { sourceId: item.sourceId, localId: item.localId });
+          setInfo(infoText(`Agent Plugins no longer manages ${item.name}. Your copy stays as it is.`));
+        });
+      },
+      onForceRemove: async (item, componentId) => {
+        if (!(await reviewForceRemove(item.name))) {
+          return;
+        }
+        await onCard(item, `Couldn't remove ${item.name}.`, async () => {
+          const outcome = await retrying(() => invokeParsed("uninstall_item", operationOutcomeSchema, itemCommandArgs(item, componentId, { force: true })));
+          const notice = outcomeNotice("Your changed copy was backed up to", outcome);
+          if (notice !== null) {
+            setInfo(notice);
+          }
+        });
+      },
+      onHold: async (item, held) =>
+        onCard(item, `Couldn't change updates for ${item.name}.`, async () => {
+          await invokeParsed("set_held", unitSchema, { sourceId: item.sourceId, localId: item.localId, held });
+          setInfo(infoText(held ? `${item.name} stays as it is until you update it yourself.` : `${item.name} updates on its own again.`));
+        }),
+      onApps: (item, componentId) => {
+        setAppsRequest({ item, componentId });
+      },
+      onSettings: (item) => {
+        settle(editConnectorSettings(item));
+      }
+    };
+  }
+
+  async function saveApps(request: AppsRequest, excluded: readonly string[], added: boolean): Promise<void> {
+    setAppsRequest(null);
+    const { item, componentId } = request;
+    // Adding an app back installs the connector there, which the person approves like any install.
+    if (added && !(await approveConnectors([{ item, componentId }]))) {
+      return;
+    }
+    await onCard(item, `Couldn't change which apps use ${item.name}.`, async () => {
+      const outcome = await retrying(() => invokeParsed("set_excluded_apps", operationOutcomeSchema, { sourceId: item.sourceId, localId: item.localId, componentId, excluded, trustApproved: added }));
+      const notice = outcomeNotice("The files that were there before were backed up to", outcome);
+      setInfo(notice ?? infoText(`Saved. Restart the AI apps you changed so they notice.`));
+    });
+  }
+
   /**
    * Asks before a batch installs any connector among `eligible`. Null means
    * the person said no; otherwise whether the batch carries that approval.
@@ -527,11 +664,7 @@ export default function App(): JSX.Element {
     if (needApproval.length === 0) {
       return false;
     }
-    const approved = await reviewBulkApproval(
-      needApproval.map((item) => item.name),
-      needApproval.flatMap((item) => item.riskDetails)
-    );
-    return approved ? true : null;
+    return (await approveConnectors(needApproval.map((item) => ({ item, componentId: null })))) ? true : null;
   }
 
   function showBatchResult(verb: string, result: BulkResult, from?: string): void {
@@ -555,7 +688,7 @@ export default function App(): JSX.Element {
         setInfo(infoText(`Nothing to ${verb} in ${source.name} right now.`));
         return;
       }
-      if (action !== "install" && !(await reviewBulk(source, action, plan))) {
+      if (!(await reviewBulk(source, action, plan))) {
         return;
       }
       const trustApproved = await connectorApproval(action, eligible);
@@ -804,57 +937,37 @@ export default function App(): JSX.Element {
             Agent Plugins
           </Heading>
         </div>
-        <div className="catalog-actions">
-          <CreateSkillButton
-            profile={skillCreatorProfile(state)}
-            running={creatingSkill}
-            onClick={(profile) => {
-              settle(createSkill(profile));
-            }}
-          />
-          <MarketplaceButtons
-            identity={view.identity}
-            marketplaceUrl={view.marketplaceUrl}
-            disabled={resetting}
-            onTeams={() => {
-              setTeamsOpen(true);
-            }}
-            onError={showActionError}
-          />
-          <StatusButton
-            problems={view.problems}
-            identity={view.identity}
-            disabled={resetting}
-            onClick={() => {
-              setStatusDialogOpen(true);
-            }}
-          />
-          <Button
-            variant="soft"
-            disabled={resetting}
-            onClick={() => {
-              setSourceDialogOpen(true);
-            }}
-          >
-            Manage sources
-          </Button>
-          <Button loading={syncing} disabled={syncing || resetting} onClick={() => void synchronize()}>
-            Refresh
-          </Button>
-          <Button
-            color="red"
-            variant="soft"
-            loading={resetting}
-            disabled={resetting || syncing}
-            onClick={() => {
-              settle(resetApp());
-            }}
-          >
-            Reset
-          </Button>
-        </div>
+        <HeaderActions
+          view={view}
+          skillProfile={skillCreatorProfile(state)}
+          creatingSkill={creatingSkill}
+          syncing={syncing}
+          resetting={resetting}
+          onCreateSkill={(profile) => {
+            settle(createSkill(profile));
+          }}
+          onTeams={() => {
+            setTeamsOpen(true);
+          }}
+          onStatus={() => {
+            setStatusDialogOpen(true);
+          }}
+          onRefresh={() => {
+            settle(synchronize());
+          }}
+          onError={showActionError}
+        />
       </header>
-      <SyncMeta checked={checked} checking={isChecking(state, syncing)} problems={view.problems} blocked={view.blocked} />
+      <SyncMeta
+        checked={checked}
+        checking={isChecking(state, syncing)}
+        problems={view.problems}
+        blocked={view.blocked}
+        newVersion={newVersionAvailable(view.preflight)}
+        onGetNewVersion={() => {
+          handleStatusAction("update");
+        }}
+      />
       <CatalogToolbar
         query={query}
         matches={matchCount}
@@ -864,6 +977,16 @@ export default function App(): JSX.Element {
           setDriftOnly(false);
         }}
       >
+        <CatalogFilters
+          filter={catalogFilter}
+          sort={catalogSort}
+          onFilterChange={(filter) => {
+            setCatalogFilter(asFilter(filter));
+          }}
+          onSortChange={(sort) => {
+            setCatalogSort(asSort(sort));
+          }}
+        />
         <CatalogActions
           canCreate={view.identity !== null}
           onOpenLink={() => {
@@ -924,47 +1047,50 @@ export default function App(): JSX.Element {
             onClick={() => {
               setQuery("");
               setDriftOnly(false);
+              setCatalogFilter("all");
             }}
           >
             Show all
           </Button>
         </div>
       ) : (
-        <div className="sources-list">
-          <BundleGroup
-            bundles={visibleBundles}
-            items={items}
-            identity={view.identity}
-            busyBundles={busyBundles}
-            busyIds={busyItems}
-            allBusy={resetting}
-            onRun={runBundle}
-            onEdit={(bundle) => {
-              setBundleEdit({ bundle });
-            }}
-            onDelete={deleteBundle}
-            onShare={openShare}
-            onItemChange={changeItem}
-            onManualChange={changeManualInvocation}
-            onError={showActionError}
-          />
-          {visibleSources.map((source) => (
-            <SourceGroup
-              key={source.sourceKey}
-              source={source}
-              items={itemsBySource.get(source.sourceKey) ?? []}
+        <CardExtrasContext.Provider value={cardExtrasFor(view.marketplaceUrl)}>
+          <div className="sources-list">
+            <BundleGroup
+              bundles={visibleBundles}
+              items={items}
+              identity={view.identity}
+              busyBundles={busyBundles}
               busyIds={busyItems}
-              allBusy={resetting || busySources.has(source.sourceId)}
-              running={busySources.get(source.sourceId) ?? null}
-              filtering={filtering}
+              allBusy={resetting}
+              onRun={runBundle}
+              onEdit={(bundle) => {
+                setBundleEdit({ bundle });
+              }}
+              onDelete={deleteBundle}
+              onShare={openShare}
               onItemChange={changeItem}
               onManualChange={changeManualInvocation}
-              onBulk={runBulk}
-              onShare={ownsSpace(view.identity, source.sourceId) ? openShare : undefined}
               onError={showActionError}
             />
-          ))}
-        </div>
+            {visibleSources.map((source) => (
+              <SourceGroup
+                key={source.sourceKey}
+                source={source}
+                items={itemsBySource.get(source.sourceKey) ?? []}
+                busyIds={busyItems}
+                allBusy={resetting || busySources.has(source.sourceId)}
+                running={busySources.get(source.sourceId) ?? null}
+                filtering={filtering}
+                onItemChange={changeItem}
+                onManualChange={changeManualInvocation}
+                onBulk={runBulk}
+                onShare={ownsSpace(view.identity, source.sourceId) ? openShare : undefined}
+                onError={showActionError}
+              />
+            ))}
+          </div>
+        </CardExtrasContext.Provider>
       )}
       <ManageSourcesDialog
         open={sourceDialogOpen}
@@ -1020,8 +1146,34 @@ export default function App(): JSX.Element {
         onInstall={installFromLink}
         onShow={reveal}
       />
+      <ApprovalDialog request={approvalRequest} onResolve={answerConnectors} />
+      <AppsDialog
+        request={appsRequest}
+        profiles={profiles}
+        onSave={(request, excluded, added) => {
+          settle(saveApps(request, excluded, added));
+        }}
+        onClose={() => {
+          setAppsRequest(null);
+        }}
+      />
       <SystemStatusDialog
         open={statusDialogOpen}
+        logPath={view.logPath}
+        resetting={resetting}
+        onManageSources={() => {
+          setStatusDialogOpen(false);
+          setSourceDialogOpen(true);
+        }}
+        onReset={() => {
+          setStatusDialogOpen(false);
+          settle(resetApp());
+        }}
+        onOpenLog={(path) => {
+          revealItemInDir(path).catch((reason: unknown) => {
+            showActionError(toAppError(reason, "Couldn't open the log folder."));
+          });
+        }}
         report={view.preflight}
         identity={view.identity}
         marketplaceUrl={view.marketplaceUrl}
@@ -1057,7 +1209,8 @@ function MarketplaceButtons({
   if (identity === null) {
     return null;
   }
-  const waiting = identity.suggestionsWaiting;
+  // Suggestions and reports for this person's skills, and anything else the marketplace told them.
+  const waiting = identity.suggestionsWaiting + identity.reportsWaiting + identity.unreadNotifications;
   return (
     <>
       {waiting === 0 || marketplaceUrl === null ? null : (
@@ -1065,7 +1218,7 @@ function MarketplaceButtons({
           variant="soft"
           color="amber"
           onClick={() => {
-            openUrl(`${marketplaceUrl.replace(/\/+$/, "")}/mine`).catch((reason: unknown) => {
+            openUrl(portalUrl(marketplaceUrl, identity.unreadNotifications > 0 ? "/notifications" : "/mine")).catch((reason: unknown) => {
               onError(toAppError(reason, "Couldn't open the marketplace."));
             });
           }}
@@ -1073,13 +1226,77 @@ function MarketplaceButtons({
           <Badge color="amber" variant="solid">
             {String(waiting)}
           </Badge>
-          suggestion{waiting === 1 ? "" : "s"} waiting
+          waiting for you
         </Button>
       )}
       <Button variant="soft" disabled={disabled} onClick={onTeams}>
         Teams
       </Button>
     </>
+  );
+}
+
+/** The header's buttons: making a skill, marketplace news and teams, status, help, and refresh. */
+function HeaderActions({
+  view,
+  skillProfile,
+  creatingSkill,
+  syncing,
+  resetting,
+  onCreateSkill,
+  onTeams,
+  onStatus,
+  onRefresh,
+  onError
+}: Readonly<{
+  view: MarketplaceView;
+  skillProfile: AgentProfile | null;
+  creatingSkill: boolean;
+  syncing: boolean;
+  resetting: boolean;
+  onCreateSkill: (profile: AgentProfile) => void;
+  onTeams: () => void;
+  onStatus: () => void;
+  onRefresh: () => void;
+  onError: (error: AppError) => void;
+}>): JSX.Element {
+  const portal = view.marketplaceUrl;
+  return (
+    <div className="catalog-actions">
+      {skillProfile === null && portal !== null ? (
+        // Only Cursor can be opened with a prompt; everyone else writes the skill in the portal.
+        <PortalButton label="Create a skill" url={portalUrl(portal, "/publish")} onError={onError} />
+      ) : (
+        <CreateSkillButton profile={skillProfile} running={creatingSkill} onClick={onCreateSkill} />
+      )}
+      <MarketplaceButtons identity={view.identity} marketplaceUrl={portal} disabled={resetting} onTeams={onTeams} onError={onError} />
+      <StatusButton problems={view.problems} disabled={resetting} onClick={onStatus} />
+      {portal === null ? null : <PortalButton label="Help" url={portalUrl(portal, "/help/getting-started")} onError={onError} />}
+      <Button loading={syncing} disabled={syncing || resetting} onClick={onRefresh}>
+        Refresh
+      </Button>
+    </div>
+  );
+}
+
+/** Whether the marketplace says a newer Agent Plugins is out. */
+function newVersionAvailable(report: PreflightReport | null): boolean {
+  return report?.checks.some((check) => check.id === "server.clientVersion" && check.status === "warn") === true;
+}
+
+/** A header button that opens a page of the marketplace portal. */
+function PortalButton({ label, url, onError }: Readonly<{ label: string; url: string; onError: (error: AppError) => void }>): JSX.Element {
+  return (
+    <Button
+      variant="soft"
+      onClick={() => {
+        openUrl(url).catch((reason: unknown) => {
+          onError(toAppError(reason, "Couldn't open the marketplace."));
+        });
+      }}
+    >
+      {label}
+    </Button>
   );
 }
 
@@ -1124,7 +1341,7 @@ function LoadingOrFailed({ error, onRetry }: Readonly<{ error: AppError | null; 
     return (
       <div className="loading-state">
         <Spinner size="3" />
-        <Text color="gray">Loading packages…</Text>
+        <Text color="gray">Loading skills…</Text>
       </div>
     );
   }
@@ -1151,21 +1368,58 @@ function EmptyCatalog({ text, offline, checking, onTryNow }: Readonly<{ text: st
   );
 }
 
-function matchesQuery(item: CatalogItem, needle: string): boolean {
-  const haystack = [item.id, item.name, item.description, item.sourceName, item.marketplace?.publisher ?? "", ...(item.marketplace?.tags ?? [])].join(" ").toLowerCase();
-  return haystack.includes(needle);
+function matchesQuery(item: CatalogItem, query: string): boolean {
+  return matchesAllWords([item.id, item.name, item.description, item.sourceName, item.marketplace?.publisher ?? "", ...(item.marketplace?.tags ?? [])].join(" "), query);
 }
 
-function marketplaceView(
-  state: AppState | null,
-  offline: boolean
-): Readonly<{ identity: AppIdentity | null; marketplaceUrl: string | null; preflight: PreflightReport | null; blocked: boolean; problems: readonly PreflightCheck[] }> {
+function usersOf(item: CatalogItem): number {
+  return item.marketplace?.installedBase ?? 0;
+}
+
+const FILTERS: readonly CatalogFilter[] = ["all", "installed", "updates", "official", "team", "shared"];
+
+function asFilter(value: string): CatalogFilter {
+  return FILTERS.find((filter) => filter === value) ?? "all";
+}
+
+function asSort(value: string): CatalogSort {
+  return value === "used" ? "used" : "name";
+}
+
+function matchesFilter(item: CatalogItem, filter: CatalogFilter): boolean {
+  switch (filter) {
+    case "all":
+      return true;
+    case "installed":
+      return item.status !== "available" && item.status !== "conflict" && item.status !== "sourceConflict";
+    case "updates":
+      return item.status === "updateAvailable" || item.status === "partiallyInstalled";
+    case "official":
+      return item.marketplace?.lane === "official";
+    case "team":
+      return item.marketplace?.lane === "team";
+    case "shared":
+      return item.marketplace?.sharedWithYou === true;
+  }
+}
+
+type MarketplaceView = Readonly<{
+  identity: AppIdentity | null;
+  marketplaceUrl: string | null;
+  preflight: PreflightReport | null;
+  blocked: boolean;
+  problems: readonly PreflightCheck[];
+  logPath: string | null;
+}>;
+
+function marketplaceView(state: AppState | null, offline: boolean): MarketplaceView {
   const preflight = state?.preflight ?? null;
   return {
     identity: state?.identity ?? null,
     marketplaceUrl: state?.marketplaceUrl ?? null,
     preflight,
     blocked: preflight?.blocked === true,
-    problems: headerProblems(seriousProblems(preflight), offline)
+    problems: headerProblems(seriousProblems(preflight), offline),
+    logPath: state?.logPath ?? null
   };
 }

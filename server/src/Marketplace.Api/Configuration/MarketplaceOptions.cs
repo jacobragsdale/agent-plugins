@@ -16,6 +16,12 @@ public sealed class ServerOptions
 
     /// <summary>Folder served at <c>/downloads</c>: the installer <c>manifest.json</c> and <c>releases/</c>. Unset serves nothing.</summary>
     public string? DownloadsPath { get; set; }
+
+    /// <summary>
+    /// Reverse proxies whose <c>X-Forwarded-For</c> and <c>X-Forwarded-Proto</c> are trusted: IP addresses or CIDR
+    /// ranges. Empty trusts any sender, which is only safe when nothing but the proxy can reach the server.
+    /// </summary>
+    public string[] TrustedProxies { get; set; } = [];
 }
 
 public sealed class ArtifactKeeperOptions
@@ -46,6 +52,14 @@ public sealed class AuthOptions
     /// <summary>Enables LDAP group claims for Negotiate on Linux. Optional.</summary>
     public string? LdapDomain { get; set; }
 
+    /// <summary>
+    /// The account LDAP lookups bind as, with <see cref="LdapMachineAccountPassword"/>. Unset binds with the
+    /// Kerberos client credentials in <c>KRB5_CLIENT_KTNAME</c> or the ticket cache.
+    /// </summary>
+    public string? LdapMachineAccountName { get; set; }
+
+    public string? LdapMachineAccountPassword { get; set; }
+
     /// <summary>Accounts (<c>DOMAIN\user</c> or <c>user</c>) that may call <c>/api/admin/*</c>.</summary>
     public string[] AdminAccounts { get; set; } = [];
 
@@ -66,9 +80,30 @@ public sealed class ClientOptions
 {
     public const string Section = "Client";
 
-    public string MinimumVersion { get; set; } = "0.1.0";
+    /// <summary>Older desktop apps and CLIs get 426 from everything but <c>/api/me</c> and <c>/api/events</c>.</summary>
+    public string MinimumVersion { get; set; } = "0.2.0";
 
-    public string LatestVersion { get; set; } = "0.1.0";
+    public string LatestVersion { get; set; } = "0.2.2";
+}
+
+/// <summary>Where new MCP reviews and problem reports are announced besides the admin portal.</summary>
+public sealed class NotificationOptions
+{
+    public const string Section = "Notifications";
+
+    /// <summary>Receives <c>POST { text, link }</c>, for example a Teams or Slack incoming webhook. Unset sends nothing.</summary>
+    public string? WebhookUrl { get; set; }
+}
+
+/// <summary>Per-account limits on changes; reads are never limited.</summary>
+public sealed class RateLimitOptions
+{
+    public const string Section = "RateLimits";
+
+    public int WritesPerMinute { get; set; } = 120;
+
+    /// <summary>Publishes and suggestions, which store an archive each.</summary>
+    public int UploadsPerHour { get; set; } = 60;
 }
 
 public sealed class ValidatorOptions

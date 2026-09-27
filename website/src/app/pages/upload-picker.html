@@ -3,7 +3,7 @@
   <p>
     <strong>Drag a skill folder, a SKILL.md, or a zip here.</strong><br />
     <span class="muted">A folder of skill folders becomes a skill pack. An MCP server is a single .json file.</span><br />
-    <span class="muted">Claude Code keeps your skills in <code>%USERPROFILE%\.claude\skills</code>.</span>
+    <span class="muted">Skills you made yourself are usually in <code>%USERPROFILE%\.agents\skills</code> or, for Claude Code, <code>%USERPROFILE%\.claude\skills</code>.</span>
   </p>
   <div class="row">
     <button mat-stroked-button type="button" (click)="filesInput.click()"><app-icon name="description" />Choose files</button>
@@ -15,7 +15,7 @@
 
 @if (kind(); as description) {
   <div class="row">
-    <p class="notice kind">{{ description }}</p>
+    <p class="notice kind" [class.problem]="!description.usable" [attr.role]="description.usable ? null : 'alert'">{{ description.text }}</p>
     <button mat-button type="button" (click)="clear()">Clear</button>
   </div>
   <ul class="picked">

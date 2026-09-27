@@ -336,3 +336,121 @@ export function groupBySkill<T extends { readonly path: string }>(files: readonl
     .map(([root, grouped]) => ({ root, name: root === null ? "Other files" : (root.split("/").at(-2) ?? "skill"), files: grouped, tree: fileTree(grouped, root ?? "") }))
     .sort((left, right) => ((left.root === null) === (right.root === null) ? left.name.localeCompare(right.name) : left.root === null ? 1 : -1));
 }
+
+/** What each AI app takes from a package. Primary apps come first; skills go to every app but Claude Desktop. */
+const apps: readonly { readonly name: string; readonly primary: boolean; readonly skills: string | null; readonly mcp: readonly string[]; readonly noMcp?: string }[] = [
+  { name: "GitHub Copilot", primary: true, skills: null, mcp: ["stdio", "streamable-http", "sse"] },
+  { name: "Cursor", primary: true, skills: null, mcp: ["stdio", "streamable-http", "sse"] },
+  { name: "Claude Code", primary: true, skills: null, mcp: ["stdio", "streamable-http", "sse"] },
+  { name: "Claude Desktop", primary: true, skills: "Skills come from your claude.ai account (Customize > Skills).", mcp: ["stdio"] },
+  { name: "OpenCode", primary: false, skills: null, mcp: ["stdio", "streamable-http"] },
+  { name: "pi", primary: false, skills: null, mcp: [], noMcp: "pi doesn't use MCP servers." },
+  { name: "Codex and the ChatGPT app", primary: false, skills: null, mcp: ["stdio", "streamable-http"] },
+  { name: "Grok Build", primary: false, skills: null, mcp: ["stdio", "streamable-http"] }
+];
+
+export interface WorksIn {
+  readonly app: string;
+  readonly primary: boolean;
+  readonly works: "yes" | "some" | "no";
+  /** Why an app gets less than the whole package. */
+  readonly note: string | null;
+}
+
+/**
+ * Which apps get what from a package with these component kinds and MCP transports. Unknown
+ * transports (an empty list) count as working wherever the app takes MCP servers at all.
+ */
+export function worksIn(kinds: readonly string[], transports: readonly string[]): WorksIn[] {
+  const wantsSkill = kinds.includes("skill");
+  const wantsMcp = kinds.includes("mcpServer");
+  return apps.map((app) => {
+    const notes: string[] = [];
+    let parts = 0;
+    let got = 0;
+    if (wantsSkill) {
+      parts += 1;
+      if (app.skills === null) {
+        got += 1;
+      } else {
+        notes.push(app.skills);
+      }
+    }
+
+    if (wantsMcp) {
+      parts += 1;
+      const missing = transports.filter((transport) => !app.mcp.includes(transport));
+      if (app.mcp.length > 0 && missing.length === 0) {
+        got += 1;
+      } else {
+        notes.push(app.noMcp ?? (app.mcp.includes("stdio") && app.mcp.length === 1 ? "It only runs MCP servers on this PC, not online ones." : "It can't use this kind of MCP server."));
+      }
+    }
+
+    return { app: app.name, primary: app.primary, works: got === parts ? "yes" : got === 0 ? "no" : "some", note: notes.length === 0 ? null : notes.join(" ") };
+  });
+}
+
+/** A card's short warning when a main app gets nothing from the package, such as "Not in Claude Desktop". */
+export function worksInNote(kinds: readonly string[], transports: readonly string[]): string | null {
+  const missing = worksIn(kinds, transports)
+    .filter((row) => row.primary && row.works === "no")
+    .map((row) => row.app);
+  return missing.length === 0 ? null : `Not in ${missing.join(" or ")}`;
+}
+
+/**
+ * A new package's ID from its name: installed skills are named `<space>-<id>` in at most 64 characters,
+ * so a name that already starts with the space drops it, and the ID leaves room for the prefix.
+ */
+export function packageIdFor(name: string, space: string): string {
+  const slug = slugify(name);
+  const bare = slug.startsWith(`${space}-`) ? slug.slice(space.length + 1) : slug;
+  return bare.slice(0, Math.max(1, 63 - space.length)).replace(/-+$/u, "");
+}
+
+/** A SKILL.md from what someone typed: the description is quoted, so a colon or a quote in it stays valid YAML. */
+export function skillMd(skill: SkillText): string {
+  return `---\nname: ${skill.name}\ndescription: ${JSON.stringify(skill.description.replace(/\s+/gu, " ").trim())}\n---\n\n${skill.body.trim()}\n`;
+}
+
+export type BrowseSort = "popular" | "new" | "updated";
+export type BrowseLane = "all" | "official" | "team" | "personal";
+
+export interface BrowseState {
+  readonly q: string;
+  readonly lane: BrowseLane;
+  readonly sort: BrowseSort;
+  readonly tag: string | null;
+  readonly installed: boolean;
+}
+
+/** The Browse page's filters from its query string; anything unrecognised falls back to the default. */
+export function parseBrowse(params: {
+  readonly q?: string | undefined;
+  readonly lane?: string | undefined;
+  readonly sort?: string | undefined;
+  readonly tag?: string | undefined;
+  readonly installed?: string | undefined;
+}): BrowseState {
+  const lane = params.lane;
+  const sort = params.sort;
+  return {
+    q: params.q ?? "",
+    lane: lane === "official" || lane === "team" || lane === "personal" ? lane : "all",
+    sort: sort === "new" || sort === "updated" ? sort : "popular",
+    tag: params.tag !== undefined && params.tag.length > 0 ? params.tag : null,
+    installed: params.installed === "true"
+  };
+}
+
+/** The query string for a Browse state, leaving defaults out so links stay short. */
+export function browseParams(state: BrowseState): Record<string, string | null> {
+  return {
+    q: state.q.length > 0 ? state.q : null,
+    lane: state.lane === "all" ? null : state.lane,
+    sort: state.sort === "popular" ? null : state.sort,
+    tag: state.tag,
+    installed: state.installed ? "true" : null
+  };
+}

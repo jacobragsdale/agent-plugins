@@ -58,6 +58,64 @@ namespace Marketplace.Api.Data.Migrations
                     b.ToTable("AccessRules");
                 });
 
+            modelBuilder.Entity("Marketplace.Api.Data.AuditEvent", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("Action")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Actor")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime>("At")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Detail")
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.Property<string>("Target")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("AuditEvents");
+                });
+
+            modelBuilder.Entity("Marketplace.Api.Data.Block", b =>
+                {
+                    b.Property<string>("Account")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime>("BlockedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("BlockedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.HasKey("Account");
+
+                    b.ToTable("Blocks");
+                });
+
             modelBuilder.Entity("Marketplace.Api.Data.Bundle", b =>
                 {
                     b.Property<string>("Namespace")
@@ -159,6 +217,10 @@ namespace Marketplace.Api.Data.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
 
+                    b.Property<string>("Device")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
                     b.PrimitiveCollection<string[]>("Agents")
                         .IsRequired()
                         .HasColumnType("text[]");
@@ -176,6 +238,10 @@ namespace Marketplace.Api.Data.Migrations
                         .IsRequired()
                         .HasColumnType("text[]");
 
+                    b.Property<string>("InstalledVersionsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
                     b.Property<DateTime>("OccurredAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -187,7 +253,7 @@ namespace Marketplace.Api.Data.Migrations
                     b.Property<DateTime>("ReceivedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.HasKey("Account");
+                    b.HasKey("Account", "Device");
 
                     b.ToTable("Heartbeats");
                 });
@@ -250,6 +316,46 @@ namespace Marketplace.Api.Data.Migrations
                     b.ToTable("NamespaceArchives");
                 });
 
+            modelBuilder.Entity("Marketplace.Api.Data.Notification", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("Account")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Link")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime?>("ReadAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Account", "Id");
+
+                    b.ToTable("Notifications");
+                });
+
             modelBuilder.Entity("Marketplace.Api.Data.Package", b =>
                 {
                     b.Property<int>("Id")
@@ -272,6 +378,10 @@ namespace Marketplace.Api.Data.Migrations
                     b.Property<string>("McpApprovedBy")
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
+
+                    b.Property<string>("McpApprovedSpec")
+                        .HasMaxLength(8192)
+                        .HasColumnType("character varying(8192)");
 
                     b.Property<string>("McpDeclineNote")
                         .HasMaxLength(2048)
@@ -298,6 +408,9 @@ namespace Marketplace.Api.Data.Migrations
                     b.Property<string>("RevokedBy")
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
+
+                    b.Property<bool>("RevokedByAdmin")
+                        .HasColumnType("boolean");
 
                     b.PrimitiveCollection<string[]>("Tags")
                         .IsRequired()
@@ -330,6 +443,15 @@ namespace Marketplace.Api.Data.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
                     b.Property<string>("PackageId")
                         .IsRequired()
                         .HasMaxLength(81)
@@ -348,6 +470,8 @@ namespace Marketplace.Api.Data.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("PackageId");
 
                     b.ToTable("Reports");
                 });
@@ -377,6 +501,9 @@ namespace Marketplace.Api.Data.Migrations
                         .IsRequired()
                         .HasColumnType("jsonb");
 
+                    b.Property<string>("McpServersJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<int>("PackageId")
                         .HasColumnType("integer");
 
@@ -385,6 +512,13 @@ namespace Marketplace.Api.Data.Migrations
 
                     b.Property<string>("PublishedBy")
                         .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime?>("PurgedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PurgedBy")
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
 

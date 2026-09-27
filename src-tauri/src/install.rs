@@ -236,7 +236,6 @@ mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
-            onedrive_commercial: None,
         }
     }
 

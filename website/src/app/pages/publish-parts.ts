@@ -4,7 +4,10 @@ import { MatButtonModule } from "@angular/material/button";
 import { MatButtonToggleModule } from "@angular/material/button-toggle";
 import { MatFormFieldModule } from "@angular/material/form-field";
 import { MatInputModule } from "@angular/material/input";
-import type { ApiError } from "../api";
+import { MatProgressBarModule } from "@angular/material/progress-bar";
+import { MatRadioModule } from "@angular/material/radio";
+import { RouterLink } from "@angular/router";
+import type { ApiError, DryRun, Visibility } from "../api";
 import type { Bump } from "../format";
 import type { SkillGroup } from "../format";
 import { groupBySkill, isJunk, parseSkillMd, slugify, titleCase } from "../format";
@@ -71,31 +74,37 @@ async function readEntry(entry: FileSystemEntry): Promise<Picked[]> {
   return (await Promise.all(children.map(readEntry))).flat();
 }
 
-/** What the server will make of the picked files, in words. */
-function describeUpload(files: readonly Picked[]): string | null {
+/** What the server will make of the picked files, in words, and whether it can make anything of them. */
+export function describeUpload(files: readonly Picked[]): { readonly text: string; readonly usable: boolean } | null {
   if (files.length === 0) {
     return null;
   }
 
   if (pickedArchive(files) !== null) {
-    return "A zip file. It's unpacked and checked on the server.";
+    return { text: "A zip file. It's unpacked and checked on the server.", usable: true };
   }
 
   const paths = relativePaths(files);
   if (paths.includes("agent-plugins.json")) {
-    return "A source tree with its own agent-plugins.json.";
+    return { text: "A source tree with its own agent-plugins.json.", usable: true };
   }
 
   if (paths.includes("SKILL.md")) {
-    return "One skill.";
+    return { text: "One skill.", usable: true };
   }
 
   const skills = paths.filter((path) => /^[^/]+\/SKILL\.md$/u.test(path)).length;
   if (skills > 0) {
-    return `A skill pack with ${String(skills)} skills.`;
+    return { text: `A skill pack with ${String(skills)} skills.`, usable: true };
   }
 
-  return paths.length === 1 && paths[0]?.endsWith(".json") === true ? "An MCP server document." : "No SKILL.md found. Pick a skill's folder, or a folder of skill folders.";
+  if (paths.some((path) => /(^|\/)skill\.md(\.txt)?$/iu.test(path))) {
+    return { text: "The skill file must be named exactly SKILL.md, in capitals, with no .txt at the end. Rename it and pick it again.", usable: false };
+  }
+
+  return paths.length === 1 && paths[0]?.endsWith(".json") === true
+    ? { text: "An MCP server document.", usable: true }
+    : { text: "No SKILL.md found. Pick a skill's folder, or a folder of skill folders.", usable: false };
 }
 
 /** Upload: drag and drop, or choose files or a folder. */
@@ -189,6 +198,185 @@ export class UploadPicker {
   }
 }
 
+/** A failed publish, with each validator finding on its own line. */
+@Component({
+  selector: "app-problem",
+  template: `
+    @if (problem(); as failure) {
+      <div class="problem" role="alert">
+        <strong>{{ failure.message }}</strong>
+        @if (failure.details.length > 0) {
+          <ul>
+            @for (detail of failure.details; track $index) {
+              <li>
+                @if (detail.path.length > 0) {
+                  <code>{{ detail.path }}</code
+                  >:
+                }
+                {{ detail.message }}
+              </li>
+            }
+          </ul>
+        }
+      </div>
+    }
+  `
+})
+export class Problem {
+  public readonly problem = input.required<ApiError | null>();
+}
+
+/** A skill written in the browser: the three things a SKILL.md needs, in plain words. */
+@Component({
+  selector: "app-skill-editor",
+  imports: [MatFormFieldModule, MatInputModule],
+  template: `
+    @if (showName()) {
+      <mat-form-field appearance="outline">
+        <mat-label>Name</mat-label>
+        <input matInput maxlength="120" required placeholder="Meeting summaries" [value]="name()" (input)="name.set(text($event))" />
+      </mat-form-field>
+    }
+    <mat-form-field appearance="outline">
+      <mat-label>When should the assistant use it?</mat-label>
+      <textarea matInput rows="2" required maxlength="1024" [value]="description()" (input)="description.set(text($event))"></textarea>
+      <mat-hint>One or two sentences, like “Use when someone asks for a standup update from rough notes.” The assistant reads this to decide.</mat-hint>
+    </mat-form-field>
+    <mat-form-field appearance="outline">
+      <mat-label>Instructions</mat-label>
+      <textarea matInput rows="14" required [value]="body()" (input)="body.set(text($event))"></textarea>
+      <mat-hint>What the assistant should do, step by step. Markdown works: # headings, - lists, **bold**.</mat-hint>
+    </mat-form-field>
+  `,
+  styles: `
+    mat-form-field {
+      width: 100%;
+    }
+  `,
+  host: { class: "card stack" }
+})
+export class SkillEditor {
+  public readonly showName = input.required<boolean>();
+  public readonly name = model.required<string>();
+  public readonly description = model.required<string>();
+  public readonly body = model.required<string>();
+
+  protected readonly text = text;
+}
+
+/** Who can install a new package: its own rule, or its space's. */
+const audiences: readonly { readonly value: Visibility; readonly label: string }[] = [
+  { value: "private", label: "Only me, and people I share it with" },
+  { value: "public", label: "Everyone" },
+  { value: "inherit", label: "Same as the space" }
+];
+
+/** Where a new package goes and who can install it. */
+@Component({
+  selector: "app-publish-target",
+  imports: [RouterLink, MatRadioModule],
+  template: `
+    <h2 id="space-heading">Publish to</h2>
+    <mat-radio-group class="choices" aria-labelledby="space-heading" [value]="space()" (change)="space.set($event.value)">
+      @for (option of spaces(); track option.namespace) {
+        <mat-radio-button [value]="option.namespace">{{ option.label }}</mat-radio-button>
+      }
+    </mat-radio-group>
+    <p class="muted">
+      <span [hidden]="!hasTeam()">A team space is shared: everyone on the team can publish new versions.</span>
+      Need a shared space? <a routerLink="/teams">Create a team</a>.
+    </p>
+    <h2 id="audience-heading">Who can install it</h2>
+    <mat-radio-group class="choices" aria-labelledby="audience-heading" [value]="visibility()" (change)="visibility.set($event.value)">
+      @for (option of audiences; track option.value) {
+        <mat-radio-button [value]="option.value">{{ option.label }}</mat-radio-button>
+      }
+    </mat-radio-group>
+    <p class="muted">You can share it with more people, or with everyone, later.</p>
+  `,
+  styles: `
+    h2,
+    p {
+      margin: 0;
+    }
+    .choices {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.5rem;
+    }
+  `,
+  host: { class: "card stack" }
+})
+export class PublishTarget {
+  public readonly spaces = input.required<readonly { readonly namespace: string; readonly label: string }[]>();
+  public readonly hasTeam = input.required<boolean>();
+  public readonly space = model.required<string>();
+  public readonly visibility = model.required<Visibility>();
+
+  protected readonly audiences = audiences;
+}
+
+/** How a new version's files compare with the live one, from a dry run on the server. */
+@Component({
+  selector: "app-file-changes",
+  imports: [MatProgressBarModule, Problem],
+  template: `
+    @if (loading()) {
+      <mat-progress-bar mode="indeterminate" aria-label="Comparing with the live version" />
+    }
+    <app-problem [problem]="problem()" />
+    @if (check(); as result) {
+      <h2>Compared with the live version</h2>
+      @if (removed() > 0) {
+        <p class="notice" role="status">
+          {{ removed() === 1 ? "1 file" : removed() + " files" }} in the live version {{ removed() === 1 ? "isn't" : "aren't" }} in what you picked, so
+          {{ removed() === 1 ? "it goes" : "they go" }} away when you publish.
+        </p>
+      }
+      <ul>
+        @for (file of changed(); track file.path) {
+          <li>
+            <code>{{ file.path }}</code> <span [class]="badges[file.status].badge">{{ badges[file.status].label }}</span>
+          </li>
+        } @empty {
+          <li class="muted">Nothing changed.</li>
+        }
+      </ul>
+      @for (warning of result.warnings; track warning) {
+        <p class="notice">{{ warning }}</p>
+      }
+    }
+  `,
+  styles: `
+    ul {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 0.35rem;
+    }
+    h2,
+    p {
+      margin: 0;
+    }
+  `,
+  host: { class: "card stack", "[hidden]": "!loading() && problem() === null && check() === null" }
+})
+export class FileChanges {
+  public readonly check = input.required<DryRun | null>();
+  public readonly loading = input.required<boolean>();
+  public readonly problem = input.required<ApiError | null>();
+
+  protected readonly badges = {
+    new: { label: "New", badge: "badge live" },
+    changed: { label: "Changed", badge: "badge pending" },
+    removed: { label: "Removed", badge: "badge rejected" },
+    same: { label: "Same", badge: "badge" }
+  } as const;
+  protected readonly changed = computed(() => (this.check()?.files ?? []).filter((file) => file.status !== "same"));
+  protected readonly removed = computed(() => this.changed().filter((file) => file.status === "removed").length);
+}
+
 /** Version, notes, tags, and the technical details a publisher may want to see. */
 @Component({
   selector: "app-version-fields",
@@ -220,32 +408,4 @@ export class VersionFields {
   protected setId(event: Event): void {
     this.idOverride.set(text(event).trim());
   }
-}
-
-/** A failed publish, with each validator finding on its own line. */
-@Component({
-  selector: "app-problem",
-  template: `
-    @if (problem(); as failure) {
-      <div class="problem" role="alert">
-        <strong>{{ failure.message }}</strong>
-        @if (failure.details.length > 0) {
-          <ul>
-            @for (detail of failure.details; track $index) {
-              <li>
-                @if (detail.path.length > 0) {
-                  <code>{{ detail.path }}</code
-                  >:
-                }
-                {{ detail.message }}
-              </li>
-            }
-          </ul>
-        }
-      </div>
-    }
-  `
-})
-export class Problem {
-  public readonly problem = input.required<ApiError | null>();
 }

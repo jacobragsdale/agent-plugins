@@ -5,7 +5,7 @@ import { invokeParsed, toAppError } from "../ipc/client";
 import type { AppError } from "../ipc/client";
 import { linkPreviewSchema, linkResultSchema } from "../ipc/schemas";
 import type { AgentProfile, CatalogItem, LinkPreview, LinkResult } from "../ipc/schemas";
-import { appsPhrase, bundleSummary, linkAction, listPhrase, partCounts } from "../lib/marketplace";
+import { appsFor, appsPhrase, bundleSummary, linkAction, listPhrase, partCounts, unusableReason } from "../lib/marketplace";
 import type { LinkTarget } from "../lib/marketplace";
 import { statusColor, statusLabel } from "../lib/status";
 import { ErrorMessage } from "./Notice";
@@ -160,9 +160,9 @@ export function LinkInstallDialog({
     >
       <Dialog.Content maxWidth="520px">
         {request === null ? null : request.target.kind === "item" ? (
-          <ItemRequest target={request.target} item={request.target.item} apps={appsPhrase(profiles)} onInstall={onInstall} onShow={onShow} />
+          <ItemRequest target={request.target} item={request.target.item} apps={appsPhrase(appsFor(request.target.item, profiles, request.target.componentId))} onInstall={onInstall} onShow={onShow} />
         ) : (
-          <BundleRequest target={request.target} apps={appsPhrase(profiles)} onInstall={onInstall} onShow={onShow} />
+          <BundleRequest target={request.target} apps={appsPhrase([...new Set(request.target.members.flatMap((member) => appsFor(member, profiles)))])} onInstall={onInstall} onShow={onShow} />
         )}
       </Dialog.Content>
     </Dialog.Root>
@@ -197,6 +197,21 @@ function ItemRequest({
       <>
         <Dialog.Title>{action === "installed" ? `${part.name} is already installed` : `${part.name} came from another source`}</Dialog.Title>
         <Dialog.Description size="2">{action === "installed" ? "Nothing to do. It's already in your AI apps." : "Agent Plugins leaves it alone, so there's nothing to install."}</Dialog.Description>
+        <RequestActions
+          primary="Show it"
+          onPrimary={() => {
+            onShow(item.id);
+          }}
+        />
+      </>
+    );
+  }
+  const unusable = unusableReason(item);
+  if (unusable !== null) {
+    return (
+      <>
+        <Dialog.Title>{part.name} can't be added here</Dialog.Title>
+        <Dialog.Description size="2">{unusable}</Dialog.Description>
         <RequestActions
           primary="Show it"
           onPrimary={() => {

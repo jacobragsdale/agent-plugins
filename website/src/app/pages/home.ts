@@ -4,6 +4,7 @@ import { MatButtonModule } from "@angular/material/button";
 import { RouterLink } from "@angular/router";
 import { firstValueFrom } from "rxjs";
 import { z } from "zod";
+import type { IndexPackage } from "../api";
 import { Api } from "../api";
 import { formatBytes } from "../format";
 import { Icon } from "../shared/icon";
@@ -110,7 +111,33 @@ export class DownloadCard {
   public readonly download = input.required<Download>();
 }
 
-@Component({ selector: "app-home", imports: [RouterLink, MatButtonModule, DownloadCard, PackageCard], templateUrl: "./home.html", styleUrl: "./home.scss" })
+/** A row of skill cards under a heading; nothing at all when there are none. */
+@Component({
+  selector: "app-skill-shelf",
+  imports: [RouterLink, MatButtonModule, PackageCard],
+  template: `
+    @if (items().length > 0) {
+      <section class="stack" [attr.aria-label]="heading()">
+        <div class="page-head">
+          <h2>{{ heading() }}</h2>
+          <a mat-button routerLink="/browse" [hidden]="!all()">All skills</a>
+        </div>
+        <div class="grid">
+          @for (item of items(); track item.id) {
+            <app-package-card [item]="item" />
+          }
+        </div>
+      </section>
+    }
+  `
+})
+export class SkillShelf {
+  public readonly heading = input.required<string>();
+  public readonly items = input.required<readonly IndexPackage[]>();
+  public readonly all = input(false);
+}
+
+@Component({ selector: "app-home", imports: [RouterLink, MatButtonModule, DownloadCard, SkillShelf], templateUrl: "./home.html", styleUrl: "./home.scss" })
 export class HomePage {
   private readonly http = inject(HttpClient);
   private readonly api = inject(Api);
@@ -120,6 +147,17 @@ export class HomePage {
 
   /** The index needs a signed-in caller; without one the page simply has no skills to show. */
   private readonly index = resource({ loader: () => this.api.index() });
+  /** Skills someone shared with the caller by name, a team, or a link; newest first. */
+  protected readonly shared = computed(() =>
+    this.index.hasValue()
+      ? this.index
+          .value()
+          .packages.filter((item) => item.sharedWithYou)
+          .toSorted((left, right) => Date.parse(right.publishedAt) - Date.parse(left.publishedAt))
+          .slice(0, 6)
+      : []
+  );
+
   protected readonly popular = computed(() =>
     this.index.hasValue()
       ? this.index

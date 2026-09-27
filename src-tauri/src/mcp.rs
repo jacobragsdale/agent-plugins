@@ -182,16 +182,67 @@ fn reject_plugin_placeholder(server: &str, field: &str, value: &str) -> Result<(
     Ok(())
 }
 
+/// A sensitive header is exactly `${NAME}`, or a scheme and `${NAME}` such
+/// as `Bearer ${TOKEN}`, so the secret itself is never written down.
 fn is_environment_reference(value: &str) -> bool {
-    value
-        .strip_prefix("${")
-        .and_then(|value| value.strip_suffix('}'))
-        .is_some_and(|name| {
-            !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    let value = value
+        .split_once(' ')
+        .filter(|(scheme, _)| {
+            !scheme.is_empty() && scheme.bytes().all(|byte| byte.is_ascii_alphabetic())
         })
+        .map_or(value, |(_, reference)| reference);
+    matches!(environment_references(value).as_slice(), [(range, _)] if range.len() == value.len())
+}
+
+/// Each `${NAME}` in `text` with its byte range. `NAME` is upper-case
+/// letters, digits, and `_`, the only references the portable document has.
+pub(crate) fn environment_references(text: &str) -> Vec<(std::ops::Range<usize>, &str)> {
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(start) = text[from..].find("${").map(|offset| from + offset) {
+        let name_start = start + 2;
+        let name_end = text[name_start..]
+            .find(|character: char| {
+                !(character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_')
+            })
+            .map_or(text.len(), |offset| name_start + offset);
+        if name_end > name_start && text[name_end..].starts_with('}') {
+            found.push((start..name_end + 1, &text[name_start..name_end]));
+            from = name_end + 1;
+        } else {
+            from = name_start;
+        }
+    }
+    found
+}
+
+impl McpServer {
+    /// Every environment variable the server reads through a `${NAME}`
+    /// reference, which the person has to set before it works.
+    pub(crate) fn environment_names(&self) -> BTreeSet<String> {
+        let texts: Vec<&str> = match self {
+            McpServer::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => std::iter::once(command.as_str())
+                .chain(args.iter().map(String::as_str))
+                .chain(env.values().map(String::as_str))
+                .chain(cwd.as_deref())
+                .collect(),
+            McpServer::StreamableHttp { url, headers } | McpServer::Sse { url, headers } => {
+                std::iter::once(url.as_str())
+                    .chain(headers.values().map(String::as_str))
+                    .collect()
+            }
+        };
+        texts
+            .into_iter()
+            .flat_map(environment_references)
+            .map(|(_, name)| name.to_string())
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -270,5 +321,42 @@ mod tests {
             };
             server.validate("remote").expect("valid remote URL");
         }
+    }
+
+    #[test]
+    fn sensitive_headers_may_carry_a_scheme_before_the_reference() {
+        for (value, ok) in [
+            ("${TOKEN}", true),
+            ("Bearer ${ACME_TOKEN}", true),
+            ("Basic ${CREDENTIALS}", true),
+            ("Bearer abc123", false),
+            ("${TOKEN} extra", false),
+            ("Bearer ${lower}", false),
+            ("${}", false),
+        ] {
+            let server = McpServer::StreamableHttp {
+                url: "https://example.com/mcp".to_string(),
+                headers: BTreeMap::from([("Authorization".to_string(), value.to_string())]),
+            };
+            assert_eq!(server.validate("remote").is_ok(), ok, "{value}");
+        }
+    }
+
+    #[test]
+    fn environment_names_come_from_every_field_that_can_hold_a_reference() {
+        let server = McpServer::Stdio {
+            command: "uvx".to_string(),
+            args: vec!["--region=${REGION}".to_string(), "$HOME".to_string()],
+            env: BTreeMap::from([("API_KEY".to_string(), "${API_KEY}".to_string())]),
+            cwd: None,
+        };
+        assert_eq!(
+            server.environment_names().into_iter().collect::<Vec<_>>(),
+            ["API_KEY", "REGION"]
+        );
+        assert_eq!(
+            environment_references("a ${X} b ${Y_2}c ${z} ${"),
+            vec![(2..6, "X"), (9..15, "Y_2")]
+        );
     }
 }

@@ -67,6 +67,8 @@ public sealed class MarketplaceApiFactory : WebApplicationFactory<Program>, IAsy
         builder.UseSetting("Auth:OfficialPublishers:0", "TEST\\curator");
         builder.UseSetting("Client:MinimumVersion", "0.1.0");
         builder.UseSetting("Client:LatestVersion", "0.2.0");
+        builder.UseSetting("RateLimits:WritesPerMinute", "100000");
+        builder.UseSetting("RateLimits:UploadsPerHour", "100000");
         if (ValidatorPath is not null)
         {
             builder.UseSetting("Validator:Path", ValidatorPath);
@@ -148,6 +150,18 @@ public sealed class InMemoryArtifactStore : IArtifactStore
 
         return Task.FromResult(new StoredArtifact(path, Convert.ToHexStringLower(SHA256.HashData(bytes.Span)), bytes.Length));
     }
+
+    public Task DeleteAsync(string path, CancellationToken cancellationToken)
+    {
+        lock (_lock)
+        {
+            _blobs.Remove(path);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> CheckAsync(CancellationToken cancellationToken) => Task.FromResult(true);
 
     public Task<byte[]> GetAsync(string path, CancellationToken cancellationToken)
     {

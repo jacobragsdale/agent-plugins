@@ -9,7 +9,7 @@ describe("help routes", () => {
     TestBed.configureTestingModule({ providers: [provideRouter(routes)] });
     const router = TestBed.inject(Router);
     for (const [url, landed] of [
-      ["/help", "/help/publish"],
+      ["/help", "/help/getting-started"],
       ["/help/source-manifest", "/help/source-manifest"],
       ["/help/source-repository", "/help/source-repository"],
       ["/", "/"],

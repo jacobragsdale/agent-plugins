@@ -7,7 +7,7 @@ import { Icon } from "./icon";
 @Component({
   selector: "app-lane-badge",
   imports: [Icon],
-  template: `<app-icon [name]="icon()" />{{ publisher() }}`,
+  template: `<app-icon [name]="icon()" /><span class="visually-hidden">{{ word() }}: </span>{{ publisher() }}`,
   styles: `
     :host {
       display: inline-flex;
@@ -39,6 +39,18 @@ export class LaneBadge {
         return "group";
       case "personal":
         return "person";
+    }
+  });
+
+  /** The lane for screen readers, which skip the icon and rarely read the title. */
+  protected readonly word = computed(() => {
+    switch (this.lane()) {
+      case "official":
+        return "Official";
+      case "team":
+        return "Team";
+      case "personal":
+        return "Colleague";
     }
   });
 

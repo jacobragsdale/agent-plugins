@@ -97,26 +97,28 @@ describe("names instead of ids", () => {
 
   it("reports the packages a background sync updated", () => {
     const autoUpdateReport = {
-      updatedItems: [{ id: "official/publish", sourceId: "official", localId: "publish" }],
+      updatedItems: [{ id: "official/publish", sourceId: "official", localId: "publish", toVersion: "1.4.0" }],
       failedItems: [{ id: "team-data/sql-helper", message: "The process cannot access the file because it is being used by another process. (os error 32)" }],
       repairedItems: [],
       extendedItems: [],
       removedItems: []
     };
-    expect(reportNotice({ ...state, autoUpdateReport })).toEqual({ text: "Updated Publish." });
+    expect(reportNotice({ ...state, notifications: [], autoUpdateReport })).toEqual({ text: "Updated Publish to 1.4.0. Details shows what changed." });
   });
 
   it("says why a package was removed from this PC", () => {
     const report = { updatedItems: [], failedItems: [], repairedItems: [], extendedItems: [], removedItems: ["Old helper"] };
-    expect(reportNotice({ ...state, autoUpdateReport: report })).toEqual({ text: "Removed Old helper: its publisher or an admin pulled it from every PC." });
+    expect(reportNotice({ ...state, notifications: [], autoUpdateReport: report })).toEqual({ text: "Removed Old helper: its publisher or an admin pulled it from every PC." });
     const both = { ...report, updatedItems: [{ id: "official/publish", sourceId: "official", localId: "publish" }], removedItems: ["A", "B"] };
-    expect(reportNotice({ ...state, autoUpdateReport: both })?.text).toBe("Updated Publish. Removed A, B: their publishers or an admin pulled them from every PC.");
+    expect(reportNotice({ ...state, autoUpdateReport: both })?.text).toBe(
+      "Updated Publish. Details shows what changed. Removed A, B: their publishers or an admin pulled them from every PC. Dana suggested a change to SQL helper."
+    );
   });
 
   it("stays quiet about repairs and updates the next sync retries", () => {
-    expect(reportNotice({ ...state, autoUpdateReport: { updatedItems: [], failedItems: [], repairedItems: [], extendedItems: [], removedItems: [] } })).toBeNull();
+    expect(reportNotice({ ...state, notifications: [], autoUpdateReport: { updatedItems: [], failedItems: [], repairedItems: [], extendedItems: [], removedItems: [] } })).toBeNull();
     const quiet = { updatedItems: [], failedItems: [{ id: "team-data/sql-helper", message: "locked" }], repairedItems: ["Publish"], extendedItems: ["SQL helper"], removedItems: [] };
-    expect(reportNotice({ ...state, autoUpdateReport: quiet })).toBeNull();
+    expect(reportNotice({ ...state, notifications: [], autoUpdateReport: quiet })).toBeNull();
   });
 
   it("summarizes bulk failures by name and source", () => {

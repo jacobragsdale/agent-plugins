@@ -1,13 +1,17 @@
 <app-get-it class="card" [item]="item()" [skills]="skills()" [hasServer]="hasServer()" />
 
-@if (entry(); as listed) {
+@if (version(); as shown) {
+  <app-works-in [kinds]="shown.componentKinds" [transports]="transports()" />
+}
+
+@if (live(); as current) {
   <dl class="facts">
     <dt>Version</dt>
-    <dd>{{ listed.version }}</dd>
+    <dd>{{ current.version }}</dd>
     <dt>Updated</dt>
     <dd>{{ updated() }}</dd>
     <dt>Using it</dt>
-    <dd>{{ listed.installedBase === 1 ? "1 person" : listed.installedBase + " people" }}</dd>
+    <dd>{{ item().installedBase === 1 ? "1 person" : item().installedBase + " people" }}</dd>
   </dl>
 }
 
@@ -41,6 +45,7 @@
     <a mat-button [routerLink]="['/p', item().namespace, item().packageId, 'suggest']"><app-icon name="edit" />Suggest a change</a>
   }
   @if (canReport()) {
-    <button mat-button type="button" class="report" (click)="report.emit()"><app-icon name="flag" />Report a problem</button>
+    <button mat-button type="button" (click)="report.emit('feedback')"><app-icon name="edit" />Tell the owners</button>
+    <button mat-button type="button" class="report" (click)="report.emit('problem')"><app-icon name="flag" />Report a problem</button>
   }
 </div>

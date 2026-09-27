@@ -1,4 +1,4 @@
-import type { AgentProfile, AppIdentity, AppState, BundleState, CatalogComponent, CatalogItem, DeepLink, ItemStatus } from "../ipc/schemas";
+import type { AgentProfile, AppIdentity, AppState, BundleState, CatalogComponent, CatalogItem, DeepLink, ItemStatus, TargetId } from "../ipc/schemas";
 
 /** A space's name: `source.id`, 2–16 lowercase letters, digits, and single hyphens, starting with a letter. */
 export const NAMESPACE_PATTERN = /^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){1,15}$/;
@@ -38,10 +38,10 @@ export function ownsSpace(identity: AppIdentity | null, namespace: string): bool
   return identity !== null && (identity.admin || identity.namespaces.includes(namespace));
 }
 
-/** How a space reads in a picker: "Just me" for one's own, the team's name, or the namespace itself. */
+/** How a space reads in a picker: "My space" for one's own, the team's name, or the namespace itself. */
 export function spaceLabel(identity: AppIdentity | null, namespace: string): string {
   if (identity?.namespace === namespace) {
-    return "Just me";
+    return "My space";
   }
   if (namespace === "official") {
     return "Official";
@@ -68,10 +68,85 @@ export function listPhrase(names: readonly string[]): string {
   return names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names.at(-1) ?? ""}`;
 }
 
+function supported(level: string): boolean {
+  return level === "native" || level === "losslessTranslation" || level === "lossyTranslation";
+}
+
+/** The apps here that get `item` (or one of its parts), by display name, in the window's app order. */
+export function appsFor(item: CatalogItem, profiles: readonly AgentProfile[], componentId?: string | null): readonly string[] {
+  const targets = new Set(
+    item.compatibility
+      .filter((report) => (componentId ?? null) === null || report.componentId === componentId)
+      .filter((report) => supported(report.capability.level))
+      .map((report) => report.targetId)
+  );
+  return profiles.filter((profile) => targets.has(profile.targetId)).map((profile) => profile.displayName);
+}
+
 /** The AI apps an install lands in, as a phrase. */
-export function appsPhrase(profiles: readonly AgentProfile[]): string {
-  const names = profiles.filter((profile) => profile.detected && profile.enabled).map((profile) => profile.displayName);
-  return names.length === 0 ? "the AI apps Agent Plugins finds" : listPhrase(names);
+export function appsPhrase(apps: readonly string[]): string {
+  return apps.length === 0 ? "the AI apps Agent Plugins finds" : listPhrase(apps);
+}
+
+/**
+ * Why none of the apps here can take `item`, in the first app's own words,
+ * or null when at least one can (or nothing was planned yet).
+ */
+export function unusableReason(item: CatalogItem): string | null {
+  if (item.compatibility.length === 0 || item.compatibility.some((report) => supported(report.capability.level))) {
+    return null;
+  }
+  for (const report of item.compatibility) {
+    if (report.capability.level === "unsupported" || report.capability.level === "blocked") {
+      return report.capability.reason;
+    }
+  }
+  return null;
+}
+
+/** How to use a newly installed skill in each app, where `name` is what the app lists it as. */
+const USAGE: Readonly<Record<TargetId, (name: string) => string>> = {
+  "github-copilot": () => "reload VS Code (or start a new Copilot CLI session); Copilot uses it when your request fits",
+  cursor: (name) => `reload the window, then type /${name} or just ask`,
+  "claude-code": (name) => `start a new session and type /${name}`,
+  "claude-desktop": () => "quit and reopen it",
+  opencode: () => "start a new session; it uses the skill when your request fits",
+  pi: (name) => `start a new session and type /skill:${name}`,
+  codex: (name) => `start a new session and type $${name}`,
+  chatgpt: (name) => `switch to Codex and type $${name}`,
+  "grok-build": () => "start a new session"
+};
+
+/**
+ * One line per app that got the install: what to do there to use it. A
+ * connector only needs its app restarted.
+ */
+export function usageLines(item: CatalogItem, profiles: readonly AgentProfile[], componentId?: string | null): readonly string[] {
+  const parts = item.components.filter((component) => (componentId ?? null) === null || component.id === componentId);
+  const skill = parts.find((component) => component.kind === "skill");
+  const name = skill === undefined ? item.localId : `${item.sourceId}-${skill.id}`;
+  const targets = new Set(
+    item.compatibility
+      .filter((report) => parts.some((component) => component.id === report.componentId))
+      .filter((report) => supported(report.capability.level))
+      .map((report) => report.targetId)
+  );
+  return profiles.filter((profile) => targets.has(profile.targetId)).map((profile) => `In ${profile.displayName}: ${skill === undefined ? "restart it to connect" : USAGE[profile.targetId](name)}.`);
+}
+
+/** Whether every word of `query` appears somewhere in `text`, ignoring case. */
+export function matchesAllWords(text: string, query: string): boolean {
+  const haystack = text.toLowerCase();
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((word) => word.length > 0)
+    .every((word) => haystack.includes(word));
+}
+
+/** A page of the marketplace portal, such as `/p/ns/id`. */
+export function portalUrl(marketplaceUrl: string, path: string): string {
+  return `${marketplaceUrl.replace(/\/+$/, "")}${path}`;
 }
 
 /** What an install link may do with a package (or part) in `status`. A link never uninstalls or restores. */

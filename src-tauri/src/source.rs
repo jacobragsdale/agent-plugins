@@ -585,6 +585,33 @@ fn download_unconditionally(url: &str) -> Result<DownloadedBytes, String> {
     })
 }
 
+/// The cached snapshot when the catalog says the archive still has the ETag
+/// the cache was fetched with, so the archive is not asked for at all.
+pub(crate) fn unchanged_refresh(
+    source: &ConfiguredSource,
+    cache_base: &Path,
+    digest: &str,
+) -> Option<SourceCandidate> {
+    let source_root = source_cache_root(cache_base, &source.source_key);
+    let pointer = read_current_pointer(&source_root).ok()??;
+    let validators = pointer.validators();
+    let etag = validators.etag.as_deref()?;
+    if etag.trim_start_matches("W/").trim_matches('"') != digest {
+        return None;
+    }
+    let mut current = reuse_source_revision(
+        cache_base,
+        &source.source_key,
+        &source.locator,
+        &source_root,
+        &pointer.revision,
+    )
+    .ok()??;
+    current.definition.repository_key = source.repository_key.clone();
+    current.validators = validators;
+    Some(current)
+}
+
 fn reuse_source_revision(
     cache_base: &Path,
     source_key: &str,

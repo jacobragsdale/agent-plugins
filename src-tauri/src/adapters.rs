@@ -1,6 +1,6 @@
 //! Compile-time target registry. Adapters translate components and never mutate the machine.
 
-use crate::agent_profiles::{cowork_dir, AgentProfile, TargetId, CLAUDE_DESKTOP_MSIX};
+use crate::agent_profiles::{AgentProfile, TargetId, CLAUDE_DESKTOP_MSIX};
 use crate::catalog::{CatalogComponent, CatalogComponentKind};
 use crate::ledger::OwnedPathKind;
 use crate::mcp::McpServer;
@@ -10,6 +10,7 @@ use crate::resource::{
     StructuredFormat,
 };
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub(crate) struct PlanningContext<'a> {
@@ -52,25 +53,39 @@ enum SkillProjection {
     SharedAgents,
     /// Skills reach the app only through a claude.ai account upload.
     ClaudeAccountUpload,
-    /// Microsoft 365 Copilot Cowork reads skills from OneDrive.
-    CoworkOneDrive,
+}
+
+/// How a target spells the portable document's `${NAME}` environment
+/// variable reference.
+#[derive(Clone, Copy)]
+enum EnvSyntax {
+    /// `${NAME}`: the app expands it itself (Claude Code, Copilot CLI).
+    Dollar,
+    /// `${env:NAME}`: Cursor and VS Code.
+    DollarEnv,
+    /// `{env:NAME}`: OpenCode.
+    BraceEnv,
 }
 
 #[derive(Clone, Copy)]
 enum McpMapping {
-    StandardJson {
+    /// `mcpServers` in a JSON file, with `type` spelled `stdio`, `http`, `sse`.
+    ClaudeCode,
+    /// `~/.cursor/mcp.json`: the portable shape with `${env:NAME}`.
+    Cursor,
+    /// `~/.copilot/mcp-config.json`, which Copilot CLI and VS Code's agent
+    /// host read, plus the user `mcp.json` of each VS Code edition in use,
+    /// which VS Code's own chat reads.
+    GithubCopilot,
+    /// Codex's `config.toml`, shared by the ChatGPT app; Grok Build copies it.
+    CodexToml {
         relative: &'static str,
-        key: &'static str,
-    },
-    Toml {
-        relative: &'static str,
-        key: &'static str,
     },
     OpenCode,
     /// `claude_desktop_config.json`, stdio servers only.
     ClaudeDesktop,
-    /// No local configuration file exists for this target.
-    Unsupported,
+    /// The target does not use MCP servers; the reason says what it uses.
+    Unsupported(&'static str),
 }
 
 #[derive(Clone, Copy)]
@@ -79,16 +94,20 @@ pub(crate) struct TargetSpec {
     skill: SkillProjection,
     unknown_dialect_allows_shared_skills: bool,
     mcp: McpMapping,
-    sse_unsupported: bool,
 }
+
+/// One MCP entry to write: the document, its format, the key holding the
+/// servers, and the server's value there.
+type McpEntry = (PathBuf, StructuredFormat, &'static str, Value);
 
 impl TargetSpec {
     fn skill_display_root(self) -> &'static str {
         match self.skill {
             SkillProjection::NativeClaude => "~/.claude/skills",
             SkillProjection::SharedAgents => "~/.agents/skills",
-            SkillProjection::ClaudeAccountUpload => "claude.ai > Customize > Skills (upload)",
-            SkillProjection::CoworkOneDrive => "OneDrive/Documents/Cowork/skills",
+            SkillProjection::ClaudeAccountUpload => {
+                "None: Claude Desktop takes skills from claude.ai > Customize > Skills"
+            }
         }
     }
 
@@ -96,27 +115,83 @@ impl TargetSpec {
         matches!(self.skill, SkillProjection::SharedAgents)
     }
 
-    fn mcp_document(
-        self,
-        paths: &SystemPaths,
-    ) -> Option<(PathBuf, StructuredFormat, &'static str)> {
+    fn sse_unsupported(self) -> bool {
+        matches!(
+            self.mcp,
+            McpMapping::CodexToml { .. } | McpMapping::OpenCode
+        )
+    }
+
+    /// Where and how this target keeps `server`, or the plain reason it
+    /// cannot take it.
+    fn mcp_entries(self, server: &McpServer, paths: &SystemPaths) -> Result<Vec<McpEntry>, String> {
         let home = &paths.home;
+        let name = self.target_id.display_name();
         match self.mcp {
-            McpMapping::StandardJson { relative, key } => {
-                Some((home.join(relative), StructuredFormat::Json, key))
+            McpMapping::ClaudeCode => Ok(vec![(
+                home.join(".claude.json"),
+                StructuredFormat::Json,
+                "mcpServers",
+                json_server(server, EnvSyntax::Dollar, Some(["stdio", "http", "sse"])),
+            )]),
+            McpMapping::Cursor => Ok(vec![(
+                home.join(".cursor").join("mcp.json"),
+                StructuredFormat::Json,
+                "mcpServers",
+                json_server(
+                    server,
+                    EnvSyntax::DollarEnv,
+                    Some(["stdio", "streamable-http", "sse"]),
+                ),
+            )]),
+            McpMapping::GithubCopilot => {
+                let mut cli =
+                    json_server(server, EnvSyntax::Dollar, Some(["local", "http", "sse"]));
+                if let Value::Object(object) = &mut cli {
+                    object.insert("tools".to_string(), json!(["*"]));
+                }
+                let mut entries = vec![(
+                    home.join(".copilot").join("mcp-config.json"),
+                    StructuredFormat::Json,
+                    "mcpServers",
+                    cli,
+                )];
+                for user in vscode_user_dirs(paths) {
+                    entries.push((
+                        user.join("mcp.json"),
+                        StructuredFormat::Jsonc,
+                        "servers",
+                        json_server(server, EnvSyntax::DollarEnv, Some(["stdio", "http", "sse"])),
+                    ));
+                }
+                Ok(entries)
             }
-            McpMapping::Toml { relative, key } => {
-                Some((home.join(relative), StructuredFormat::Toml, key))
-            }
-            McpMapping::OpenCode => Some((
+            McpMapping::CodexToml { relative } => Ok(vec![(
+                home.join(relative),
+                StructuredFormat::Toml,
+                "mcp_servers",
+                codex_server(server, name)?,
+            )]),
+            McpMapping::OpenCode => Ok(vec![(
                 home.join(".config").join("opencode").join("opencode.jsonc"),
                 StructuredFormat::Jsonc,
                 "mcp",
-            )),
-            // The MSIX build reads a virtualized copy under its package folder,
-            // which exists once the app has been launched. The roaming path
-            // serves the older installer and macOS.
+                opencode_mcp_value(server),
+            )]),
             McpMapping::ClaudeDesktop => {
+                if !matches!(server, McpServer::Stdio { .. }) {
+                    return Err("Claude Desktop reads only local command servers from its configuration file. Add remote servers in Claude Desktop under Settings > Connectors.".to_string());
+                }
+                let names = server.environment_names();
+                if !names.is_empty() {
+                    return Err(format!(
+                        "Claude Desktop can't read {} from your settings, so this connector isn't added there.",
+                        names.into_iter().collect::<Vec<_>>().join(", ")
+                    ));
+                }
+                // The MSIX build reads a virtualized copy under its package
+                // folder, which exists once the app has been launched. The
+                // roaming path serves the older installer and macOS.
                 let package = paths.local_data.join("Packages").join(CLAUDE_DESKTOP_MSIX);
                 let document = if package.is_dir() {
                     package
@@ -130,89 +205,65 @@ impl TargetSpec {
                         .join("Claude")
                         .join("claude_desktop_config.json")
                 };
-                Some((document, StructuredFormat::Json, "mcpServers"))
+                Ok(vec![(
+                    document,
+                    StructuredFormat::Json,
+                    "mcpServers",
+                    json_server(server, EnvSyntax::Dollar, None),
+                )])
             }
-            McpMapping::Unsupported => None,
-        }
-    }
-
-    fn mcp_value(self, server: &McpServer) -> Result<Value, String> {
-        match self.mcp {
-            McpMapping::StandardJson { .. } => standard_mcp_value(server),
-            McpMapping::Toml { .. } | McpMapping::ClaudeDesktop => untyped_mcp_value(server),
-            McpMapping::OpenCode => Ok(opencode_mcp_value(server)),
-            McpMapping::Unsupported => Err(format!(
-                "{} has no local MCP configuration file.",
-                self.target_id.display_name()
-            )),
+            McpMapping::Unsupported(reason) => Err(reason.to_string()),
         }
     }
 }
 
+/// The primary targets first, matching `TargetId::ALL`.
 static SPECS: [TargetSpec; 9] = [
+    TargetSpec {
+        target_id: TargetId::GithubCopilot,
+        skill: SkillProjection::SharedAgents,
+        unknown_dialect_allows_shared_skills: true,
+        mcp: McpMapping::GithubCopilot,
+    },
     TargetSpec {
         target_id: TargetId::Cursor,
         skill: SkillProjection::SharedAgents,
         unknown_dialect_allows_shared_skills: true,
-        mcp: McpMapping::StandardJson {
-            relative: ".cursor/mcp.json",
-            key: "mcpServers",
-        },
-        sse_unsupported: false,
+        mcp: McpMapping::Cursor,
     },
     TargetSpec {
         target_id: TargetId::ClaudeCode,
         skill: SkillProjection::NativeClaude,
         unknown_dialect_allows_shared_skills: false,
-        mcp: McpMapping::StandardJson {
-            relative: ".claude.json",
-            key: "mcpServers",
-        },
-        sse_unsupported: false,
-    },
-    TargetSpec {
-        target_id: TargetId::Codex,
-        skill: SkillProjection::SharedAgents,
-        unknown_dialect_allows_shared_skills: true,
-        mcp: McpMapping::Toml {
-            relative: ".codex/config.toml",
-            key: "mcp_servers",
-        },
-        sse_unsupported: true,
-    },
-    TargetSpec {
-        target_id: TargetId::OpenCode,
-        skill: SkillProjection::SharedAgents,
-        unknown_dialect_allows_shared_skills: true,
-        mcp: McpMapping::OpenCode,
-        sse_unsupported: true,
-    },
-    TargetSpec {
-        target_id: TargetId::GrokBuild,
-        skill: SkillProjection::SharedAgents,
-        unknown_dialect_allows_shared_skills: true,
-        mcp: McpMapping::Toml {
-            relative: ".grok/config.toml",
-            key: "mcp_servers",
-        },
-        sse_unsupported: true,
-    },
-    TargetSpec {
-        target_id: TargetId::GithubCopilot,
-        skill: SkillProjection::SharedAgents,
-        unknown_dialect_allows_shared_skills: true,
-        mcp: McpMapping::StandardJson {
-            relative: ".copilot/mcp-config.json",
-            key: "mcpServers",
-        },
-        sse_unsupported: false,
+        mcp: McpMapping::ClaudeCode,
     },
     TargetSpec {
         target_id: TargetId::ClaudeDesktop,
         skill: SkillProjection::ClaudeAccountUpload,
         unknown_dialect_allows_shared_skills: false,
         mcp: McpMapping::ClaudeDesktop,
-        sse_unsupported: false,
+    },
+    TargetSpec {
+        target_id: TargetId::OpenCode,
+        skill: SkillProjection::SharedAgents,
+        unknown_dialect_allows_shared_skills: true,
+        mcp: McpMapping::OpenCode,
+    },
+    TargetSpec {
+        target_id: TargetId::Pi,
+        skill: SkillProjection::SharedAgents,
+        unknown_dialect_allows_shared_skills: true,
+        mcp: McpMapping::Unsupported(
+            "pi doesn't use MCP servers; it works with skills and command-line tools.",
+        ),
+    },
+    TargetSpec {
+        target_id: TargetId::Codex,
+        skill: SkillProjection::SharedAgents,
+        unknown_dialect_allows_shared_skills: true,
+        mcp: McpMapping::CodexToml {
+            relative: ".codex/config.toml",
+        },
     },
     // The ChatGPT app shares Codex's home directory, so it is the Codex entry
     // behind a different detector; shared resources coalesce.
@@ -220,18 +271,17 @@ static SPECS: [TargetSpec; 9] = [
         target_id: TargetId::Chatgpt,
         skill: SkillProjection::SharedAgents,
         unknown_dialect_allows_shared_skills: true,
-        mcp: McpMapping::Toml {
+        mcp: McpMapping::CodexToml {
             relative: ".codex/config.toml",
-            key: "mcp_servers",
         },
-        sse_unsupported: true,
     },
     TargetSpec {
-        target_id: TargetId::M365Copilot,
-        skill: SkillProjection::CoworkOneDrive,
-        unknown_dialect_allows_shared_skills: false,
-        mcp: McpMapping::Unsupported,
-        sse_unsupported: false,
+        target_id: TargetId::GrokBuild,
+        skill: SkillProjection::SharedAgents,
+        unknown_dialect_allows_shared_skills: true,
+        mcp: McpMapping::CodexToml {
+            relative: ".grok/config.toml",
+        },
     },
 ];
 
@@ -268,7 +318,6 @@ impl TargetSpec {
         context: &PlanningContext<'_>,
     ) -> Result<TargetPlan, String> {
         let home = &context.paths.home;
-        let mut warnings = Vec::new();
         let (root, capability) = match self.skill {
             SkillProjection::NativeClaude => (
                 home.join(".claude").join("skills"),
@@ -280,28 +329,8 @@ impl TargetSpec {
             ),
             SkillProjection::ClaudeAccountUpload => {
                 return Ok(TargetPlan::unsupported(
-                    "Claude Desktop loads skills from your claude.ai account, under Customize > Skills.",
+                    "Claude Desktop takes skills only from your claude.ai account (Customize > Skills), not from this computer.",
                 ));
-            }
-            SkillProjection::CoworkOneDrive => {
-                let Some(onedrive) = &context.paths.onedrive_commercial else {
-                    return Ok(TargetPlan::unsupported(
-                        "OneDrive for work or school was not found, so Microsoft 365 Copilot has nowhere to read skills from.",
-                    ));
-                };
-                if let Some(reason) =
-                    cowork_limit_violation(&context.source_root.join(&component.source))?
-                {
-                    return Ok(TargetPlan::unsupported(reason));
-                }
-                warnings.push(
-                    "Microsoft 365 Copilot sees a skill after OneDrive finishes syncing and a new Cowork conversation starts."
-                        .to_string(),
-                );
-                (
-                    cowork_dir(onedrive).join("skills"),
-                    CapabilityResult::LosslessTranslation,
-                )
             }
         };
         Ok(TargetPlan {
@@ -316,7 +345,7 @@ impl TargetSpec {
                     disable_model_invocation: None,
                 },
             })],
-            warnings,
+            warnings: Vec::new(),
         })
     }
 
@@ -329,33 +358,29 @@ impl TargetSpec {
             .mcp_server
             .as_ref()
             .ok_or_else(|| format!("MCP component {} has no server definition.", component.id))?;
-        let Some((document_path, format, key_root)) = self.mcp_document(context.paths) else {
+        if matches!(server, McpServer::Sse { .. }) && self.sse_unsupported() {
             return Ok(TargetPlan::unsupported(format!(
-                "{} has no local MCP configuration file.",
+                "{} doesn't support the older SSE connection this server uses.",
                 self.target_id.display_name()
             )));
+        }
+        let entries = match self.mcp_entries(server, context.paths) {
+            Ok(entries) => entries,
+            Err(reason) => return Ok(TargetPlan::unsupported(reason)),
         };
-        if matches!(server, McpServer::Sse { .. }) && self.sse_unsupported {
-            return Ok(TargetPlan::unsupported(
-                "This target dialect does not expose a distinct legacy SSE transport.",
-            ));
-        }
-        if matches!(self.mcp, McpMapping::ClaudeDesktop)
-            && !matches!(server, McpServer::Stdio { .. })
-        {
-            return Ok(TargetPlan::unsupported(
-                "Claude Desktop reads only local command servers from its configuration file. Add remote servers in Claude Desktop under Settings > Connectors.",
-            ));
-        }
-        let value = self.mcp_value(server)?;
         Ok(TargetPlan {
             capability: CapabilityResult::LosslessTranslation,
-            resources: vec![DesiredResource::StructuredEntry(DesiredStructuredEntry {
-                document_path,
-                format,
-                key_path: vec![key_root.to_string(), component.effective_name.clone()],
-                value,
-            })],
+            resources: entries
+                .into_iter()
+                .map(|(document_path, format, key_root, value)| {
+                    DesiredResource::StructuredEntry(DesiredStructuredEntry {
+                        document_path,
+                        format,
+                        key_path: vec![key_root.to_string(), component.effective_name.clone()],
+                        value,
+                    })
+                })
+                .collect(),
             warnings: vec![
                 "This MCP server may start a local process or access a remote service when the target uses it."
                     .to_string(),
@@ -364,24 +389,183 @@ impl TargetSpec {
     }
 }
 
-fn standard_mcp_value(server: &McpServer) -> Result<Value, String> {
-    serde_json::to_value(server)
-        .map_err(|error| format!("Could not serialize a portable MCP server: {error}"))
+/// The user settings folder of each VS Code edition that has been started
+/// here. VS Code's chat reads `mcp.json` there.
+fn vscode_user_dirs(paths: &SystemPaths) -> Vec<PathBuf> {
+    ["Code", "Code - Insiders"]
+        .into_iter()
+        .map(|edition| paths.config.join(edition).join("User"))
+        .filter(|user| user.is_dir())
+        .collect()
 }
 
-/// The portable shape without `type`, for files whose readers key transport
-/// off the fields present.
-fn untyped_mcp_value(server: &McpServer) -> Result<Value, String> {
-    let value = standard_mcp_value(server)?;
-    let mut object = value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| "A portable MCP server did not serialize as an object.".to_string())?;
-    object.remove("type");
+/// `text` with each `${NAME}` spelled the way `syntax` says.
+fn with_syntax(text: &str, syntax: EnvSyntax) -> String {
+    let mut spelled = String::with_capacity(text.len());
+    let mut last = 0;
+    for (range, name) in crate::mcp::environment_references(text) {
+        spelled.push_str(&text[last..range.start]);
+        match syntax {
+            EnvSyntax::Dollar => spelled.push_str(&text[range.clone()]),
+            EnvSyntax::DollarEnv => spelled.push_str(&format!("${{env:{name}}}")),
+            EnvSyntax::BraceEnv => spelled.push_str(&format!("{{env:{name}}}")),
+        }
+        last = range.end;
+    }
+    spelled.push_str(&text[last..]);
+    spelled
+}
+
+fn spelled_map(map: &BTreeMap<String, String>, syntax: EnvSyntax) -> Value {
+    Value::Object(
+        map.iter()
+            .map(|(key, value)| (key.clone(), Value::String(with_syntax(value, syntax))))
+            .collect(),
+    )
+}
+
+/// The server as a JSON `mcpServers` entry. `types` spells `type` for stdio,
+/// streamable HTTP, and SSE; `None` leaves it out for readers that go by the
+/// fields present.
+fn json_server(server: &McpServer, syntax: EnvSyntax, types: Option<[&str; 3]>) -> Value {
+    let text = |value: &str| Value::String(with_syntax(value, syntax));
+    let mut object = Map::new();
+    let kind = match server {
+        McpServer::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => {
+            object.insert("command".to_string(), text(command));
+            if !args.is_empty() {
+                object.insert(
+                    "args".to_string(),
+                    Value::Array(args.iter().map(|arg| text(arg)).collect()),
+                );
+            }
+            if !env.is_empty() {
+                object.insert("env".to_string(), spelled_map(env, syntax));
+            }
+            if let Some(cwd) = cwd {
+                object.insert("cwd".to_string(), text(cwd));
+            }
+            0
+        }
+        McpServer::StreamableHttp { url, headers } | McpServer::Sse { url, headers } => {
+            object.insert("url".to_string(), text(url));
+            if !headers.is_empty() {
+                object.insert("headers".to_string(), spelled_map(headers, syntax));
+            }
+            if matches!(server, McpServer::Sse { .. }) {
+                2
+            } else {
+                1
+            }
+        }
+    };
+    if let Some(types) = types {
+        object.insert("type".to_string(), Value::String(types[kind].to_string()));
+    }
+    Value::Object(object)
+}
+
+/// Codex's `[mcp_servers.<name>]` table. Codex expands no references: it
+/// forwards named variables (`env_vars`) and reads header values from
+/// variables (`env_http_headers`, `bearer_token_env_var`), so a reference
+/// anywhere else cannot be expressed.
+fn codex_server(server: &McpServer, app: &str) -> Result<Value, String> {
+    let cannot = |place: &str| {
+        format!("{app} can't fill in an environment variable inside {place}, so this connector isn't added there.")
+    };
+    let has_reference = |text: &str| !crate::mcp::environment_references(text).is_empty();
+    let mut object = Map::new();
+    match server {
+        McpServer::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => {
+            if has_reference(command) || args.iter().any(|arg| has_reference(arg)) {
+                return Err(cannot("its command line"));
+            }
+            object.insert("command".to_string(), Value::String(command.clone()));
+            if !args.is_empty() {
+                object.insert("args".to_string(), json!(args));
+            }
+            let mut literal = Map::new();
+            let mut forwarded = Vec::new();
+            for (key, value) in env {
+                match crate::mcp::environment_references(value).as_slice() {
+                    [] => {
+                        literal.insert(key.clone(), Value::String(value.clone()));
+                    }
+                    [(range, name)] if *name == key && range.len() == value.len() => {
+                        forwarded.push(Value::String(key.clone()));
+                    }
+                    _ => {
+                        return Err(format!(
+                            "{app} can pass an environment variable to a connector only under its own name, and this one sets {key} from something else."
+                        ))
+                    }
+                }
+            }
+            if !literal.is_empty() {
+                object.insert("env".to_string(), Value::Object(literal));
+            }
+            if !forwarded.is_empty() {
+                object.insert("env_vars".to_string(), Value::Array(forwarded));
+            }
+            if let Some(cwd) = cwd {
+                if has_reference(cwd) {
+                    return Err(cannot("its working folder"));
+                }
+                object.insert("cwd".to_string(), Value::String(cwd.clone()));
+            }
+        }
+        McpServer::StreamableHttp { url, headers } | McpServer::Sse { url, headers } => {
+            if has_reference(url) {
+                return Err(cannot("its address"));
+            }
+            object.insert("url".to_string(), Value::String(url.clone()));
+            let mut literal = Map::new();
+            let mut from_env = Map::new();
+            for (header, value) in headers {
+                let references = crate::mcp::environment_references(value);
+                match references.as_slice() {
+                    [] => {
+                        literal.insert(header.clone(), Value::String(value.clone()));
+                    }
+                    [(range, name)] if range.len() == value.len() => {
+                        from_env.insert(header.clone(), Value::String((*name).to_string()));
+                    }
+                    [(range, name)]
+                        if header.eq_ignore_ascii_case("authorization")
+                            && value[..range.start].eq_ignore_ascii_case("bearer ")
+                            && range.end == value.len() =>
+                    {
+                        object.insert(
+                            "bearer_token_env_var".to_string(),
+                            Value::String((*name).to_string()),
+                        );
+                    }
+                    _ => return Err(cannot(&format!("its {header} header"))),
+                }
+            }
+            if !literal.is_empty() {
+                object.insert("http_headers".to_string(), Value::Object(literal));
+            }
+            if !from_env.is_empty() {
+                object.insert("env_http_headers".to_string(), Value::Object(from_env));
+            }
+        }
+    }
     Ok(Value::Object(object))
 }
 
 fn opencode_mcp_value(server: &McpServer) -> Value {
+    let text = |value: &str| Value::String(with_syntax(value, EnvSyntax::BraceEnv));
     match server {
         McpServer::Stdio {
             command,
@@ -396,8 +580,7 @@ fn opencode_mcp_value(server: &McpServer) -> Value {
                     Value::Array(
                         std::iter::once(command)
                             .chain(args)
-                            .cloned()
-                            .map(Value::String)
+                            .map(|arg| text(arg))
                             .collect(),
                     ),
                 ),
@@ -406,24 +589,24 @@ fn opencode_mcp_value(server: &McpServer) -> Value {
             if !env.is_empty() {
                 object.insert(
                     "environment".to_string(),
-                    serde_json::to_value(env).unwrap_or_else(|_| json!({})),
+                    spelled_map(env, EnvSyntax::BraceEnv),
                 );
             }
             if let Some(cwd) = cwd {
-                object.insert("cwd".to_string(), Value::String(cwd.clone()));
+                object.insert("cwd".to_string(), text(cwd));
             }
             Value::Object(object)
         }
         McpServer::StreamableHttp { url, headers } | McpServer::Sse { url, headers } => {
             let mut object = Map::from_iter([
                 ("type".to_string(), Value::String("remote".to_string())),
-                ("url".to_string(), Value::String(url.clone())),
+                ("url".to_string(), text(url)),
                 ("enabled".to_string(), Value::Bool(true)),
             ]);
             if !headers.is_empty() {
                 object.insert(
                     "headers".to_string(),
-                    serde_json::to_value(headers).unwrap_or_else(|_| json!({})),
+                    spelled_map(headers, EnvSyntax::BraceEnv),
                 );
             }
             Value::Object(object)
@@ -453,10 +636,6 @@ pub(crate) fn skill_root(target_id: TargetId, paths: &SystemPaths) -> Option<Pat
         SkillProjection::NativeClaude => Some(home.join(".claude").join("skills")),
         SkillProjection::SharedAgents => Some(home.join(".agents").join("skills")),
         SkillProjection::ClaudeAccountUpload => None,
-        SkillProjection::CoworkOneDrive => paths
-            .onedrive_commercial
-            .as_ref()
-            .map(|onedrive| cowork_dir(onedrive).join("skills")),
     }
 }
 
@@ -470,61 +649,9 @@ pub(crate) fn managed_skill_roots(paths: &SystemPaths) -> Vec<PathBuf> {
         home.join(".grok").join("skills"),
         home.join(".config").join("opencode").join("skills"),
     ];
-    if let Some(onedrive) = &paths.onedrive_commercial {
-        roots.push(cowork_dir(onedrive).join("skills"));
-    }
     roots.sort();
     roots.dedup();
     roots
-}
-
-const COWORK_SKILL_FILE_LIMIT: u64 = 1024 * 1024;
-const COWORK_COMPANION_LIMIT: usize = 20;
-const COWORK_SKILL_BYTES_LIMIT: u64 = 10 * 1024 * 1024;
-
-/// Microsoft 365 Copilot Cowork ignores skills over its published limits, so
-/// the plan says so instead of reporting an install nothing can see.
-fn cowork_limit_violation(skill_dir: &Path) -> Result<Option<String>, String> {
-    let mut skill_file = 0;
-    let mut companions = 0;
-    let mut total = 0;
-    let mut stack = vec![skill_dir.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|error| format!("Could not read {}: {error}", dir.display()))?;
-        for entry in entries {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            let bytes = entry.metadata().map_err(|error| error.to_string())?.len();
-            total += bytes;
-            if dir == skill_dir && entry.file_name() == "SKILL.md" {
-                skill_file = bytes;
-            } else {
-                companions += 1;
-            }
-        }
-    }
-    Ok(if skill_file > COWORK_SKILL_FILE_LIMIT {
-        Some(format!(
-            "Microsoft 365 Copilot limits SKILL.md to 1 MB; this one is {} KB.",
-            skill_file / 1024
-        ))
-    } else if companions > COWORK_COMPANION_LIMIT {
-        Some(format!(
-            "Microsoft 365 Copilot allows at most {COWORK_COMPANION_LIMIT} files besides SKILL.md; this skill has {companions}."
-        ))
-    } else if total > COWORK_SKILL_BYTES_LIMIT {
-        Some(format!(
-            "Microsoft 365 Copilot allows 10 MB per skill; this one is {} MB.",
-            total / (1024 * 1024)
-        ))
-    } else {
-        None
-    })
 }
 
 #[cfg(test)]
@@ -541,7 +668,6 @@ mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
-            onedrive_commercial: Some(root.join("onedrive")),
         }
     }
 
@@ -698,11 +824,7 @@ mod tests {
                 TargetId::Chatgpt,
                 paths.home.join(".agents/skills/acme-review"),
             ),
-            (
-                TargetId::M365Copilot,
-                root.path()
-                    .join("onedrive/Documents/Cowork/skills/acme-review"),
-            ),
+            (TargetId::Pi, paths.home.join(".agents/skills/acme-review")),
         ];
         let expected_mcp = [
             (
@@ -855,64 +977,169 @@ mod tests {
         assert!(plan.resources.is_empty());
     }
 
+    fn remote_component(headers: &[(&str, &str)]) -> CatalogComponent {
+        let mut component = stdio_component();
+        component.mcp_server = Some(McpServer::StreamableHttp {
+            url: "https://mcp.example.com/mcp".to_string(),
+            headers: headers
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        });
+        component
+    }
+
+    fn entries(plan: &TargetPlan) -> Vec<&DesiredStructuredEntry> {
+        plan.resources
+            .iter()
+            .map(|resource| match resource {
+                DesiredResource::StructuredEntry(entry) => entry,
+                other => panic!("expected an MCP entry, got {other:?}"),
+            })
+            .collect()
+    }
+
     #[test]
-    fn m365_copilot_needs_onedrive_and_has_no_mcp() {
+    fn remote_servers_use_each_apps_own_type_and_reference_spelling() {
         let root = tempfile::tempdir().expect("root");
-        write_skill_source(root.path());
-        let mut paths = paths(root.path());
-        let mcp = plan_for(
-            TargetId::M365Copilot,
+        let paths = paths(root.path());
+        let remote = remote_component(&[("Authorization", "Bearer ${ACME_TOKEN}")]);
+        let value = |target| {
+            entries(&plan_for(target, &remote, &paths, root.path()))[0]
+                .value
+                .clone()
+        };
+        assert_eq!(
+            value(TargetId::ClaudeCode),
+            json!({"type": "http", "url": "https://mcp.example.com/mcp", "headers": {"Authorization": "Bearer ${ACME_TOKEN}"}})
+        );
+        assert_eq!(
+            value(TargetId::Cursor)["headers"]["Authorization"],
+            "Bearer ${env:ACME_TOKEN}"
+        );
+        assert_eq!(
+            value(TargetId::GithubCopilot),
+            json!({"type": "http", "url": "https://mcp.example.com/mcp", "tools": ["*"], "headers": {"Authorization": "Bearer ${ACME_TOKEN}"}})
+        );
+        assert_eq!(
+            value(TargetId::OpenCode)["headers"]["Authorization"],
+            "Bearer {env:ACME_TOKEN}"
+        );
+        assert_eq!(
+            value(TargetId::Codex),
+            json!({"url": "https://mcp.example.com/mcp", "bearer_token_env_var": "ACME_TOKEN"})
+        );
+        let plain = remote_component(&[("X-Api-Key", "${ACME_KEY}"), ("X-Team", "blue")]);
+        assert_eq!(
+            entries(&plan_for(TargetId::Codex, &plain, &paths, root.path()))[0].value,
+            json!({
+                "url": "https://mcp.example.com/mcp",
+                "http_headers": {"X-Team": "blue"},
+                "env_http_headers": {"X-Api-Key": "ACME_KEY"}
+            })
+        );
+    }
+
+    #[test]
+    fn codex_forwards_variables_by_name_and_refuses_what_it_cannot_express() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let mut component = stdio_component();
+        component.mcp_server = Some(McpServer::Stdio {
+            command: "uvx".to_string(),
+            args: vec!["weather-mcp".to_string()],
+            env: BTreeMap::from([
+                ("API_KEY".to_string(), "${API_KEY}".to_string()),
+                ("MODE".to_string(), "safe".to_string()),
+            ]),
+            cwd: None,
+        });
+        assert_eq!(
+            entries(&plan_for(TargetId::Codex, &component, &paths, root.path()))[0].value,
+            json!({"command": "uvx", "args": ["weather-mcp"], "env": {"MODE": "safe"}, "env_vars": ["API_KEY"]})
+        );
+        component.mcp_server = Some(McpServer::Stdio {
+            command: "uvx".to_string(),
+            args: vec!["--key=${API_KEY}".to_string()],
+            env: BTreeMap::new(),
+            cwd: None,
+        });
+        let plan = plan_for(TargetId::Codex, &component, &paths, root.path());
+        assert!(matches!(
+            plan.capability,
+            CapabilityResult::Unsupported { .. }
+        ));
+        assert_eq!(
+            entries(&plan_for(
+                TargetId::ClaudeCode,
+                &component,
+                &paths,
+                root.path()
+            ))[0]
+                .value["args"],
+            json!(["--key=${API_KEY}"])
+        );
+    }
+
+    #[test]
+    fn github_copilot_also_writes_each_started_vscode_editions_user_mcp_json() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let only_cli = plan_for(
+            TargetId::GithubCopilot,
             &stdio_component(),
             &paths,
             root.path(),
         );
-        assert!(matches!(
-            mcp.capability,
-            CapabilityResult::Unsupported { .. }
-        ));
-        assert!(mcp.resources.is_empty());
-        paths.onedrive_commercial = None;
-        let skill = plan_for(
-            TargetId::M365Copilot,
-            &skill_component(),
+        assert_eq!(entries(&only_cli).len(), 1);
+        assert_eq!(entries(&only_cli)[0].value["type"], "local");
+        fs::create_dir_all(paths.config.join("Code/User")).expect("vscode user dir");
+        let plan = plan_for(
+            TargetId::GithubCopilot,
+            &stdio_component(),
             &paths,
             root.path(),
         );
-        assert!(matches!(
-            skill.capability,
-            CapabilityResult::Unsupported { .. }
-        ));
-        assert!(skill.resources.is_empty());
+        let vscode = entries(&plan)[1];
+        assert_eq!(
+            vscode.document_path,
+            paths.config.join("Code/User/mcp.json")
+        );
+        assert_eq!(vscode.format, StructuredFormat::Jsonc);
+        assert_eq!(vscode.key_path, ["servers", "acme-database"]);
+        assert_eq!(vscode.value["type"], "stdio");
     }
 
     #[test]
-    fn m365_copilot_rejects_skills_over_microsoft_limits() {
+    fn pi_takes_skills_but_no_mcp_servers() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
-        let skill_dir = write_skill_source(root.path());
-        fs::write(skill_dir.join("SKILL.md"), vec![b'a'; 1024 * 1024 + 1]).expect("big skill");
+        let plan = plan_for(TargetId::Pi, &stdio_component(), &paths, root.path());
+        assert!(matches!(
+            plan.capability,
+            CapabilityResult::Unsupported { .. }
+        ));
+        assert!(plan.resources.is_empty());
+    }
+
+    #[test]
+    fn claude_desktop_refuses_servers_that_read_environment_variables() {
+        let root = tempfile::tempdir().expect("root");
+        let mut component = stdio_component();
+        component.mcp_server = Some(McpServer::Stdio {
+            command: "uvx".to_string(),
+            args: Vec::new(),
+            env: BTreeMap::from([("API_KEY".to_string(), "${API_KEY}".to_string())]),
+            cwd: None,
+        });
         let plan = plan_for(
-            TargetId::M365Copilot,
-            &skill_component(),
-            &paths,
+            TargetId::ClaudeDesktop,
+            &component,
+            &paths(root.path()),
             root.path(),
         );
         match plan.capability {
-            CapabilityResult::Unsupported { reason } => assert!(reason.contains("1 MB")),
-            other => panic!("expected unsupported, got {other:?}"),
-        }
-        write_skill_source(root.path());
-        for index in 0..=COWORK_COMPANION_LIMIT {
-            fs::write(skill_dir.join(format!("note-{index}.md")), b"x").expect("companion");
-        }
-        let plan = plan_for(
-            TargetId::M365Copilot,
-            &skill_component(),
-            &paths,
-            root.path(),
-        );
-        match plan.capability {
-            CapabilityResult::Unsupported { reason } => assert!(reason.contains("20")),
+            CapabilityResult::Unsupported { reason } => assert!(reason.contains("API_KEY")),
             other => panic!("expected unsupported, got {other:?}"),
         }
     }

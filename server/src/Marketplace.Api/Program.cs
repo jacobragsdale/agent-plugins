@@ -1,5 +1,7 @@
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
 using Marketplace.Api;
 using Marketplace.Api.Access;
 using Marketplace.Api.Auth;
@@ -8,6 +10,7 @@ using Marketplace.Api.Configuration;
 using Marketplace.Api.Data;
 using Marketplace.Api.Endpoints;
 using Marketplace.Api.Events;
+using Marketplace.Api.Notifications;
 using Marketplace.Api.Packages;
 using Marketplace.Api.Storage;
 using Marketplace.Api.Teams;
@@ -15,6 +18,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Negotiate;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -25,6 +29,7 @@ builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOpt
 builder.Services.Configure<ClientOptions>(builder.Configuration.GetSection(ClientOptions.Section));
 builder.Services.Configure<ValidatorOptions>(builder.Configuration.GetSection(ValidatorOptions.Section));
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection(DatabaseOptions.Section));
+builder.Services.Configure<NotificationOptions>(builder.Configuration.GetSection(NotificationOptions.Section));
 builder.Services.Configure<FormOptions>(options =>
 {
     // At least the publish endpoint's request limit, so an oversized upload gets its 413 rather than a form-reading 400.
@@ -32,11 +37,23 @@ builder.Services.Configure<FormOptions>(options =>
     // A browser upload sends a file and a path value per file, plus a few fields.
     options.ValueCountLimit = 2 * PublishService.MaxUploadFiles + 16;
 });
+var serverOptions = builder.Configuration.GetSection(ServerOptions.Section).Get<ServerOptions>() ?? new ServerOptions();
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
     options.KnownIPNetworks.Clear();
     options.KnownProxies.Clear();
+    foreach (var proxy in serverOptions.TrustedProxies)
+    {
+        if (proxy.Contains('/'))
+        {
+            options.KnownIPNetworks.Add(System.Net.IPNetwork.Parse(proxy));
+        }
+        else
+        {
+            options.KnownProxies.Add(IPAddress.Parse(proxy));
+        }
+    }
 });
 
 var authOptions = builder.Configuration.GetSection(AuthOptions.Section).Get<AuthOptions>() ?? new AuthOptions();
@@ -76,7 +93,12 @@ if (authOptions.EnableNegotiate)
     {
         if (authOptions.LdapDomain is { Length: > 0 } domain)
         {
-            options.EnableLdap(settings => settings.Domain = domain);
+            options.EnableLdap(settings =>
+            {
+                settings.Domain = domain;
+                settings.MachineAccountName = authOptions.LdapMachineAccountName;
+                settings.MachineAccountPassword = authOptions.LdapMachineAccountPassword;
+            });
         }
     });
 }
@@ -108,6 +130,8 @@ builder.Services.AddHttpClient<ArtifactKeeperStore>((services, client) =>
 });
 builder.Services.AddSingleton<IArtifactStore>(services => services.GetRequiredService<ArtifactKeeperStore>());
 builder.Services.AddSingleton<IPackageValidator, ProcessPackageValidator>();
+builder.Services.AddHttpClient(NotificationService.WebhookClient, client => client.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddScoped<NotificationService>();
 builder.Services.AddScoped<PublishService>();
 builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<AccessService>();
@@ -121,6 +145,43 @@ builder.Services.AddExceptionHandler<ProblemExceptionHandler>();
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = true);
 builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase)));
 builder.Services.AddOpenApi();
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+});
+
+// Writes are limited per account: uploads by the hour, everything else by the minute. Reads never are.
+var limits = builder.Configuration.GetSection(RateLimitOptions.Section).Get<RateLimitOptions>() ?? new RateLimitOptions();
+builder.Services.AddRateLimiter(options =>
+{
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+    {
+        var request = context.Request;
+        if (HttpMethods.IsGet(request.Method) || HttpMethods.IsHead(request.Method) || context.User.Identity?.Name is not { Length: > 0 } account)
+        {
+            return RateLimitPartition.GetNoLimiter(string.Empty);
+        }
+
+        var path = request.Path.Value ?? string.Empty;
+        var upload = HttpMethods.IsPost(request.Method) && (path.EndsWith("/versions", StringComparison.Ordinal) || path.EndsWith("/suggestions", StringComparison.Ordinal));
+        return upload
+            ? RateLimitPartition.GetFixedWindowLimiter("upload:" + account.ToLowerInvariant(), _ => new FixedWindowRateLimiterOptions { PermitLimit = limits.UploadsPerHour, Window = TimeSpan.FromHours(1) })
+            : RateLimitPartition.GetFixedWindowLimiter("write:" + account.ToLowerInvariant(), _ => new FixedWindowRateLimiterOptions { PermitLimit = limits.WritesPerMinute, Window = TimeSpan.FromMinutes(1) });
+    });
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        var wait = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter) ? (int)Math.Ceiling(retryAfter.TotalSeconds) : 60;
+        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        context.HttpContext.Response.Headers.RetryAfter = wait.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        await context.HttpContext.RequestServices.GetRequiredService<IProblemDetailsService>().WriteAsync(new ProblemDetailsContext
+        {
+            HttpContext = context.HttpContext,
+            ProblemDetails = new Microsoft.AspNetCore.Mvc.ProblemDetails { Status = 429, Title = $"Too many changes in a short time. Wait {wait} seconds and try again." },
+        });
+    };
+});
 
 var app = builder.Build();
 
@@ -129,11 +190,20 @@ if (devHeader && authOptions.EnableNegotiate && !app.Environment.IsDevelopment()
     app.Logger.LogWarning("Auth:AllowDevHeader is on beside Negotiate outside Development: anyone who can reach this server can claim any account with X-Dev-User. Use this only on a network without a domain.");
 }
 
+if (serverOptions.TrustedProxies.Length == 0 && !app.Environment.IsDevelopment())
+{
+    app.Logger.LogWarning("Server:TrustedProxies is empty, so X-Forwarded-For and X-Forwarded-Proto are trusted from anyone who can reach this server. List the reverse proxy.");
+}
+
 app.UseForwardedHeaders();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
-app.UsePortalFiles(app.Configuration.GetSection(ServerOptions.Section).Get<ServerOptions>() ?? new ServerOptions());
+app.UsePortalFiles(serverOptions);
 app.UseAuthentication();
+app.UseRateLimiter();
+
+// Only the two large, secret-free documents every client fetches are compressed (no BREACH exposure elsewhere).
+app.UseWhen(context => context.Request.Path.StartsWithSegments("/api/index") || context.Request.Path.StartsWithSegments("/api/catalog"), branch => branch.UseResponseCompression());
 app.UseAuthorization();
 app.MapOpenApi().AllowAnonymous();
 app.MapMarketplace(schemes);

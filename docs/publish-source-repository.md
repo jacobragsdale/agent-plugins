@@ -49,9 +49,9 @@ cargo run --manifest-path /path/to/agent-plugins/src-tauri/Cargo.toml \
 
 ## Publish and browse
 
-Serve the JSON at `{MARKETPLACE_URL}/api/catalog`, where `MARKETPLACE_URL` is the build-time constant in `src-tauri/src/locator.rs`. That is the only catalog the app reads; it takes no pasted catalog URLs. In Agent Plugins:
+Serve the JSON at `{MARKETPLACE_URL}/api/catalog`, where `MARKETPLACE_URL` is the `MarketplaceUrl` policy value on the PCs ([the rollout guide](rollout-guide.md#point-it-at-your-marketplace)) or else the build-time constant in `src-tauri/src/locator.rs`. That is the only catalog the app reads; it takes no pasted catalog URLs, and it adds every listed source on its own. To add or remove one by hand in Agent Plugins:
 
-1. Open **Manage Sources**. The catalog's listed sources appear by name and description.
+1. Open **System status**, expand **Advanced**, and select **Manage sources…**. The catalog's listed sources appear by name and description.
 2. Select **Add** on one listed source.
 3. Confirm. Its `agent-plugins.json` source manifest owns the namespace and packages. Nothing is installed until you install a package.
 

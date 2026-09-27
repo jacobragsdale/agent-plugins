@@ -150,7 +150,9 @@ export class TeamMembers {
               <span class="spacer"></span>
               <button mat-button type="button" class="danger" [disabled]="busy()" (click)="remove(null)"><app-icon name="delete" />Delete team</button>
             </div>
-            <p class="muted">A team can be deleted once it has no skills or bundles left.</p>
+            <p class="muted">
+              {{ session.isAdmin() ? "As an admin you can delete it with its skills: they are removed from every PC first." : "A team can be deleted once it has no skills or bundles left." }}
+            </p>
           </section>
         }
       } @else if (team.error(); as error) {
@@ -172,7 +174,7 @@ export class TeamMembers {
 export class TeamPage {
   public readonly ns = input.required<string>();
 
-  private readonly session = inject(Session);
+  protected readonly session = inject(Session);
   private readonly api = inject(Api);
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
@@ -270,7 +272,14 @@ export class TeamPage {
   }
 
   private async confirmDelete(): Promise<void> {
-    const confirmed = await prompt(this.dialog, { title: "Delete this team?", message: "Its members, invite link, and settings are removed. This can't be undone.", confirm: "Delete", danger: true });
+    const confirmed = await prompt(this.dialog, {
+      title: "Delete this team?",
+      message: this.session.isAdmin()
+        ? "Its skills are removed from every PC, and its members, invite link, and settings are deleted. This can't be undone."
+        : "Its members, invite link, and settings are removed. This can't be undone.",
+      confirm: "Delete",
+      danger: true
+    });
     if (confirmed !== undefined && (await this.act(() => this.api.deleteTeam(this.ns()), "Team deleted.", false))) {
       await this.session.refreshMe();
       await this.router.navigate(["/teams"]);

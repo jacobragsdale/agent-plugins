@@ -57,7 +57,7 @@ fn memo() -> &'static Mutex<HashMap<PathBuf, RememberedDigest>> {
 }
 
 /// The SHA-256 identity of a directory: every path, every file length, and
-/// every byte of content.
+/// every byte of content, leaving tool leftovers out.
 pub(crate) fn directory_digest(root: &Path) -> Result<String, String> {
     if !root.is_dir() {
         return Err(format!("{} is not a directory", root.display()));
@@ -152,10 +152,44 @@ fn update_hash_field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
+/// Folders and files that tools leave behind and nobody means to publish or
+/// to count as a change: caches, virtual environments, and OS litter.
+const TOOL_LEFTOVERS: [&str; 14] = [
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".DS_Store",
+    "Thumbs.db",
+    "desktop.ini",
+    ".idea",
+];
+
+/// Whether a file or folder name is tool leftovers rather than content.
+pub(crate) fn is_tool_leftover(name: &str) -> bool {
+    TOOL_LEFTOVERS.contains(&name) || name.ends_with(".pyc")
+}
+
+/// The digest older versions recorded, which counted tool leftovers. Only a
+/// mismatch with the current digest asks for it.
+pub(crate) fn directory_digest_with_leftovers(root: &Path) -> Result<String, String> {
+    hash_directory_as(root, true)
+}
+
 fn hash_directory(root: &Path) -> Result<String, String> {
+    hash_directory_as(root, false)
+}
+
+fn hash_directory_as(root: &Path, with_leftovers: bool) -> Result<String, String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; READ_BUFFER_BYTES];
-    hash_directory_entries(root, root, &mut hasher, &mut buffer)?;
+    hash_directory_entries(root, root, &mut hasher, &mut buffer, with_leftovers)?;
     let digest = hasher.finalize();
     let mut encoded = String::with_capacity(digest.len() * 2);
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -171,6 +205,7 @@ fn hash_directory_entries(
     current: &Path,
     hasher: &mut Sha256,
     buffer: &mut [u8],
+    with_leftovers: bool,
 ) -> Result<(), String> {
     let mut entries = fs::read_dir(current)
         .map_err(|error| format!("Could not read {}: {error}", current.display()))?
@@ -179,6 +214,9 @@ fn hash_directory_entries(
     entries.sort_by_key(fs::DirEntry::file_name);
 
     for entry in entries {
+        if !with_leftovers && entry.file_name().to_str().is_some_and(is_tool_leftover) {
+            continue;
+        }
         let path = entry.path();
         let file_type = entry
             .file_type()
@@ -188,7 +226,7 @@ fn hash_directory_entries(
         if file_type.is_dir() {
             hasher.update(b"directory");
             update_hash_field(hasher, relative.as_bytes());
-            hash_directory_entries(root, &path, hasher, buffer)?;
+            hash_directory_entries(root, &path, hasher, buffer, with_leftovers)?;
         } else if file_type.is_file() {
             hasher.update(b"file");
             update_hash_field(hasher, relative.as_bytes());
@@ -309,5 +347,20 @@ mod tests {
 
         assert_eq!(directory_digest(&skill).expect("digest").len(), 64);
         assert!(directory_digest(&temporary.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn tool_leftovers_do_not_change_a_directory_digest() {
+        let root = tempfile::tempdir().expect("root");
+        fs::write(root.path().join("SKILL.md"), "body").expect("skill");
+        let clean = hash_directory(root.path()).expect("digest");
+        fs::create_dir_all(root.path().join("__pycache__")).expect("cache");
+        fs::write(root.path().join("__pycache__/x.cpython-312.pyc"), "x").expect("pyc");
+        fs::write(root.path().join(".DS_Store"), "x").expect("ds");
+        assert_eq!(hash_directory(root.path()).expect("digest"), clean);
+        assert_ne!(
+            directory_digest_with_leftovers(root.path()).expect("legacy"),
+            clean
+        );
     }
 }

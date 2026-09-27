@@ -37,15 +37,15 @@ const CREATE_PROMPT: &str = r#"Help me make a new skill for my AI apps and share
 A skill is a folder with a SKILL.md file: frontmatter with a name and a description, then the instructions an AI follows when it uses the skill. The Agent Plugins command line is "{cli}" (in PowerShell, call it with &).
 
 1. Interview me until you could write the skill yourself. Ask what job it does; for a real example of what I would give it and what a great result looks like; when it should be used, in the words I would say; and any steps, rules, tone, or format it must follow or avoid.
-2. Run the command line with `whoami`. If its teams line names any teams, ask me whether the skill is just for me or for one of those teams. The namespace is the team's name if I pick a team, otherwise the namespace line.
+2. Run the command line with `whoami`. If its teams line names any teams, ask me whether the skill is just for me or for one of those teams. The namespace is the team's name if I pick a team, otherwise the namespace line. Just for me means only I can see it until I share it.
 3. Pick a short lowercase hyphenated name, such as meeting-notes, or use mine. Write {skills}\<namespace>-<name>\SKILL.md:
    - The folder and the frontmatter name are both <namespace>-<name>, even when I chose the name: the namespace from step 2 always comes first, as in <namespace>-meeting-notes.
    - The description says what the skill does and when to use it, in one or two sentences with the words I would use. Other people's AI apps read only this to decide when to use the skill.
    - The body has short numbered steps, my rules, and one worked example. Keep it under 150 lines, written for an assistant that is smart but new to my job.
    - Never include passwords, keys, tokens, customer data, or personal details.
 4. Show me the skill and revise it until I'm happy. Suggest I try it in a new chat; if it doesn't show up, restarting Cursor loads it.
-5. When I say it's ready, propose up to five lowercase tags people would search for and a one-line changelog, and ask me to confirm. Only after I say yes, run the command line with: publish "<the skill folder>" --namespace <namespace> --version 1.0.0 --tags <a,b> --changelog "<text>" --yes
-6. Give me the link it prints. The skill is live now: everyone who can see that space gets it in Agent Plugins, and I can keep using my copy.
+5. When I say it's ready, run the command line with: validate "<the skill folder>" --namespace <namespace>, and fix anything it reports. Propose up to five lowercase tags people would search for and a one-line changelog. Run: publish "<the skill folder>" --namespace <namespace> --version 1.0.0 --tags <a,b> --changelog "<text>" --dry-run, adding --private if it is just for me, and show me what it would publish. Only after I say yes, run the same command with --yes instead of --dry-run.
+6. Give me the link it prints. If it's for a team, my teammates can find it and install it in Agent Plugins; if it's just for me, only I can, until I share it. I can keep using my copy.
 
 If the version is taken, use the one it suggests. If it refuses because something looks like a secret or breaks a rule, explain why in plain words and fix the skill; never work around the check."#;
 /// How long the app gets to close its windows before the tutorial gives up.
@@ -386,7 +386,6 @@ mod tests {
             data: root.path().join("data"),
             local_data: root.path().join("local-data"),
             cache: root.path().join("cache"),
-            onedrive_commercial: None,
         };
         let skill = crate::adapters::skill_root(TargetId::Cursor, &paths)
             .expect("skill root")

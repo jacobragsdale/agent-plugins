@@ -2,6 +2,7 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import type { AppError } from "../ipc/client";
 import type { AgentProfile, AppState, BulkAction, BulkPlan, CatalogItem, ItemStatus, OperationOutcome, RepositoryState, SourceRemovalPlan, SourceState } from "../ipc/schemas";
 import type { InfoNotice } from "../components/Notice";
+import { usageLines } from "./marketplace";
 
 export type AccentColor = "amber" | "blue" | "gray" | "green" | "red";
 
@@ -184,28 +185,19 @@ export function bulkLabels(action: BulkAction): Readonly<{ action: string; title
   }
 }
 
-// A connector (an MCP server) is a program an AI app starts on this machine, or
-// an online service it sends requests to, so the app asks before it installs one.
-export async function reviewApproval(name: string, riskDetails: readonly string[]): Promise<boolean> {
-  const detail = riskDetails.length === 0 ? "" : `\n\n${riskDetails.join("\n")}`;
-  return confirm(`${name} includes a connector, a program or online service that AI apps use. Every AI app found here will use it.${detail}`, {
-    title: "Allow connector",
-    kind: "warning",
-    okLabel: "Allow and install",
-    cancelLabel: "Cancel"
-  });
+// Keeping an edited copy means Agent Plugins stops looking after it: no more updates, and no restore.
+export async function reviewKeepMine(name: string): Promise<boolean> {
+  return confirm(
+    `Keep your changed copy of ${name} as it is? Agent Plugins stops managing it: it won't update or restore it, and you remove it yourself when you're done. You can install it again later.`,
+    { title: "Keep my version", kind: "warning", okLabel: "Keep my version", cancelLabel: "Cancel" }
+  );
 }
 
-export async function reviewBulkApproval(names: readonly string[], riskDetails: readonly string[]): Promise<boolean> {
-  const [only] = names;
-  if (names.length === 1 && only !== undefined) {
-    return reviewApproval(only, riskDetails);
-  }
-  const detail = riskDetails.length === 0 ? "" : `\n\n${riskDetails.join("\n")}`;
-  return confirm(`${names.join(", ")} include connectors, programs or online services that AI apps use. Every AI app found here will use them.${detail}`, {
-    title: "Allow connectors",
+export async function reviewForceRemove(name: string): Promise<boolean> {
+  return confirm(`Remove ${name}, including the changes made to it on this computer? Your changed copy is saved to the backups folder first.`, {
+    title: "Remove",
     kind: "warning",
-    okLabel: "Allow and install",
+    okLabel: "Back up and remove",
     cancelLabel: "Cancel"
   });
 }
@@ -305,12 +297,14 @@ export function reportNotice(state: AppState): ReportNotice | null {
   const { updatedItems, removedItems } = state.autoUpdateReport;
   const lines: string[] = [];
   if (updatedItems.length > 0) {
-    lines.push(`Updated ${updatedItems.map((item) => packageName(state.items, item.id)).join(", ")}.`);
+    const updated = updatedItems.map((item) => `${packageName(state.items, item.id)}${item.toVersion === undefined ? "" : ` to ${item.toVersion}`}`);
+    lines.push(`Updated ${updated.join(", ")}. Details shows what changed.`);
   }
   if (removedItems.length > 0) {
     const who = removedItems.length === 1 ? "its publisher or an admin pulled it" : "their publishers or an admin pulled them";
     lines.push(`Removed ${removedItems.join(", ")}: ${who} from every PC.`);
   }
+  lines.push(...state.notifications.map((news) => news.text));
   return lines.length === 0 ? null : { text: lines.join(" ") };
 }
 
@@ -320,6 +314,18 @@ export function failuresError(verb: string, failures: readonly Readonly<{ id: st
   const count = `${String(failures.length)} package${failures.length === 1 ? "" : "s"}`;
   const from = sourceName === undefined ? "" : ` from ${sourceName}`;
   return { kind: null, summary: `Couldn't ${verb} ${count}${from}: ${names.join(", ")}.`, detail: failures.map((failure) => `${failure.id}: ${failure.message}`).join("\n") };
+}
+
+/**
+ * What a finished install says: where to use it in each app that got it, so
+ * a success is never silent.
+ */
+export function installedNotice(item: CatalogItem, componentId: string | undefined, profiles: readonly AgentProfile[], plan: ItemCommand, outcome: OperationOutcome): InfoNotice {
+  const usage = usageLines(item, profiles, componentId ?? null);
+  const done = outcomeNotice(plan.backupLead, outcome);
+  const lead = plan.verb === "install" ? (item.status === "available" ? "is installed" : "is updated") : plan.verb === "restore" ? "is back to the original" : "is installed";
+  const text = [`${item.name} ${lead}.`, ...usage, ...(done === null ? [] : [done.text])].join(" ");
+  return { text, folder: done?.folder ?? null, caution: done?.caution ?? false };
 }
 
 /** What a finished action leaves to read: AI apps it skipped (amber), then where backups went. */

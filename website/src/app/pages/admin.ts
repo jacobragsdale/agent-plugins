@@ -9,9 +9,14 @@ import { Session } from "../session";
 import { prompt } from "../shared/dialogs";
 import { Icon } from "../shared/icon";
 import { runTask } from "../shared/tasks";
-import { ReportList, ReviewCard, UsageSummary } from "./admin-parts";
+import { AuditLog, InstallsLookup, PeopleAdmin, ReportList, ReviewCard, UsageSummary } from "./admin-parts";
 
-@Component({ selector: "app-admin", imports: [MatProgressBarModule, MatTabsModule, Icon, ReviewCard, ReportList, UsageSummary], templateUrl: "./admin.html", styleUrl: "./admin.scss" })
+@Component({
+  selector: "app-admin",
+  imports: [MatProgressBarModule, MatTabsModule, Icon, ReviewCard, ReportList, UsageSummary, InstallsLookup, AuditLog, PeopleAdmin],
+  templateUrl: "./admin.html",
+  styleUrl: "./admin.scss"
+})
 export class AdminPage {
   private readonly api = inject(Api);
   private readonly session = inject(Session);
@@ -56,13 +61,24 @@ export class AdminPage {
   }
 
   private async markResolved(report: Report): Promise<void> {
+    const note = await prompt(this.dialog, {
+      title: "Mark this resolved?",
+      message: `${report.account} sees that it's resolved, with your note if you write one.`,
+      confirm: "Mark resolved",
+      field: { label: "Note (optional)", hint: "What was done about it.", required: false }
+    });
+    if (note === undefined) {
+      return;
+    }
+
     try {
-      await this.api.resolveReport(report.id);
+      await this.api.resolveReport(report.id, note);
     } catch (error) {
       this.snackBar.open(ApiError.from(error).message, "Dismiss");
     } finally {
       this.reports.reload();
       this.summary.reload();
+      await this.session.refreshReviews();
     }
   }
 

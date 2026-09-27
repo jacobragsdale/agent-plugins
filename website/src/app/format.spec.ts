@@ -1,4 +1,23 @@
-import { appLink, fileTree, groupBySkill, installState, isJunk, nextVersion, newestFirst, parseSkillMd, slugify, suggestNamespace, versionAtLeast } from "./format";
+import {
+  appLink,
+  browseParams,
+  fileTree,
+  groupBySkill,
+  installState,
+  isJunk,
+  nextVersion,
+  newestFirst,
+  packageIdFor,
+  parseBrowse,
+  parseSkillMd,
+  skillMd,
+  slugify,
+  suggestNamespace,
+  versionAtLeast,
+  worksIn,
+  worksInNote
+} from "./format";
+import type { WorksIn } from "./format";
 
 describe("nextVersion", () => {
   it("starts at 1.0.0", () => {
@@ -123,5 +142,72 @@ describe("suggestNamespace", () => {
     expect(suggestNamespace("Platform & Infrastructure Team")).toBe("platform-infrast");
     expect(suggestNamespace("42 Club")).toBe("t-42-club");
     expect(suggestNamespace("X")).toBe("");
+  });
+});
+
+describe("worksIn", () => {
+  const row = (kinds: readonly string[], transports: readonly string[], app: string): WorksIn | undefined => worksIn(kinds, transports).find((entry) => entry.app === app);
+
+  it("gives skills to every app but Claude Desktop", () => {
+    expect(row(["skill"], [], "Cursor")?.works).toBe("yes");
+    expect(row(["skill"], [], "pi")?.works).toBe("yes");
+    expect(row(["skill"], [], "Claude Desktop")).toMatchObject({ works: "no", note: expect.stringContaining("claude.ai") as unknown });
+  });
+
+  it("follows each app's MCP transports", () => {
+    expect(row(["mcpServer"], ["stdio"], "Claude Desktop")?.works).toBe("yes");
+    expect(row(["mcpServer"], ["streamable-http"], "Claude Desktop")?.works).toBe("no");
+    expect(row(["mcpServer"], ["sse"], "OpenCode")?.works).toBe("no");
+    expect(row(["mcpServer"], [], "OpenCode")?.works).toBe("yes");
+    expect(row(["mcpServer"], ["stdio"], "pi")).toMatchObject({ works: "no", note: "pi doesn't use MCP servers." });
+  });
+
+  it("says some when an app takes part of a package", () => {
+    expect(row(["skill", "mcpServer"], ["stdio"], "Claude Desktop")?.works).toBe("some");
+    expect(row(["skill", "mcpServer"], ["stdio"], "pi")?.works).toBe("some");
+    expect(row(["skill", "mcpServer"], ["stdio"], "GitHub Copilot")).toMatchObject({ works: "yes", note: null });
+  });
+
+  it("puts the main apps first and names only them on cards", () => {
+    expect(
+      worksIn(["skill"], [])
+        .slice(0, 4)
+        .map((entry) => entry.app)
+    ).toEqual(["GitHub Copilot", "Cursor", "Claude Code", "Claude Desktop"]);
+    expect(worksInNote(["skill"], [])).toBe("Not in Claude Desktop");
+    expect(worksInNote(["mcpServer"], ["stdio"])).toBeNull();
+    expect(worksInNote(["skill", "mcpServer"], ["stdio"])).toBeNull();
+  });
+});
+
+describe("packageIdFor", () => {
+  it("drops the space prefix and leaves room for it in the installed name", () => {
+    expect(packageIdFor("Jacob Meeting Notes", "jacob")).toBe("meeting-notes");
+    expect(packageIdFor("jacob-review", "jacob")).toBe("review");
+    expect(packageIdFor("Review", "jacob")).toBe("review");
+    expect(packageIdFor("a".repeat(80), "data-team")).toHaveLength(54);
+    expect(packageIdFor(`${"a".repeat(57)} b`, "jacob")).toBe("a".repeat(57));
+  });
+});
+
+describe("skillMd", () => {
+  it("writes frontmatter that reads back, even with colons and quotes", () => {
+    const text = skillMd({ name: "standup", description: 'Use when asked: "write my standup"', body: "# Standup\n\nKeep it short." });
+    expect(parseSkillMd(text)).toEqual({ name: "standup", description: 'Use when asked: "write my standup"', body: "# Standup\n\nKeep it short." });
+  });
+});
+
+describe("parseBrowse", () => {
+  it("falls back to defaults for missing or unknown values", () => {
+    expect(parseBrowse({})).toEqual({ q: "", lane: "all", sort: "popular", tag: null, installed: false });
+    expect(parseBrowse({ lane: "nope", sort: "random", tag: "" })).toEqual({ q: "", lane: "all", sort: "popular", tag: null, installed: false });
+  });
+
+  it("round-trips through the query string", () => {
+    const state = parseBrowse({ q: "report pdf", lane: "team", sort: "new", tag: "writing", installed: "true" });
+    expect(state).toEqual({ q: "report pdf", lane: "team", sort: "new", tag: "writing", installed: true });
+    const params = browseParams(state);
+    expect(parseBrowse(Object.fromEntries(Object.entries(params).filter((entry): entry is [string, string] => entry[1] !== null)))).toEqual(state);
+    expect(browseParams(parseBrowse({}))).toEqual({ q: null, lane: null, sort: null, tag: null, installed: null });
   });
 });

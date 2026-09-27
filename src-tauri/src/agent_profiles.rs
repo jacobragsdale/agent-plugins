@@ -24,10 +24,8 @@ const CHATGPT_MSIX: [&str; 2] = [
     "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0",
     "OpenAI.Codex_2p2nqsd0c76g0",
 ];
-/// Where Microsoft 365 Copilot Cowork keeps its files inside OneDrive.
-pub(crate) fn cowork_dir(onedrive: &Path) -> PathBuf {
-    onedrive.join("Documents").join("Cowork")
-}
+/// What to do when no supported app is installed, primary apps first.
+pub(crate) const INSTALL_AN_APP: &str = "Install GitHub Copilot, Cursor, or Claude (Claude Code or Claude Desktop), or another supported app such as OpenCode, pi, Codex, ChatGPT, or Grok Build, then refresh.";
 const NOT_DETECTED: Detection = Detection {
     detected: false,
     version: None,
@@ -47,21 +45,21 @@ pub(crate) enum TargetId {
     GithubCopilot,
     ClaudeDesktop,
     Chatgpt,
-    #[serde(rename = "m365-copilot")]
-    M365Copilot,
+    Pi,
 }
 
 impl TargetId {
+    /// The primary targets come first; the window lists apps in this order.
     pub(crate) const ALL: [Self; 9] = [
+        Self::GithubCopilot,
         Self::Cursor,
         Self::ClaudeCode,
-        Self::Codex,
-        Self::OpenCode,
-        Self::GrokBuild,
-        Self::GithubCopilot,
         Self::ClaudeDesktop,
+        Self::OpenCode,
+        Self::Pi,
+        Self::Codex,
         Self::Chatgpt,
-        Self::M365Copilot,
+        Self::GrokBuild,
     ];
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -74,7 +72,7 @@ impl TargetId {
             Self::GithubCopilot => "github-copilot",
             Self::ClaudeDesktop => "claude-desktop",
             Self::Chatgpt => "chatgpt",
-            Self::M365Copilot => "m365-copilot",
+            Self::Pi => "pi",
         }
     }
 
@@ -87,8 +85,9 @@ impl TargetId {
             Self::GrokBuild => "Grok Build",
             Self::GithubCopilot => "GitHub Copilot",
             Self::ClaudeDesktop => "Claude Desktop",
-            Self::Chatgpt => "ChatGPT",
-            Self::M365Copilot => "Microsoft 365 Copilot",
+            // The app's skills and MCP servers live in its Codex mode.
+            Self::Chatgpt => "ChatGPT (Codex)",
+            Self::Pi => "pi",
         }
     }
 
@@ -102,14 +101,15 @@ impl TargetId {
             Self::OpenCode => Some("opencode"),
             Self::GrokBuild => Some("grok"),
             Self::GithubCopilot => Some("copilot"),
-            Self::ClaudeDesktop | Self::Chatgpt | Self::M365Copilot => None,
+            Self::Pi => Some("pi"),
+            Self::ClaudeDesktop | Self::Chatgpt => None,
         }
     }
 
     /// The dialect carries the month its configuration contract was verified.
     pub(crate) fn current_dialect(self) -> String {
         let verified = match self {
-            Self::ClaudeDesktop | Self::Chatgpt | Self::M365Copilot => "2026-09",
+            Self::ClaudeDesktop | Self::Chatgpt | Self::Pi => "2026-09",
             _ => "2026-08",
         };
         format!("{}-{verified}", self.as_str())
@@ -153,11 +153,20 @@ pub(crate) struct AgentProfileState {
     pub(crate) skill_directory_shared: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ProfilesFile {
     version: u8,
     profiles: Vec<AgentProfile>,
+}
+
+/// Profiles are read one by one, so an app this version no longer supports
+/// (Microsoft 365 Copilot) drops out instead of making the file unusable.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct StoredProfilesFile {
+    version: u8,
+    profiles: Vec<serde_json::Value>,
 }
 
 /// Serializes the read-merge-write of the profiles file. Detection runs
@@ -306,9 +315,7 @@ fn verification_guidance(target: TargetId) -> &'static str {
             "Open Claude Desktop Settings > Developer to see local MCP servers. Skills are managed at claude.ai under Customize > Skills."
         }
         TargetId::Chatgpt => "Open ChatGPT, switch to Codex, and check its skills and MCP servers.",
-        TargetId::M365Copilot => {
-            "Wait for OneDrive to finish syncing, then start a new Cowork conversation in Microsoft 365 Copilot and check its skills."
-        }
+        TargetId::Pi => "Start pi and type `/skill:` to list the skills it found.",
     }
 }
 
@@ -321,11 +328,9 @@ fn reload_guidance(target: TargetId) -> &'static str {
         TargetId::ClaudeCode | TargetId::Codex | TargetId::OpenCode | TargetId::GrokBuild => {
             "Start a fresh client session after configuration changes."
         }
+        TargetId::Pi => "Start a new pi session, or run /reload in the current one.",
         TargetId::ClaudeDesktop | TargetId::Chatgpt => {
             "Quit and reopen the app after configuration changes."
-        }
-        TargetId::M365Copilot => {
-            "Wait for OneDrive to finish syncing, then start a new Cowork conversation."
         }
     }
 }
@@ -383,7 +388,7 @@ fn detect_application(target: TargetId) -> Option<Detection> {
         TargetId::GithubCopilot => detect_copilot_application(),
         TargetId::ClaudeDesktop => Some(detect_claude_desktop_application()),
         TargetId::Chatgpt => Some(detect_chatgpt_application()),
-        TargetId::M365Copilot => Some(detect_m365_copilot()),
+        TargetId::Pi => detect_pi_application(),
         _ => None,
     }
 }
@@ -412,30 +417,23 @@ fn detect_chatgpt_application() -> Detection {
     .unwrap_or(NOT_DETECTED)
 }
 
-fn detect_m365_copilot() -> Detection {
-    detect_m365_copilot_from(crate::paths::onedrive_commercial_root().as_deref())
+/// `pi` is a common word, so a command alone is not proof: pi creates
+/// `~/.pi/agent` on its first run. Without it, pi is not set up here; with it,
+/// the command only supplies the version.
+fn detect_pi_application() -> Option<Detection> {
+    Some(detect_pi_from(dirs::home_dir().as_deref()))
 }
 
-/// Nearly every corporate machine has OneDrive for work, so the Cowork folder
-/// is the signal that this person actually uses Microsoft 365 Copilot.
-fn detect_m365_copilot_from(onedrive: Option<&Path>) -> Detection {
-    match onedrive {
-        Some(root) if cowork_dir(root).is_dir() => Detection {
-            detected: true,
-            version: None,
-            message: None,
-            inconclusive: false,
-        },
-        Some(_) => Detection {
-            detected: false,
-            version: None,
-            message: Some(
-                "OneDrive for work or school is signed in, but it has no Documents\\Cowork folder yet. Use Cowork once, then refresh."
-                    .to_string(),
-            ),
-            inconclusive: false,
-        },
-        None => NOT_DETECTED,
+fn detect_pi_from(home: Option<&Path>) -> Detection {
+    if !home.is_some_and(|home| home.join(".pi").join("agent").is_dir()) {
+        return NOT_DETECTED;
+    }
+    let detection = detect_command(TargetId::Pi);
+    Detection {
+        detected: true,
+        inconclusive: false,
+        message: None,
+        ..detection
     }
 }
 
@@ -977,7 +975,7 @@ fn read_profiles_file(path: &Path) -> Result<Option<BTreeMap<TargetId, AgentProf
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("Could not read {}: {error}.", path.display())),
     };
-    let file = serde_json::from_slice::<ProfilesFile>(&contents)
+    let file = serde_json::from_slice::<StoredProfilesFile>(&contents)
         .map_err(|error| format!("Could not parse {}: {error}.", path.display()))?;
     if file.version != PROFILES_VERSION {
         return Err(format!(
@@ -987,6 +985,9 @@ fn read_profiles_file(path: &Path) -> Result<Option<BTreeMap<TargetId, AgentProf
     }
     let mut profiles = BTreeMap::new();
     for profile in file.profiles {
+        let Ok(profile) = serde_json::from_value::<AgentProfile>(profile) else {
+            continue;
+        };
         if profile.scopes == ["user"] && !profile.dialect_id.is_empty() {
             profiles.entry(profile.target_id).or_insert(profile);
         }
@@ -1119,7 +1120,6 @@ mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
-            onedrive_commercial: None,
         }
     }
 
@@ -1348,15 +1348,15 @@ mod tests {
         assert_eq!(
             serialized,
             [
+                "github-copilot",
                 "cursor",
                 "claude-code",
-                "codex",
-                "opencode",
-                "grok-build",
-                "github-copilot",
                 "claude-desktop",
+                "opencode",
+                "pi",
+                "codex",
                 "chatgpt",
-                "m365-copilot"
+                "grok-build"
             ]
             .into_iter()
             .map(serde_json::Value::from)
@@ -1409,14 +1409,30 @@ mod tests {
     }
 
     #[test]
-    fn m365_copilot_requires_a_cowork_folder_in_onedrive() {
+    fn pi_counts_only_once_its_agent_folder_exists() {
         let root = tempfile::tempdir().expect("root");
-        assert!(!detect_m365_copilot_from(None).detected);
-        let without = detect_m365_copilot_from(Some(root.path()));
-        assert!(!without.detected);
-        assert!(without.message.is_some());
-        fs::create_dir_all(cowork_dir(root.path())).expect("cowork");
-        assert!(detect_m365_copilot_from(Some(root.path())).detected);
+        assert!(!detect_pi_from(None).detected);
+        assert!(!detect_pi_from(Some(root.path())).detected);
+        fs::create_dir_all(root.path().join(".pi/agent")).expect("pi folder");
+        assert!(detect_pi_from(Some(root.path())).detected);
+    }
+
+    #[test]
+    fn a_retired_app_in_the_profiles_file_is_dropped_not_fatal() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join(PROFILES_FILE);
+        fs::write(
+            &path,
+            r#"{"version":1,"profiles":[
+                {"targetId":"m365-copilot","enabled":true,"scopes":["user"],"dialectId":"m365-copilot-2026-09"},
+                {"targetId":"cursor","enabled":true,"scopes":["user"],"dialectId":"cursor-2026-08"}]}"#,
+        )
+        .expect("profiles");
+        let profiles = read_profiles_file(&path).expect("read").expect("present");
+        assert_eq!(
+            profiles.keys().copied().collect::<Vec<_>>(),
+            [TargetId::Cursor]
+        );
     }
 
     #[test]
@@ -1426,10 +1442,7 @@ mod tests {
             TargetId::ClaudeDesktop.current_dialect(),
             "claude-desktop-2026-09"
         );
-        assert_eq!(
-            TargetId::M365Copilot.current_dialect(),
-            "m365-copilot-2026-09"
-        );
+        assert_eq!(TargetId::Pi.current_dialect(), "pi-2026-09");
         assert_eq!(TargetId::Codex.current_dialect(), "codex-2026-08");
     }
 }

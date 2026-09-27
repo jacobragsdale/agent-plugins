@@ -384,6 +384,10 @@ mat-button-toggle-group {
   max-width: 100%;
 }
 
+// Components set their own display, which would otherwise beat the hidden attribute.
+[hidden] {
+  display: none !important;
+}
 .visually-hidden {
   position: absolute;
   width: 1px;

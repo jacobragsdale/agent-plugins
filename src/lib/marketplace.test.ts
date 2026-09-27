@@ -3,19 +3,23 @@ import fixture from "../ipc/fixtures/app-state.json";
 import { appStateSchema, itemStatusSchema } from "../ipc/schemas";
 import type { BundleState, CatalogItem, ItemStatus } from "../ipc/schemas";
 import {
+  appsFor,
   appsPhrase,
   bundleSummary,
   cardDomId,
   ID_PATTERN,
   linkAction,
   listPhrase,
+  matchesAllWords,
   NAMESPACE_PATTERN,
   ownsSpace,
   resolveLink,
   spaceLabel,
   suggestId,
   suggestNamespace,
-  typedAccount
+  typedAccount,
+  unusableReason,
+  usageLines
 } from "./marketplace";
 
 const state = appStateSchema.parse(fixture);
@@ -113,7 +117,7 @@ describe("bundleSummary", () => {
 describe("spaces and people", () => {
   it("names spaces the way a person thinks of them", () => {
     const identity = state.identity;
-    expect(spaceLabel(identity, identity?.namespace ?? "")).toBe("Just me");
+    expect(spaceLabel(identity, identity?.namespace ?? "")).toBe("My space");
     expect(spaceLabel(identity, "official")).toBe("Official");
     expect(spaceLabel(identity, "team-data")).toBe("Data team");
     expect(ownsSpace(identity, "team-data")).toBe(true);
@@ -132,5 +136,28 @@ describe("spaces and people", () => {
     expect(listPhrase(["Cursor"])).toBe("Cursor");
     expect(listPhrase(["Cursor", "Claude Code", "Codex"])).toBe("Cursor, Claude Code and Codex");
     expect(appsPhrase([])).toBe("the AI apps Agent Plugins finds");
+  });
+
+  it("names only the apps that get an item, and says why when none can", () => {
+    const publish = withStatus("official/publish", "available");
+    expect(appsFor(publish, state.agentProfiles)).toEqual(["Claude Desktop", "pi"]);
+    expect(unusableReason(publish)).toBeNull();
+    const desktopOnly: CatalogItem = {
+      ...publish,
+      compatibility: [{ componentId: "publish", targetId: "claude-desktop", capability: { level: "unsupported", reason: "Claude Desktop takes skills only from claude.ai." } }]
+    };
+    expect(appsFor(desktopOnly, state.agentProfiles)).toEqual([]);
+    expect(unusableReason(desktopOnly)).toBe("Claude Desktop takes skills only from claude.ai.");
+  });
+
+  it("says how to use a new skill in each app that got it", () => {
+    const publish = withStatus("official/publish", "installed");
+    expect(usageLines(publish, state.agentProfiles)).toEqual(["In Claude Desktop: quit and reopen it.", "In pi: start a new session and type /skill:official-publish."]);
+  });
+
+  it("matches every word, in any order", () => {
+    expect(matchesAllWords("Report PDF builder", "pdf report")).toBe(true);
+    expect(matchesAllWords("Report PDF builder", "pdf chart")).toBe(false);
+    expect(matchesAllWords("anything", "  ")).toBe(true);
   });
 });

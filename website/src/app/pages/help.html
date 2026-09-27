@@ -1,5 +1,6 @@
 <div class="page help">
   <nav class="topics" aria-label="Help topics">
+    <a routerLink="/help/getting-started" routerLinkActive="active" ariaCurrentWhenActive="page">Getting started</a>
     <a routerLink="/help/publish" routerLinkActive="active" ariaCurrentWhenActive="page">Command line</a>
     <a routerLink="/help/source-manifest" routerLinkActive="active" ariaCurrentWhenActive="page">Source manifest</a>
     <a routerLink="/help/source-repository" routerLinkActive="active" ariaCurrentWhenActive="page">Source repository</a>
@@ -7,6 +8,115 @@
 
   <article class="spec">
     @switch (topic()) {
+      @case ("getting-started") {
+        <header class="intro">
+          <h1>Getting started</h1>
+          <p class="spec-intro">
+            Agent Plugins adds skills and connectors to the AI apps on your PC: GitHub Copilot, Cursor, and Claude, and also OpenCode, pi, Codex, and Grok Build. You pick them here; the app puts them
+            in place and keeps them up to date.
+          </p>
+        </header>
+
+        <section aria-labelledby="words-heading">
+          <h2 id="words-heading">Two words</h2>
+          <p>
+            A <strong>skill</strong> teaches an assistant one job, such as turning rough notes into a standup update. The assistant uses it on its own when your request matches, or only when you ask
+            for it by name, depending on the skill.
+          </p>
+          <p>
+            A <strong>connector</strong> (an MCP server) lets the assistant use a tool: look something up, open a ticket, read a database. Some run a small program on your PC, others connect to an
+            online service. Before one is added, the app shows you what it runs or where it connects, and asks.
+          </p>
+        </section>
+
+        <section aria-labelledby="steps-heading">
+          <h2 id="steps-heading">Install your first skill</h2>
+          <ol class="spec-steps">
+            <li>
+              <h3>Get the app</h3>
+              <p>
+                <a routerLink="/" fragment="download">Download Agent Plugins</a>, run the installer, and open it once. It stays in the tray (near the clock) and starts with Windows, so skills stay up
+                to date and anything removed from the marketplace is removed from your PC too.
+              </p>
+            </li>
+            <li>
+              <h3>Pick a skill</h3>
+              <p>
+                <a routerLink="/browse">Browse skills</a>, open one, and check <strong>Works in</strong> for your apps. Then choose <strong>Install in Agent Plugins</strong>. Your browser asks
+                <em>Open Agent Plugins?</em>: tick <em>Always allow</em> and choose <strong>Open</strong>.
+              </p>
+            </li>
+            <li>
+              <h3>Say yes in the app</h3>
+              <p>The app lists what it adds and to which apps, and waits for you. A connector also shows what it runs; approve it only if you trust whoever published it.</p>
+            </li>
+          </ol>
+        </section>
+
+        <section aria-labelledby="where-heading">
+          <h2 id="where-heading">Where it shows up</h2>
+          <p>The assistant knows a skill by its space and name, like <code>jane-meeting-notes</code>. Start a new chat after installing; most apps read skills when a chat starts.</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>App</th>
+                  <th>Skills</th>
+                  <th>Connectors</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>GitHub Copilot</td>
+                  <td>Ask in Copilot Chat's agent mode; it picks the skill when your request matches.</td>
+                  <td>Listed under the chat's tools button. In VS Code, reload the window if one is missing.</td>
+                </tr>
+                <tr>
+                  <td>Cursor</td>
+                  <td>Type <code>/</code> in the Agent chat to see them, or just ask.</td>
+                  <td>Settings, then MCP.</td>
+                </tr>
+                <tr>
+                  <td>Claude Code</td>
+                  <td>Type <code>/</code> and the skill's name, or just ask.</td>
+                  <td>Type <code>/mcp</code> in a new session.</td>
+                </tr>
+                <tr>
+                  <td>Claude Desktop</td>
+                  <td>Not from here: Claude Desktop takes skills from your claude.ai account, under Customize &gt; Skills.</td>
+                  <td>Quit it from the tray and open it again, then look in the tools menu. It only runs connectors on your PC, not online ones.</td>
+                </tr>
+                <tr>
+                  <td>OpenCode, Codex, Grok Build</td>
+                  <td>Start a new session and ask, or name the skill.</td>
+                  <td>Start a new session.</td>
+                </tr>
+                <tr>
+                  <td>pi</td>
+                  <td>Type <code>/skill:</code> and the skill's name, or just ask.</td>
+                  <td>pi doesn't use connectors.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section aria-labelledby="trouble-heading">
+          <h2 id="trouble-heading">If something doesn't work</h2>
+          <ul>
+            <li><strong>Nothing happens when you choose Install.</strong> The app isn't installed, or hasn't been opened since it was. Open Agent Plugins once, then try again.</li>
+            <li><strong>The browser never asked to open the app.</strong> You may have chosen "don't allow" before. Open the app yourself and search for the skill there.</li>
+            <li><strong>The assistant doesn't use the skill.</strong> Start a new chat. If the skill only runs when you ask, name it in your request.</li>
+            <li>
+              <strong>A connector installs but doesn't work.</strong> Some need a key or another program such as Node.js. The app tells you what's missing; if it doesn't, use
+              <strong>Tell the owners</strong> on the skill's page.
+            </li>
+            <li><strong>The app's status button is red.</strong> Select it: each problem says what to do.</li>
+            <li><strong>The app asks to be updated.</strong> <a routerLink="/" fragment="download">Download the new version</a> and run it; your skills stay.</li>
+          </ul>
+          <p>Still stuck? Use <strong>Report a problem</strong> on the skill's page. Its owners and the marketplace admins see it.</p>
+        </section>
+      }
       @case ("source-manifest") {
         <header class="intro">
           <h1>Source manifest</h1>
@@ -359,8 +469,8 @@ Follow the repository's review workflow.</code></pre>
                 </table>
               </div>
               <p>
-                Add <code>--namespace data-team</code> to publish to a team, <code>--package-id</code> to choose the ID, <code>--tags a,b</code>, <code>--changelog "…"</code>, and
-                <code>--yes</code> to skip the confirmation.
+                Add <code>--namespace data-team</code> to publish to a team, <code>--private</code> to keep it to yourself and the people you share it with, <code>--package-id</code> to choose the ID,
+                <code>--tags a,b</code>, <code>--changelog "…"</code>, and <code>--yes</code> to skip the confirmation.
               </p>
             </li>
             <li>

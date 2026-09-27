@@ -4,7 +4,7 @@ import { MatDialog } from "@angular/material/dialog";
 import { MatProgressBarModule } from "@angular/material/progress-bar";
 import { MatSnackBar } from "@angular/material/snack-bar";
 import { RouterLink } from "@angular/router";
-import type { Bundle, PackageDetail, Space, Suggestion } from "../api";
+import type { Bundle, PackageDetail, Report, Space, Suggestion } from "../api";
 import { Api, ApiError } from "../api";
 import { formatAge } from "../format";
 import { Session } from "../session";
@@ -104,8 +104,10 @@ export class MineSuggestions {
             <a class="name" [routerLink]="['/p', row.item.namespace, row.item.packageId]">{{ row.item.name }}</a>
             <p class="muted">{{ row.status.tone === "live" ? row.item.description : row.status.detail }}</p>
           </div>
+          <span class="uses muted">{{ row.item.installedBase === 1 ? "1 using it" : row.item.installedBase + " using it" }}</span>
           <span [class]="row.status.badge"><app-icon [name]="row.icon" />{{ row.status.label }}</span>
           <span class="when muted">{{ row.updated }}</span>
+          <button mat-icon-button type="button" [attr.aria-label]="'Share ' + row.item.name" (click)="sharePackage.emit(row.item)"><app-icon name="share" /></button>
         </li>
       }
       @for (bundle of group().bundles; track bundle.id) {
@@ -118,7 +120,7 @@ export class MineSuggestions {
         </li>
       }
       @if (group().rows.length + group().bundles.length === 0) {
-        <li class="muted">Nothing here yet.</li>
+        <li class="muted">Nothing here yet. <a [routerLink]="['/publish']" [queryParams]="{ to: group().space.namespace }">Share a skill here</a>.</li>
       }
     </ul>
   `,
@@ -167,6 +169,10 @@ export class MineSuggestions {
       text-align: right;
       font: var(--mat-sys-body-small);
     }
+    .uses {
+      font: var(--mat-sys-body-small);
+      white-space: nowrap;
+    }
     @media (max-width: 600px) {
       li {
         flex-wrap: wrap;
@@ -183,11 +189,56 @@ export class MineSuggestions {
 export class SpaceSection {
   public readonly group = input.required<Group>();
   public readonly share = output<Space>();
+  public readonly sharePackage = output<PackageDetail>();
+}
+
+/** What you reported or told owners, and their answers. */
+@Component({
+  selector: "app-my-reports",
+  imports: [RouterLink],
+  template: `
+    @if (reports().length > 0) {
+      <section class="stack">
+        <h2>Your reports and feedback</h2>
+        <ul class="list-box">
+          @for (report of reports(); track report.id) {
+            <li>
+              <div class="row">
+                <a [routerLink]="['/p', ...report.packageId.split('/')]"
+                  ><code>{{ report.packageId }}</code></a
+                >
+                <span class="muted">{{ report.kind === "problem" ? "Problem" : "Feedback" }} · {{ age(report.createdAt) }}</span>
+                <span class="spacer"></span>
+                <span [class]="report.resolvedAt === null ? 'badge pending' : 'badge live'">{{ report.resolvedAt === null ? "Open" : "Answered" }}</span>
+              </div>
+              <p class="muted">{{ report.reason }}</p>
+              @if (report.note; as note) {
+                <p><strong>The answer:</strong> {{ note }}</p>
+              }
+            </li>
+          }
+        </ul>
+      </section>
+    }
+  `,
+  styles: `
+    p {
+      margin: 0.35rem 0 0;
+      white-space: pre-line;
+    }
+  `
+})
+export class MyReports {
+  public readonly reports = input.required<readonly Report[]>();
+
+  protected age(at: string): string {
+    return formatAge(at);
+  }
 }
 
 @Component({
   selector: "app-mine",
-  imports: [RouterLink, MatButtonModule, MatProgressBarModule, Icon, MineSuggestions, SpaceSection],
+  imports: [RouterLink, MatButtonModule, MatProgressBarModule, Icon, MineSuggestions, SpaceSection, MyReports],
   template: `
     <div class="page stack">
       <div class="page-head">
@@ -207,8 +258,9 @@ export class SpaceSection {
       } @else {
         <app-mine-suggestions [waiting]="waiting()" [yours]="yours()" />
         @for (group of groups(); track group.space.namespace) {
-          <app-space-section [group]="group" (share)="shareSpace($event)" />
+          <app-space-section [group]="group" (share)="shareSpace($event)" (sharePackage)="sharePackage($event)" />
         }
+        <app-my-reports [reports]="reports.value() ?? []" />
       }
     </div>
   `
@@ -220,6 +272,7 @@ export class MinePage {
   private readonly snackBar = inject(MatSnackBar);
 
   protected readonly mine = resource({ loader: () => this.api.mine() });
+  protected readonly reports = resource({ loader: () => this.api.myReports() });
 
   protected readonly groups = computed<readonly Group[]>(() => {
     if (!this.mine.hasValue()) {
@@ -251,6 +304,18 @@ export class MinePage {
 
   protected shareSpace(space: Space): void {
     runTask(this.editSharing(space));
+  }
+
+  protected sharePackage(item: PackageDetail): void {
+    runTask(this.editPackageSharing(item));
+  }
+
+  private async editPackageSharing(item: PackageDetail): Promise<void> {
+    const words = spaceWords(this.session.me(), item.namespace, item.publisher.displayName);
+    if (await share(this.dialog, { namespace: item.namespace, id: item.packageId, label: item.name, ...words })) {
+      this.snackBar.open("Sharing saved.", undefined, { duration: 4000 });
+      this.mine.reload();
+    }
   }
 
   private async editSharing(space: Space): Promise<void> {

@@ -62,3 +62,15 @@ p {
 .report {
   color: var(--muted);
 }
+
+.checked,
+.unchecked {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.5rem;
+}
+
+.checked app-icon {
+  color: var(--success);
+}

@@ -172,7 +172,7 @@ If the document declares one server, the catalog component keeps the package-loc
 #### `streamable-http` and `sse`
 
 ```json
-{ "type": "streamable-http", "url": "https://mcp.example.com/database", "headers": { "Authorization": "${ACME_TOKEN}" } }
+{ "type": "streamable-http", "url": "https://mcp.example.com/database", "headers": { "Authorization": "Bearer ${ACME_TOKEN}" } }
 ```
 
 | Field     | Rules                                                                                                                                              |
@@ -181,9 +181,13 @@ If the document declares one server, the catalog component keeps the package-loc
 | `url`     | Required. Must be `https`, or `http` only for `localhost`, `127.0.0.1`, or `::1`. Must have a host. Username and password in the URL are rejected. |
 | `headers` | Optional string map. Header names are unique case-insensitively.                                                                                   |
 
-Sensitive headers `Authorization`, `Proxy-Authorization`, `X-API-Key`, and `API-Key` must be an environment reference of the form `${NAME}`, where `NAME` is one or more ASCII uppercase letters, digits, or underscores. Literal secret values are rejected.
+Sensitive headers `Authorization`, `Proxy-Authorization`, `X-API-Key`, and `API-Key` must be an environment reference: `${NAME}`, or a scheme of ASCII letters, one space, and `${NAME}`, such as `Bearer ${ACME_TOKEN}`. `NAME` is one or more ASCII uppercase letters, digits, or underscores. Literal secret values are rejected.
 
 Agent Plugins writes configuration but never starts the server.
+
+#### Environment references
+
+`${NAME}` may appear in `command`, `args`, `env` values, `cwd`, `url`, and `headers`. Each person supplies the value: the install dialog lists every name the server reads and saves what they type for their account. Each target spells the reference its own way, and some cannot express every placement; see [MCP spelling](adapter-contract.md#mcp-spelling). For the widest reach, set a variable through `env` under its own name (`"API_KEY": "${API_KEY}"`) or reference it in a whole header value.
 
 ## Explicit package conflicts
 
@@ -202,8 +206,38 @@ These documents fail validation:
 
 Leftover v1 and native plugin installs are retired on sync. See [ADR 0001](decisions/0001-multi-agent-desired-state.md).
 
+## Publishing to the marketplace
+
+`agent-plugins publish`, `agent-plugins validate`, and uploads in the portal stage the input into a one-package source tree before validating it.
+
+### What publishing leaves out
+
+- From a source tree, only `agent-plugins.json` and the paths its package declares are published. A tree that declares several packages publishes the one `--package-id` names. `source.id` is replaced by the namespace being published to.
+- From every folder copied, tool leftovers are left out: `.git`, `.hg`, `.svn`, `node_modules`, `.venv`, `venv`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.idea`, `.DS_Store`, `Thumbs.db`, `desktop.ini`, and `*.pyc`. The same names never count as a local change to an installed skill.
+- A symbolic link or special file fails the publish.
+
+A skill folder whose instructions file is `skill.md`, or `SKILL.md.txt` as Notepad saves it, counts as a skill; the file is published as `SKILL.md`.
+
+### Credential scan
+
+Publishing refuses a package with any of these, naming each file and the reason:
+
+| Finding                           | Rule                                                                                                                                                                                                                                                                                |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Credential file name              | `.env` or `.env.<anything>` except `.env.example`, `.env.sample`, `.env.template`, and `.env.dist`; `id_rsa`, `id_ed25519`, `id_ecdsa`, `.netrc`.                                                                                                                                   |
+| Credential file extension         | `.key`, `.p12`, `.pfx`, `.keytab`, `.jks`. A `.pem` file is judged by its content, so a certificate alone passes.                                                                                                                                                                   |
+| `.npmrc` with a password or token | `_authToken`, `_auth=`, or `_password` in `.npmrc`.                                                                                                                                                                                                                                 |
+| `line N looks like <kind>`        | A private key block, or a token of the right shape: `ghp_` or `gho_` and 36 characters, `github_pat_` and 22, `xoxb-` or `xoxp-` and 10, `sk-ant-` or `sk-proj-` and 20, or `AKIA` and 16 uppercase letters or digits (AWS's documented example key `AKIAIOSFODNN7EXAMPLE` passes). |
+| A fixed secret in an MCP document | An `env` or `headers` entry whose name contains the word token, secret, password, passwd, pwd, key, apikey, credential, credentials, auth, authorization, or cookie (split on `_` and `-`), with a literal value and no `${NAME}`. The message suggests the reference to use.       |
+
+Files over 2 MB are checked by name only.
+
+### Messages
+
+A problem in `SKILL.md` names the file relative to what you uploaded and says how to fix it: a missing `---` header, a missing `name:` or `description:` line, or a value that needs quotes because it contains `: `.
+
 ## Repository and operation limits
 
-A snapshot may contain at most 2,000 files and 50 MB of selected content. Symlinks, special entries, case-insensitive collisions, and paths outside the repository are rejected.
+A snapshot may contain at most 2,000 files and 50 MB of selected content. The marketplace applies the same limits to each upload and to each namespace archive it builds, which also must be at most 50 MB zipped, so one package cannot stop a namespace from reaching PCs. Symlinks, special entries, case-insensitive collisions, and paths outside the repository are rejected.
 
 Install and update preflight every physical identity. Identical desired content is coalesced; different content at one path/key/marker is a hard conflict. Local drift blocks automatic update and normal uninstall. Explicit replacement or force removal makes a persistent backup first. Unrelated keys/comments in shared JSONC/TOML documents and unrelated text outside managed markers remain user-owned.

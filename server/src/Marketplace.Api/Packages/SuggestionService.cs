@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using Marketplace.Api.Access;
 using Marketplace.Api.Auth;
 using Marketplace.Api.Data;
+using Marketplace.Api.Notifications;
 using Marketplace.Api.Storage;
 using Microsoft.EntityFrameworkCore;
 
@@ -44,6 +45,7 @@ public sealed class SuggestionService(
     IArtifactStore store,
     AccessService access,
     PublishService publish,
+    NotificationService notifications,
     TimeProvider timeProvider,
     ILogger<SuggestionService> logger)
 {
@@ -83,6 +85,7 @@ public sealed class SuggestionService(
         await db.SaveChangesAsync(cancellationToken);
         suggestion.StoragePath = $"{package.Namespace}/{package.PackageId}/suggestions/{suggestion.Id}.zip";
         await store.PutAsync(suggestion.StoragePath, archive, cancellationToken);
+        notifications.Notify(await notifications.OwnersAsync(package.Namespace, cancellationToken), identity.Account, "suggestion.created", $"{identity.DisplayName} suggested a change to {package.Name}.", $"/suggestions/{suggestion.Id}");
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         logger.LogInformation("{Account} suggested a change to {Package}.", identity.Account, package.CanonicalId);
@@ -105,17 +108,25 @@ public sealed class SuggestionService(
     public async Task<SuggestionView> GetAsync(MarketplaceIdentity identity, long id, CancellationToken cancellationToken) =>
         (await ViewsAsync([await ReadableAsync(identity, id, cancellationToken)], cancellationToken))[0];
 
-    /// <summary>The suggestion's stored zip, for the file list and file views.</summary>
-    public async Task<byte[]> ArchiveAsync(MarketplaceIdentity identity, long id, CancellationToken cancellationToken) =>
-        await store.GetAsync((await ReadableAsync(identity, id, cancellationToken)).StoragePath, cancellationToken);
+    /// <summary>The suggestion's stored zip, for the file list and file views; gone once the version it became was purged.</summary>
+    public async Task<byte[]> ArchiveAsync(MarketplaceIdentity identity, long id, CancellationToken cancellationToken)
+    {
+        var suggestion = await ReadableAsync(identity, id, cancellationToken);
+        if (suggestion.Package.Versions.Any(version => version.Version == suggestion.AcceptedVersion && version.PurgedAt is not null))
+        {
+            throw ProblemException.NotFound($"The files of suggestion {id}");
+        }
+
+        return await store.GetAsync(suggestion.StoragePath, cancellationToken);
+    }
 
     /// <summary>Each file of the suggestion and of the live version, and how they differ.</summary>
     public async Task<SuggestionFile[]> FilesAsync(MarketplaceIdentity identity, long id, CancellationToken cancellationToken)
     {
         var suggestion = await ReadableAsync(identity, id, cancellationToken);
-        var proposed = ReadFiles(await store.GetAsync(suggestion.StoragePath, cancellationToken));
+        var proposed = ArchiveInspector.ReadFiles(await ArchiveAsync(identity, id, cancellationToken));
         var live = PublishService.LatestVersion(suggestion.Package) is { } version
-            ? ReadFiles(await store.GetAsync(version.StoragePath, cancellationToken))
+            ? ArchiveInspector.ReadFiles(await store.GetAsync(version.StoragePath, cancellationToken))
             : [];
         return proposed.Select(file => new SuggestionFile(
                 file.Key,
@@ -146,6 +157,7 @@ public sealed class SuggestionService(
             var archive = await store.GetAsync(suggestion.StoragePath, cancellationToken);
             suggestion.State = SuggestionState.Accepted;
             suggestion.AcceptedVersion = semver.ToString();
+            Decided(identity, suggestion, $"{identity.DisplayName} accepted your suggestion to {package.Name}; it's version {semver} now.", now);
 
             // The commit saves this tracked suggestion in its own transaction, so accepting is all or nothing.
             await publish.CommitAsync(identity, suggestion.SuggestedBy, package.Namespace, package.PackageId, semver, package.Tags, suggestion.Message, archive, ArchiveInspector.Inspect(archive), cancellationToken);
@@ -160,6 +172,7 @@ public sealed class SuggestionService(
 
             suggestion.State = SuggestionState.Declined;
             suggestion.DecisionNote = note;
+            Decided(identity, suggestion, $"{identity.DisplayName} declined your suggestion to {package.Name}: {note}", now);
             await db.SaveChangesAsync(cancellationToken);
         }
         else
@@ -169,6 +182,13 @@ public sealed class SuggestionService(
 
         logger.LogInformation("{Account} {Decision} suggestion {Id} to {Package}.", identity.Account, request.Decision, id, package.CanonicalId);
         return await GetAsync(identity, id, cancellationToken);
+    }
+
+    /// <summary>Tells the suggester and records the decision; saved with the decision.</summary>
+    private void Decided(MarketplaceIdentity identity, Suggestion suggestion, string text, DateTime now)
+    {
+        notifications.Notify([suggestion.SuggestedBy], identity.Account, "suggestion.decided", text, $"/suggestions/{suggestion.Id}");
+        db.Audit(identity.Account, "suggestion.decide", suggestion.Package.CanonicalId, $"{suggestion.State.ToString().ToLowerInvariant()} suggestion {suggestion.Id}", now);
     }
 
     public async Task WithdrawAsync(MarketplaceIdentity identity, long id, CancellationToken cancellationToken)
@@ -250,22 +270,5 @@ public sealed class SuggestionService(
                 suggestion.SizeBytes,
                 suggestion.ComponentKinds))
             .ToArray();
-    }
-
-    /// <summary>Every file under the archive's root, by its path relative to the root.</summary>
-    private static Dictionary<string, byte[]> ReadFiles(byte[] archive)
-    {
-        using var zip = ArchiveInspector.OpenZip(new MemoryStream(archive, writable: false));
-        var prefix = ArchiveInspector.RootPrefix(zip.Entries.Select(entry => entry.FullName).ToArray());
-        var files = new Dictionary<string, byte[]>(StringComparer.Ordinal);
-        foreach (var entry in zip.Entries.Where(entry => entry.FullName.StartsWith(prefix, StringComparison.Ordinal) && !entry.FullName.EndsWith('/')))
-        {
-            using var stream = entry.Open();
-            using var buffer = new MemoryStream();
-            stream.CopyTo(buffer);
-            files[entry.FullName[prefix.Length..]] = buffer.ToArray();
-        }
-
-        return files;
     }
 }

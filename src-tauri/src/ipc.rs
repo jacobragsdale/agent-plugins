@@ -131,15 +131,70 @@ pub(crate) async fn uninstall_item(
     source_id: &str,
     local_id: &str,
     component_id: Option<String>,
+    force: Option<bool>,
 ) -> Result<OperationOutcome, IpcError> {
     application::uninstall_item(
         runtime.inner(),
         source_id,
         local_id,
         component_id.as_deref(),
+        force.unwrap_or(false),
     )
     .await
     .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn keep_my_version(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+    local_id: &str,
+) -> Result<(), IpcError> {
+    application::keep_my_version(runtime.inner(), source_id, local_id)
+        .await
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn set_held(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+    local_id: &str,
+    held: bool,
+) -> Result<(), IpcError> {
+    application::set_held(runtime.inner(), source_id, local_id, held)
+        .await
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn set_excluded_apps(
+    runtime: State<'_, RuntimeState>,
+    source_id: &str,
+    local_id: &str,
+    component_id: &str,
+    excluded: Vec<String>,
+    trust_approved: bool,
+) -> Result<OperationOutcome, IpcError> {
+    application::set_excluded_apps(
+        runtime.inner(),
+        source_id,
+        local_id,
+        component_id,
+        excluded,
+        trust_approved,
+    )
+    .await
+    .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn save_connector_settings(
+    values: std::collections::BTreeMap<String, String>,
+) -> Result<(), IpcError> {
+    application::save_connector_settings(values)
+        .await
+        .map_err(IpcError::from)
 }
 
 #[tauri::command]

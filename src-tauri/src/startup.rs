@@ -365,6 +365,86 @@ pub(crate) fn prepare_process() -> StartupReport {
 /// Finds a command the way a freshly opened terminal would: this process's
 /// PATH plus the user and machine Path as they are now, trying each PATHEXT
 /// extension so `.cmd` shims such as npm's resolve.
+/// The app's log file: what it reports on stderr, which a windowed app would
+/// otherwise throw away.
+pub(crate) fn log_path(paths: &crate::paths::SystemPaths) -> PathBuf {
+    paths
+        .local_data
+        .join("agent-plugins")
+        .join("agent-plugins.log")
+}
+
+/// Sends stderr to the log file when the window runs without a console. The
+/// previous log is kept once as `.old` after it grows past 5 MB.
+#[cfg(windows)]
+pub(crate) fn log_to_file() {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let Ok(paths) = crate::paths::SystemPaths::from_system() else {
+        return;
+    };
+    let path = log_path(&paths);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 5 * 1024 * 1024) {
+        let _ = std::fs::rename(&path, path.with_extension("log.old"));
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    // SAFETY: the handle is a file this process opened and never closes;
+    // Rust's stderr looks the handle up again on every write.
+    unsafe { SetStdHandle(STD_ERROR_HANDLE, file.into_raw_handle()) };
+    eprintln!(
+        "Agent Plugins {} started at {}",
+        crate::marketplace::CLIENT_VERSION,
+        crate::marketplace::rfc3339_now()
+    );
+}
+
+#[cfg(not(windows))]
+pub(crate) fn log_to_file() {}
+
+/// Whether apps started from now on would see `name`: this process has it,
+/// or the person's saved environment does.
+pub(crate) fn environment_has(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+        || live_session_env(name).ok().flatten().is_some()
+}
+
+/// Saves a connector setting, such as an API key, where the person's apps
+/// read environment variables, and in this process so the window sees it at
+/// once. The value is never logged or recorded anywhere else.
+pub(crate) fn save_user_variable(name: &str, value: &str) -> Result<(), String> {
+    let valid_name = !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+    if !valid_name || matches!(name, "PATH" | "HOME" | "USERPROFILE" | "APPDATA") {
+        return Err(format!("{name} is not a setting Agent Plugins can save."));
+    }
+    if value.is_empty() || value.len() > 8192 || value.contains('\0') {
+        return Err(format!("The value for {name} is empty or too long."));
+    }
+    if !cfg!(any(windows, target_os = "macos")) {
+        return Err(format!(
+            "Set {name} in your shell profile; Agent Plugins saves settings only on Windows and macOS."
+        ));
+    }
+    persist_session_env(name, OsStr::new(value))?;
+    std::env::set_var(name, value);
+    Ok(())
+}
+
 pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
     find_tool(&LiveHost, name)
 }

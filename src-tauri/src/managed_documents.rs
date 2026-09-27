@@ -82,9 +82,7 @@ pub(crate) fn entry_value(
     }
     let contents = normalized(contents, format);
     let value = match format {
-        StructuredFormat::Json => serde_json::from_slice::<Value>(contents)
-            .map_err(|error| format!("Could not parse JSON configuration: {error}"))?,
-        StructuredFormat::Jsonc => {
+        StructuredFormat::Json | StructuredFormat::Jsonc => {
             let text = std::str::from_utf8(contents)
                 .map_err(|error| format!("JSONC configuration is not UTF-8: {error}"))?;
             let root = CstRootNode::parse(text, &ParseOptions::default())
@@ -120,8 +118,9 @@ pub(crate) fn set_entries(
 ) -> Result<Vec<u8>, String> {
     let contents = normalized(contents, format);
     match format {
-        StructuredFormat::Json => set_json_entries(contents, entries),
-        StructuredFormat::Jsonc => set_jsonc_entries(contents, entries),
+        // Strict JSON is JSONC without comments; editing the syntax tree keeps
+        // the user's key order, formatting, and any comments an app tolerates.
+        StructuredFormat::Json | StructuredFormat::Jsonc => set_jsonc_entries(contents, entries),
         StructuredFormat::Toml => set_toml_entries(contents, entries),
     }
 }
@@ -133,74 +132,11 @@ pub(crate) fn remove_entries(
 ) -> Result<Vec<u8>, String> {
     let contents = normalized(contents, format);
     match format {
-        StructuredFormat::Json => remove_json_entries(contents, key_paths),
-        StructuredFormat::Jsonc => remove_jsonc_entries(contents, key_paths),
+        StructuredFormat::Json | StructuredFormat::Jsonc => {
+            remove_jsonc_entries(contents, key_paths)
+        }
         StructuredFormat::Toml => remove_toml_entries(contents, key_paths),
     }
-}
-
-fn set_json_entries(contents: &[u8], entries: &[(Vec<String>, Value)]) -> Result<Vec<u8>, String> {
-    let mut root = serde_json::from_slice::<Value>(contents)
-        .map_err(|error| format!("Could not parse JSON configuration: {error}"))?;
-    for (path, value) in entries {
-        set_json_value(&mut root, path, value.clone())?;
-    }
-    let mut output = serde_json::to_vec_pretty(&root)
-        .map_err(|error| format!("Could not serialize JSON configuration: {error}"))?;
-    output.push(b'\n');
-    Ok(output)
-}
-
-fn remove_json_entries(contents: &[u8], key_paths: &[Vec<String>]) -> Result<Vec<u8>, String> {
-    let mut root = serde_json::from_slice::<Value>(contents)
-        .map_err(|error| format!("Could not parse JSON configuration: {error}"))?;
-    for path in key_paths {
-        remove_json_value(&mut root, path)?;
-    }
-    let mut output = serde_json::to_vec_pretty(&root)
-        .map_err(|error| format!("Could not serialize JSON configuration: {error}"))?;
-    output.push(b'\n');
-    Ok(output)
-}
-
-fn set_json_value(root: &mut Value, path: &[String], value: Value) -> Result<(), String> {
-    let (last, parents) = path
-        .split_last()
-        .ok_or_else(|| "A structured resource must have a non-empty key path.".to_string())?;
-    let mut current = root;
-    for key in parents {
-        let object = current
-            .as_object_mut()
-            .ok_or_else(|| format!("Configuration key {key} is not an object."))?;
-        current = object
-            .entry(key.clone())
-            .or_insert_with(|| Value::Object(Map::new()));
-    }
-    current
-        .as_object_mut()
-        .ok_or_else(|| format!("Configuration parent for {last} is not an object."))?
-        .insert(last.clone(), value);
-    Ok(())
-}
-
-fn remove_json_value(root: &mut Value, path: &[String]) -> Result<(), String> {
-    let (last, parents) = path
-        .split_last()
-        .ok_or_else(|| "A structured resource must have a non-empty key path.".to_string())?;
-    let mut current = root;
-    for key in parents {
-        let Some(next) = current
-            .as_object_mut()
-            .and_then(|object| object.get_mut(key))
-        else {
-            return Ok(());
-        };
-        current = next;
-    }
-    if let Some(object) = current.as_object_mut() {
-        object.remove(last);
-    }
-    Ok(())
 }
 
 fn set_jsonc_entries(contents: &[u8], entries: &[(Vec<String>, Value)]) -> Result<Vec<u8>, String> {
@@ -474,6 +410,34 @@ mod tests {
         assert!(text.contains("// keep this explanation"));
         assert!(text.contains("\"theme\": \"dark\""));
         assert!(text.contains("\"acme\""));
+    }
+
+    #[test]
+    fn json_edits_keep_the_users_key_order() {
+        let original =
+            b"{\n  \"zeta\": 1,\n  \"alpha\": {\"b\": 2, \"a\": 1},\n  \"mcpServers\": {}\n}\n";
+        let updated = set_entries(
+            original,
+            StructuredFormat::Json,
+            &[(
+                vec!["mcpServers".to_string(), "acme".to_string()],
+                json!({"command": "uvx"}),
+            )],
+        )
+        .expect("update");
+        let text = String::from_utf8(updated).expect("utf8");
+        assert!(text.find("zeta") < text.find("alpha"), "{text}");
+        assert!(text.contains("{\"b\": 2, \"a\": 1}"), "{text}");
+        let value: Value = serde_json::from_str(&text).expect("still strict JSON");
+        assert_eq!(value["mcpServers"]["acme"]["command"], "uvx");
+        let removed = remove_entries(
+            text.as_bytes(),
+            StructuredFormat::Json,
+            &[vec!["mcpServers".to_string(), "acme".to_string()]],
+        )
+        .expect("remove");
+        let value: Value = serde_json::from_slice(&removed).expect("still strict JSON");
+        assert_eq!(value["mcpServers"], json!({}));
     }
 
     #[test]

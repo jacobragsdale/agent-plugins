@@ -13,12 +13,21 @@ On Windows the installer also puts `agent-plugins.com` beside it: a small consol
 ## Synopsis
 
 ```text
-agent-plugins whoami
-agent-plugins validate <path>
-agent-plugins search [query]
+agent-plugins whoami [--json]
+agent-plugins validate <path> | <https archive url> [--namespace <ns>] [--package-id <id>]
+agent-plugins search [words...] [--json]
 agent-plugins publish <path> --version <major.minor.patch> [--namespace <ns>] [--package-id <id>]
-                             [--tags a,b] [--changelog <text>] [--message <text>] [--yes]
-agent-plugins install <ns>/<package> | <ns>/<package>/<skill> | <ns>/<bundle> | <link> [--approve-mcp]
+                             [--private | --visibility <inherit|public|private>] [--tags a,b]
+                             [--changelog <text> | --changelog-file <path>] [--message <text>] [--dry-run] [--yes]
+agent-plugins install <ns>/<package> | <ns>/<package>/<skill> | <ns>/<bundle> | <link> [--approve-mcp] [--replace]
+agent-plugins install --local <path> [--approve-mcp]
+agent-plugins list [--json]
+agent-plugins status <ns>/<package> [--json]
+agent-plugins uninstall <ns>/<package>[/<component>] [--force]
+agent-plugins sync
+agent-plugins withdraw <ns>/<package> <version> [--undo]
+agent-plugins hold <ns>/<package> [--undo]
+agent-plugins keep <ns>/<package>
 agent-plugins share <ns>[/<id>] [--public | --private | --inherit] [--add <entry>]... [--remove <entry>]...
 agent-plugins share <ns>[/<id>] --link [--reset]
 agent-plugins team [<ns>]
@@ -38,9 +47,20 @@ agent-plugins bundle delete <ns>/<id> [--yes]
 agent-plugins help
 ```
 
-Exit status is `0` on success and `1` on failure; failures print `error: <message>` on stderr. A first argument that starts with `-` and is not `--help` or `-h`, such as `--background`, starts the desktop app instead, and so does an `agent-plugins://` link (see [Links](#links)). `--help` or `-h` anywhere after a command prints the usage and does nothing else. `-y` is short for `--yes`.
+Failures print `error: <message>` on stderr. The exit status says what kind of failure it was:
 
-## `whoami`
+| Status | Meaning                                                                                  |
+| ------ | ---------------------------------------------------------------------------------------- |
+| `0`    | Done.                                                                                    |
+| `1`    | Any other failure.                                                                       |
+| `2`    | Usage: an unknown command or option, a missing argument, or an option without its value. |
+| `3`    | An MCP server needs `--approve-mcp`.                                                     |
+| `4`    | Not found: an unknown package, bundle, or source, or one that is not installed.          |
+| `5`    | The marketplace or another server could not be reached.                                  |
+
+A first argument that starts with `-` and is not `--help` or `-h`, such as `--background`, starts the desktop app instead, and so does an `agent-plugins://` link (see [Links](#links)). `--help` or `-h` anywhere after a command prints the usage and does nothing else. `-y` is short for `--yes`.
+
+## `whoami [--json]`
 
 Prints the identity this machine publishes and installs under. Requires a reachable marketplace; it calls `GET /api/me`.
 
@@ -54,35 +74,56 @@ teams: data-team (owner)
 groups: Data Engineering
 admin: false
 suggestions waiting: 2
+reports waiting: 1
+unread notifications: 3
 ```
 
-| Line                  | Meaning                                                                                                                                               |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `host account`        | Who the process runs as, according to Windows.                                                                                                        |
-| `identity`            | The scheme used for marketplace requests: `Windows authentication (<domain>)`, or `development header as <account>`.                                  |
-| `marketplace account` | Who the server says you are.                                                                                                                          |
-| `namespace`           | Your personal publish namespace: your lowercase account name, or a numbered variant such as `christopher-jo-2` when another account claimed it first. |
-| `publishes to`        | Every namespace you may publish to: yours, `official` when you are allowlisted, and your teams.                                                       |
-| `teams`               | The teams you belong to; `(owner)` marks the ones you manage.                                                                                         |
-| `groups`              | The AD groups the server resolved for you. They only matter for share lists that name a group.                                                        |
-| `admin`               | Whether the server grants administrative rights.                                                                                                      |
-| `suggestions waiting` | Suggested changes to your packages that wait for your answer. See [`review`](#review).                                                                |
+| Line                   | Meaning                                                                                                                                               |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `host account`         | Who the process runs as, according to Windows.                                                                                                        |
+| `identity`             | The scheme used for marketplace requests: `Windows authentication (<domain>)`, or `development header as <account>`.                                  |
+| `marketplace account`  | Who the server says you are.                                                                                                                          |
+| `namespace`            | Your personal publish namespace: your lowercase account name, or a numbered variant such as `christopher-jo-2` when another account claimed it first. |
+| `publishes to`         | Every namespace you may publish to: yours, `official` when you are allowlisted, and your teams.                                                       |
+| `teams`                | The teams you belong to; `(owner)` marks the ones you manage.                                                                                         |
+| `groups`               | The AD groups the server resolved for you. They only matter for share lists that name a group.                                                        |
+| `admin`                | Whether the server grants administrative rights.                                                                                                      |
+| `suggestions waiting`  | Suggested changes to your packages that wait for your answer. See [`review`](#review).                                                                |
+| `reports waiting`      | Open reports and feedback on your packages. Answer them in the portal.                                                                                |
+| `unread notifications` | Marketplace notifications you have not read in the portal.                                                                                            |
+
+`--json` prints one object with `hostAccount`, `identity`, `account`, `namespace`, `namespaces`, `teams` (each `namespace`, `displayName`, `owner`), `groups`, `admin`, `suggestionsWaiting`, `reportsWaiting`, and `unreadNotifications`.
 
 ## `validate <path>`
 
-Validates a source tree or a published HTTPS archive against the same rules the marketplace server applies: source containment, component names, MCP shape, portability, symlinks, and repository limits. Writes nothing.
+Checks what [`publish`](#publish-path---version-majorminorpatch) would send, without the network, and writes nothing. `<path>` takes every input `publish` does. The command stages it, then runs the source validation (containment, component names, MCP shape, portability, symlinks), the credential scan, and the desktop app's size limits: 2,000 files, 50 MB unzipped, 50 MB zipped. Then it lists, for each skill and MCP server, whether each app can use it.
 
-`<path>` is a directory containing `agent-plugins.json`, or an HTTPS URL of a zip, tar, or tar.gz of that tree.
+| Option              | Meaning                                                                                            |
+| ------------------- | -------------------------------------------------------------------------------------------------- |
+| `--namespace <ns>`  | The namespace to stage under. Defaults to the manifest's `source.id`, else your Windows user name. |
+| `--package-id <id>` | Check one package. Without it, a source tree with several packages checks each one.                |
 
 ```text
-acme: 3 valid install(s), 0 catalog error(s)
+jacob/review: 3 file(s), 12 KB (4 KB zipped)
+  skill review
+    GitHub Copilot     yes
+    Cursor             yes
+    Claude Code        yes
+    Claude Desktop     no: Claude Desktop takes skills only from your claude.ai account (Customize > Skills), not from this computer.
+    OpenCode           yes
+    pi                 yes
+    Codex              yes
+    ChatGPT (Codex)    yes
+    Grok Build         yes
 ```
 
-Errors print one per line as `<path>: <message>`. The command fails when there is any error, or when no install is valid.
+A problem adds `, not publishable` to the first line and one line each: `error: <path>: <message>`, `secret: <path>: <reason>`, or `too big: <limit>`. The app verdicts come from planning against an empty home folder, so they do not depend on what is installed on this computer. The command fails when any package is not publishable.
 
-## `search [query]`
+Given an `https://` address instead of a path, `validate` downloads that source archive and checks it the way the app reads it: the source ID, the number of valid packages, and each catalog error. The local-path checks above do not apply to it.
 
-Lists marketplace packages, filtered by a case-insensitive substring match against the package ID, name, description, tags, and publisher display name. With no query, lists everything.
+## `search [words...] [--json]`
+
+Lists marketplace packages whose ID, name, description, tags, or publisher display name contain every word you give, in any order, ignoring case. With no words, lists everything.
 
 ```text
 package                          version    publisher          installs  users  tags
@@ -90,34 +131,50 @@ jacob/review                     1.2.0      Jacob Ragsdale           47     31  
     Reviews a change before it is submitted.
 ```
 
-`installs` counts install events; `users` is the current installed base. Matching bundles follow in their own table, with the number of packages each holds.
+`installs` counts the people who installed it; `users` is the current installed base. Matching bundles follow in their own table, with the number of packages each holds. `No packages match.` when nothing does.
+
+`--json` prints `{ "packages": [...], "bundles": [...] }` in the shapes of the [index](marketplace-api.md#get-apiindex).
 
 ## `publish <path> --version <major.minor.patch>`
 
-Stages `<path>` into a one-package source tree, refuses anything that looks like a credential, validates it, and uploads it to your namespace. Every version goes live as soon as it is published; there is no review queue ([ADR 0007](decisions/0007-self-service-marketplace.md)).
+Stages `<path>` into a one-package source tree, refuses anything that looks like a credential, validates it, and uploads it to your namespace. Every version goes live as soon as it is published; there is no review queue ([ADR 0007](decisions/0007-self-service-marketplace.md)). Staging copies only what the package declares and leaves out tool leftovers such as `.git`, `node_modules`, `.venv`, and `__pycache__`; see [the manifest reference](manifest-reference.md#what-publishing-leaves-out).
 
-| Argument                        | Required | Meaning                                                                                                                                                                                                   |
-| ------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `<path>`                        | yes      | A skill directory containing `SKILL.md`, a folder of skill directories (a skill pack), an MCP document in the `mcp.json` shape, or a source tree with `agent-plugins.json` declaring exactly one package. |
-| `--version <major.minor.patch>` | yes      | A release version; the server refuses a pre-release such as `1.0.0-beta.1`. Immutable once published. Not used for a suggestion.                                                                          |
-| `--namespace <ns>`              | no       | Publish somewhere other than your own namespace: one of your teams, or `official` when you are allowlisted.                                                                                               |
-| `--package-id <id>`             | no       | Override the derived package ID.                                                                                                                                                                          |
-| `--tags a,b`                    | no       | Comma-separated. Blank entries are dropped. At most 10, each up to 32 lowercase letters, digits, and single hyphens.                                                                                      |
-| `--changelog <text>`            | no       | One line recorded against this version. At most 4,096 characters.                                                                                                                                         |
-| `--message <text>`              | no       | For a suggestion: what you changed and why. At most 4,096 characters.                                                                                                                                     |
-| `--yes`, `-y`                   | no       | Skip the confirmation prompt.                                                                                                                                                                             |
+| Argument                        | Required | Meaning                                                                                                                                                                                                               |
+| ------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<path>`                        | yes      | A skill directory containing `SKILL.md` (`skill.md` and `SKILL.md.txt` count too), a folder of skill directories (a skill pack), an MCP document in the `mcp.json` shape, or a source tree with `agent-plugins.json`. |
+| `--version <major.minor.patch>` | yes      | A release version; the server refuses a pre-release such as `1.0.0-beta.1`. Immutable once published. Not used for a suggestion.                                                                                      |
+| `--namespace <ns>`              | no       | Publish somewhere other than your own namespace: one of your teams, or `official` when you are allowlisted.                                                                                                           |
+| `--package-id <id>`             | no       | Override the derived package ID. For a source tree with several packages, choose the one to publish.                                                                                                                  |
+| `--private`                     | no       | Only you, the space's owners, and people it is shared with can see it. The way to try a first version yourself.                                                                                                       |
+| `--visibility <v>`              | no       | `inherit` (the same as its space), `public`, or `private`. Set in the same transaction as the publish. Without it, a new package follows its space and an existing one keeps its setting.                             |
+| `--tags a,b`                    | no       | Comma-separated. Blank entries are dropped. At most 10, each up to 32 lowercase letters, digits, and single hyphens.                                                                                                  |
+| `--changelog <text>`            | no       | Recorded against this version. At most 4,096 characters.                                                                                                                                                              |
+| `--changelog-file <path>`       | no       | Reads the changelog from a file instead.                                                                                                                                                                              |
+| `--dry-run`                     | no       | Runs every check, on this computer and on the server, and publishes nothing. Needs no confirmation.                                                                                                                   |
+| `--message <text>`              | no       | For a suggestion: what you changed and why. At most 4,096 characters.                                                                                                                                                 |
+| `--yes`, `-y`                   | no       | Skip the confirmation prompt.                                                                                                                                                                                         |
 
-The package ID comes from the input: a skill directory uses the `SKILL.md` frontmatter `name` with a `<yourname>-` prefix stripped; a skill pack uses the folder name, and each subfolder becomes one skill component named by its `SKILL.md`; an MCP document uses the file name; a source tree uses the declared package ID, and its `source.id` must equal the namespace.
+The package ID comes from the input: a skill directory uses the `SKILL.md` frontmatter `name` with a `<yourname>-` prefix stripped; a skill pack uses the folder name, and each subfolder becomes one skill component named by its `SKILL.md`; an MCP document uses the file name; a source tree uses the declared package ID, or the one `--package-id` chooses. A source tree's `source.id` is replaced by the namespace you publish to.
 
-It prints a summary and asks before uploading:
+It prints a summary and asks before uploading. `who` appears when you chose a visibility:
 
 ```text
 publish jacob/review 1.0.0
   as        CORP\jacob
   contents  3 file(s), 12 KB (4 KB zipped)
+  who       only you, the space's owners, and people it is shared with
   tags      review, git
   changelog First release.
 Publish? [y/N]
+```
+
+`--dry-run` prints each file that is new, changed, or removed against the live version, a count of unchanged ones, and any warnings:
+
+```text
+  changed  skills/review/SKILL.md
+  new      skills/review/checklist.md
+  1 file(s) unchanged
+dry run: the checks passed and nothing was published
 ```
 
 On success, with the package's page in the web portal:
@@ -127,7 +184,9 @@ published jacob/review 1.1.0
   https://marketplace.example.com/p/jacob/review
 ```
 
-A package with an MCP server that everyone can see needs an admin's approval once before people outside its space see it. You and your team have it at once:
+Any warning from the server follows as `warning: <text>`, for example that a changed MCP server waits for an admin again. Running the same publish again after a timeout is safe: when the version already holds the same files, it prints `<id> <version> was already published with these files; nothing changed`.
+
+A package with an MCP server that everyone can see needs an admin's approval before people outside its space see it. You and your team have it at once:
 
 ```text
 published data-team/warehouse 1.0.0; everyone else sees it once an admin approves its MCP server
@@ -136,7 +195,7 @@ published data-team/warehouse 1.0.0; everyone else sees it once an admin approve
 
 ### Suggesting a change to someone else's package
 
-When `--namespace` names a space you don't publish to and the package already exists there and you can see it, `publish` offers to send your version to its owners as a suggestion. `--message` (or, failing that, `--changelog`) says what you changed; `--version` is not needed, because the owner picks the version when they accept.
+When `--namespace` names a space you don't publish to and the package already exists there and you can see it, `publish` offers to send your version to its owners as a suggestion. `--message` (or, failing that, `--changelog`) says what you changed; `--version` is not needed, because the owner picks the version when they accept. `--dry-run` runs the local checks and sends nothing.
 
 ```text
 suggest a change to data-team/review
@@ -159,13 +218,14 @@ Refusals, before anything is uploaded:
 | A staged file looks like a secret                  | Each finding on stderr as `secret: <path>`, then a refusal.  |
 | Validation failed                                  | Each error on stderr, then `The package failed validation.`  |
 | The zipped archive exceeds 50 MB                   | `The package archive is larger than the 50 MB limit.`        |
+| `--private` and `--visibility` together            | `Choose --private or --visibility, not both.`                |
 | No marketplace is configured in this build         | `No marketplace is configured.`                              |
 
-A server rejection prints `HTTP <status>: <title>`, then the problem's `detail` and one line per field error, each indented. See [Publish to the marketplace](publish-to-marketplace.md) for the walkthrough and [the API reference](marketplace-api.md) for the request itself.
+A server rejection prints `HTTP <status>: <title>`, then the problem's `detail` and one line per field error, each indented. A version lower than the live one, or one already used, adds `Publish <version> or higher.` with the next free version. A package removed from every PC must be restored before a new version. See [Publish to the marketplace](publish-to-marketplace.md) for the walkthrough and [the API reference](marketplace-api.md) for the request itself.
 
 ## `install <target>`
 
-Syncs, then installs onto every detected agent, exactly as the window would.
+Syncs, then installs onto every detected agent, as the window would. The sync first prints what it changed in other packages: `updated <id> (<name>) <from> -> <to>`, `removed <name>: its publisher or an admin pulled it`, `repaired <name>: put back files that were missing`, `added <name> to newly found apps`, and `could not update <id>: <reason>` on stderr.
 
 | `<target>`                  | Installs                                                                                                                        |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
@@ -174,18 +234,83 @@ Syncs, then installs onto every detected agent, exactly as the window would.
 | `<ns>/<bundle>`             | Every package in the bundle that is not installed yet, each in its own transaction. One that fails leaves the others installed. |
 | A share link (`…/l/<code>`) | Adds you to what the link shares, then installs it: a package, a bundle, or every package in a shared space.                    |
 
-| Option          | Meaning                                                                                                                                                                                                                                          |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--approve-mcp` | Grants the Tier 3 approval. Required whenever something being installed contains an MCP server; without it the install fails with `<names> includes a connector that runs a program on this computer. Run again with --approve-mcp to allow it.` |
+| Option           | Meaning                                                                                                                                                                                                                                                                                         |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--approve-mcp`  | Grants the Tier 3 approval. Required whenever something being installed contains an MCP server; without it the install fails with `<names> includes a connector that runs a program on this computer. Run again with --approve-mcp to allow it.`                                                |
+| `--replace`      | Backs up files or settings entries that Agent Plugins did not install and that are in the way, then installs. Without it such a package fails with `Files or settings that Agent Plugins didn't install are in the way of <target>. Run again with --replace to back them up and replace them.` |
+| `--local <path>` | Installs a folder from this computer instead, for testing without publishing; see below.                                                                                                                                                                                                        |
 
 ```text
 installed jacob/review (Review workflow)
   backed up C:\Users\jacob\.agents\.agent-plugins-backups\...
 ```
 
-Backup lines appear only when an existing destination had to be preserved. An unknown ID fails with ``<id> is not in the catalog. Try `agent-plugins search`.`` A team invite link is refused with a pointer to `team join`.
+Backup lines appear only when an existing destination had to be preserved, and `warning: <text>` names an app that was skipped. A package already installed prints `<target> is already installed.` and succeeds. An unknown ID fails with ``<id> is not in the catalog. Try `agent-plugins search`.`` A team invite link is refused with a pointer to `team join`.
 
-There is no `uninstall` command; uninstall from the app.
+### `install --local <path>`
+
+Installs `<path>`, any input [`publish`](#publish-path---version-majorminorpatch) takes, onto every detected agent as the package `local/<id>`, so its skills land in `local-<name>` folders and never take a published package's place. Installing the same folder again updates that install. Background syncs leave it alone. Files deleted by hand are not put back, and the window lists it as no longer offered.
+
+```text
+installed local/review (Review) from C:\Users\jacob\src\review
+  remove it with: agent-plugins uninstall local/review
+```
+
+## `list [--json]`
+
+Lists the packages installed on this computer from the app's saved state, without the network:
+
+```text
+package                          status               version    name
+jacob/review                     installed            1.2.0      Review
+data-team/warehouse              updateAvailable (held) -        Warehouse
+```
+
+`status` is the [package state](app-reference.md#package-states); `(held)` marks a package whose updates you hold. `version` is the marketplace version when the installed copy is it. With no saved state it fails with ``Agent Plugins has no saved state yet. Run `agent-plugins sync`.``
+
+`--json` prints an array of `{ id, name, status, installedVersion, latestVersion, held }`. `installedVersion` is null unless the package is installed, changed, or partly installed at the marketplace's current version.
+
+## `status <ns>/<package> [--json]`
+
+Shows a package as the marketplace sees it, and on this computer:
+
+```text
+Review (jacob/review)
+  live version  1.2.0
+  visible to    public
+  installs      47 (31 using it in the last 30 days)
+  this computer installed
+  1.2.0        2026-09-20
+  1.1.0        2026-09-02  withdrawn
+```
+
+`removed from every PC by an admin` (or `by its owners`) appears for a revoked package, and `MCP review <state>` with any `review note` for a package with an MCP server.
+
+`--json` prints `{ id, name, liveVersion, visibility, revoked, revokedByAdmin, review, reviewNote, installs, installedBase, versions, local }`. Each version is `{ version, publishedAt, publishedBy, changelog, withdrawn, purged }`. `local` is `{ status, installedVersion, held }`, or null when the package is not installed here.
+
+## `uninstall <ns>/<package>[/<component>]`
+
+Removes a package, or one skill or connector of it, from every agent. A package you changed on this computer fails with `… contains local changes … Run again with --force to remove it anyway; your copy is saved to backups first.`
+
+| Option    | Meaning                                                                                      |
+| --------- | -------------------------------------------------------------------------------------------- |
+| `--force` | Removes a changed package too, after saving your copy to `~/.agents/.agent-plugins-backups`. |
+
+## `sync`
+
+Runs a full sync, as **Refresh** in the window does, and prints what it changed in the lines [`install`](#install-target) uses, or `Everything is up to date.` It fails when any package could not be updated.
+
+## `withdraw <ns>/<package> <version>`
+
+Withdraws a version: it leaves the catalog, and PCs that have it move to the newest version left at their next check. MCP packages whose server differs wait for approval. `--undo` restores it. Owners and admins only. The version number stays used either way.
+
+## `hold <ns>/<package>`
+
+Stops background updates of an installed package on this computer. `agent-plugins install <ns>/<package>` still updates it when you choose. `--undo` lets it update on its own again. The window shows it as **Updates held**.
+
+## `keep <ns>/<package>`
+
+Stops managing an installed package and leaves its files as they are, for example to keep your own edited copy. Agent Plugins no longer updates, restores, or removes it; you can install it again later.
 
 ## `share <ns>[/<id>]`
 

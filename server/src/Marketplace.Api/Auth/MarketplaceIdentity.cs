@@ -25,6 +25,9 @@ public sealed record MarketplaceIdentity(
     /// <summary>Settled from the database by <c>ResolveMarketplaceIdentityAsync</c>; their namespaces are in <see cref="Namespaces"/>.</summary>
     public IReadOnlyList<TeamMembership> Teams { get; init; } = [];
 
+    /// <summary>An admin blocked the account: it may read, but not change anything.</summary>
+    public bool IsBlocked { get; init; }
+
     public bool Owns(string ns) => Namespaces.Contains(ns, StringComparer.Ordinal) || IsAdmin;
 
     public bool InTeam(string ns) => Teams.Any(team => team.Namespace == ns);
@@ -61,10 +64,11 @@ public static partial class IdentityResolver
             .Where(group => group.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var isAdmin = options.AdminAccounts.Any(candidate => AccountMatches(candidate, account, username))
+        // Stricter than share lists: CORP\jsmith as admin must not make EUROPE\jsmith one.
+        var isAdmin = options.AdminAccounts.Any(candidate => EntryMatches(candidate.Trim(), account))
             || (options.AdminGroup is { Length: > 0 } group && groups.Contains(group, StringComparer.OrdinalIgnoreCase));
         var namespaces = new List<string> { ns };
-        if (isAdmin || options.OfficialPublishers.Any(candidate => AccountMatches(candidate, account, username)))
+        if (isAdmin || options.OfficialPublishers.Any(candidate => EntryMatches(candidate.Trim(), account)))
         {
             namespaces.Add(MarketplaceIdentity.OfficialNamespace);
         }
@@ -109,6 +113,9 @@ public static partial class IdentityResolver
             .OrderBy(team => team.Namespace, StringComparer.Ordinal)
             .ToArray();
 
+        var blocked = (await db.Blocks.AsNoTracking().Select(block => block.Account).ToListAsync(cancellationToken))
+            .Any(block => EntryMatches(block, identity.Account));
+
         // ponytail: nine accounts deriving one name leaves the tenth without a personal namespace; add Auth:NamespaceOverrides if it happens.
         IEnumerable<string> personal = ns is null ? [] : [ns];
         return identity with
@@ -116,6 +123,7 @@ public static partial class IdentityResolver
             Namespace = ns ?? identity.Namespace,
             Namespaces = [.. personal, .. identity.Namespaces.Skip(1), .. memberships.Select(team => team.Namespace)],
             Teams = memberships,
+            IsBlocked = blocked && !identity.IsAdmin,
         };
     }
 
@@ -213,9 +221,40 @@ public static partial class IdentityResolver
     /// (<c>CORP\jane</c>, <c>jane@corp</c>) matches that account only, a bare <c>jane</c> any account
     /// whose username is jane.
     /// </summary>
-    public static bool EntryMatches(string entry, string account) =>
-        string.Equals(entry, account, StringComparison.OrdinalIgnoreCase)
-        || (!entry.Contains('\\') && !entry.Contains('@') && string.Equals(entry, Username(account), StringComparison.OrdinalIgnoreCase));
+    public static bool EntryMatches(string entry, string account)
+    {
+        if (string.Equals(entry, account, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var entryDomain = Domain(entry);
+        if (!string.Equals(Username(entry), Username(account), StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // Kerberos names the caller jane@CORP.EXAMPLE.COM while people write CORP\jane: the same
+        // domain when the NetBIOS name is the realm's first label. A different domain never matches.
+        var accountDomain = Domain(account);
+        return entryDomain is null
+            || (accountDomain is not null && string.Equals(FirstLabel(entryDomain), FirstLabel(accountDomain), StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary><c>CORP</c> for <c>CORP\jane</c>, <c>corp.example.com</c> for <c>jane@corp.example.com</c>, null for <c>jane</c>.</summary>
+    private static string? Domain(string account)
+    {
+        var backslash = account.LastIndexOf('\\');
+        if (backslash > 0)
+        {
+            return account[..backslash];
+        }
+
+        var at = account.IndexOf('@');
+        return at > 0 ? account[(at + 1)..] : null;
+    }
+
+    private static string FirstLabel(string domain) => domain.Split('.')[0];
 
     /// <summary>official, team, or personal, from the namespace's row; a namespace nobody claimed yet is personal.</summary>
     public static string Lane(string ns, Publisher? publisher) =>

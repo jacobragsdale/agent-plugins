@@ -53,6 +53,56 @@ pub(crate) fn open_main_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// The first time the window closes, says the app keeps running, since
+/// updates and removals reach this PC only while it does.
+pub(crate) fn explain_first_close<R: Runtime>(app: &AppHandle<R>) {
+    let Ok(paths) = crate::paths::SystemPaths::from_system() else {
+        return;
+    };
+    let marker = paths.app_data().join("explained-tray");
+    if marker.exists() {
+        return;
+    }
+    crate::notify::show(
+        app,
+        "Agent Plugins is still running in the system tray, so your skills stay up to date. Quit it from the tray icon.",
+    );
+    let _ = std::fs::create_dir_all(paths.app_data());
+    let _ = std::fs::write(marker, b"");
+}
+
+/// Launch at Login starts on: updates and removals reach this PC only while
+/// the app runs. The `LaunchAtLogin` policy decides for everyone when IT sets
+/// it; otherwise the person's own choice in the tray menu stands after the
+/// first run.
+fn apply_launch_at_login_default<R: Runtime>(app: &App<R>) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    #[cfg(windows)]
+    let policy = crate::locator::policy_value::<u32>("LaunchAtLogin").map(|value| value != 0);
+    #[cfg(not(windows))]
+    let policy: Option<bool> = None;
+    let Ok(paths) = crate::paths::SystemPaths::from_system() else {
+        return;
+    };
+    let marker = paths.app_data().join("launch-at-login-default");
+    let wanted = policy.or_else(|| (!marker.exists()).then_some(true));
+    let autolaunch = app.autolaunch();
+    let result = match wanted {
+        Some(true) if !autolaunch.is_enabled().unwrap_or(false) => autolaunch.enable(),
+        Some(false) if autolaunch.is_enabled().unwrap_or(false) => autolaunch.disable(),
+        _ => Ok(()),
+    };
+    if let Err(error) = result {
+        eprintln!("Could not set Launch at Login: {error}");
+    }
+    if policy.is_none() {
+        let _ = std::fs::create_dir_all(paths.app_data());
+        let _ = std::fs::write(marker, b"");
+    }
+}
+
 fn toggle_launch_at_login<R: Runtime>(
     app: &AppHandle<R>,
     item: &CheckMenuItem<R>,
@@ -126,6 +176,7 @@ pub(crate) fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> 
         true,
         None::<&str>,
     )?;
+    apply_launch_at_login_default(app);
     let launch_at_login_enabled = match app.autolaunch().is_enabled() {
         Ok(enabled) => {
             if enabled {

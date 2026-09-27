@@ -184,7 +184,7 @@ function StatusSummary({
           detected.length === 0 && unsure.length > 0
             ? `Couldn't check ${unsure.map((profile) => profile.displayName).join(", ")} just now. Agent Plugins will check again.`
             : detected.length === 0
-              ? "No supported AI app was found. Install Claude Desktop, ChatGPT, or Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then refresh."
+              ? "No supported AI app was found. Install GitHub Copilot, Cursor, or Claude (Claude Code or Claude Desktop), or another supported app such as OpenCode, pi, Codex, ChatGPT, or Grok Build, then refresh."
               : detected.map(agentSummary).join(", ")
         }
         problem={null}
@@ -247,6 +247,11 @@ function checksSummary(report: PreflightReport | null): string {
 
 export function SystemStatusDialog({
   open,
+  logPath,
+  resetting,
+  onManageSources,
+  onReset,
+  onOpenLog,
   report,
   identity,
   marketplaceUrl,
@@ -258,6 +263,12 @@ export function SystemStatusDialog({
   onAction
 }: Readonly<{
   open: boolean;
+  /** The app's log file, when it keeps one. */
+  logPath: string | null;
+  resetting: boolean;
+  onManageSources: () => void;
+  onReset: () => void;
+  onOpenLog: (path: string) => void;
   report: PreflightReport | null;
   identity: AppIdentity | null;
   marketplaceUrl: string | null;
@@ -282,6 +293,33 @@ export function SystemStatusDialog({
         <details className="status-details">
           <summary>{checksSummary(report)}</summary>
           <CheckList report={report} onAction={onAction} />
+        </details>
+        <details className="status-details">
+          <summary>Advanced</summary>
+          <div className="status-advanced">
+            <Text as="p" color="gray" size="1">
+              Sources are where skills come from; the marketplace adds its own. Reset uninstalls everything Agent Plugins installed and clears its data.
+            </Text>
+            <div className="status-footer-actions">
+              <Button size="1" variant="soft" onClick={onManageSources}>
+                Manage sources…
+              </Button>
+              {logPath === null ? null : (
+                <Button
+                  size="1"
+                  variant="soft"
+                  onClick={() => {
+                    onOpenLog(logPath);
+                  }}
+                >
+                  Open log
+                </Button>
+              )}
+              <Button size="1" variant="soft" color="red" loading={resetting} disabled={resetting} onClick={onReset}>
+                Reset…
+              </Button>
+            </div>
+          </div>
         </details>
         <div className="dialog-actions status-footer">
           <div className="status-footer-meta">

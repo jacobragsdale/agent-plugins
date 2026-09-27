@@ -3,11 +3,11 @@
     <div class="copy">
       <h1>Skills for the AI assistants on your PC</h1>
       <p class="lead">
-        A skill teaches an assistant one job, like turning rough notes into a standup update. Install one here and Agent Plugins adds it to Claude, ChatGPT, and Microsoft 365 Copilot.
+        A skill teaches an assistant one job, like turning rough notes into a standup update. Install one here and Agent Plugins adds it to GitHub Copilot, Cursor, and Claude on your PC.
       </p>
       <div class="row">
         <a mat-flat-button routerLink="/browse">Browse skills</a>
-        <a mat-button routerLink="/help/publish">Use the command line</a>
+        <a mat-button routerLink="/help/getting-started">How it works</a>
       </div>
     </div>
 
@@ -26,17 +26,6 @@
     </section>
   </div>
 
-  @if (popular().length > 0) {
-    <section class="stack" aria-labelledby="popular-heading">
-      <div class="page-head">
-        <h2 id="popular-heading">Most used</h2>
-        <a mat-button routerLink="/browse">All skills</a>
-      </div>
-      <div class="grid">
-        @for (item of popular(); track item.id) {
-          <app-package-card [item]="item" />
-        }
-      </div>
-    </section>
-  }
+  <app-skill-shelf heading="Shared with you" [items]="shared()" />
+  <app-skill-shelf heading="Most used" [items]="popular()" [all]="true" />
 </div>

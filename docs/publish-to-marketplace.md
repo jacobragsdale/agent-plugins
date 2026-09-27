@@ -1,14 +1,26 @@
 # Publish to the marketplace
 
-This tutorial publishes a skill you already have on your machine to the company marketplace. It takes a minute, and the skill is live as soon as it is published. Authentication is your Windows logon; there is nothing to sign in to.
+This tutorial publishes a skill to the company marketplace. It takes a minute, and the skill is live as soon as it is published; colleagues see it within about 15 minutes, or at once through its page's **Install in Agent Plugins** button. Authentication is your Windows logon; there is nothing to sign in to.
+
+## From scratch, in the web portal
+
+No skill yet? Open the marketplace in your browser, choose **Share a skill**, then **Write it here**. Give it a **Name**, say **When should the assistant use it?** in a sentence or two, and write the **Instructions**. **Create a skill** in the app opens this page when Cursor isn't installed.
+
+Choose where it goes under **Publish to**, and **Who can install it**:
+
+- **Only me, and people I share it with** — the default for your own space. Use it to try the skill yourself first.
+- **Everyone** — anyone at the company can find and install it.
+- **Same as the space** — follows the space's setting, which each space label shows.
+
+To fix a typo later, choose **Edit** on the skill's page; it opens the editor filled in from the published `SKILL.md` and publishes the next version.
 
 ## From scratch, in Cursor
 
-No skill yet? Choose **Create a skill** in Agent Plugins. Cursor opens and offers to create a chat with a prompt; choose **Create Chat**, then send it. The agent asks what the skill should do, writes it where Cursor reads skills so you can try it, and publishes it once you say it's ready.
+With Cursor installed, **Create a skill** in Agent Plugins opens Cursor and offers to create a chat with a prompt; choose **Create Chat**, then send it. The agent asks what the skill should do, writes it where Cursor reads skills so you can try it, and publishes it once you say it's ready. "Just for me" publishes it privately.
 
-## From the web portal
+## From files, in the web portal
 
-Open the marketplace in your browser and choose **Share a skill**. Pick who it is for (just you, or one of your teams), then drag in what you already have: a skill folder, a folder of skill folders (a skill pack), a `SKILL.md`, a zip, or an MCP server's `.json`. Skills you use in Claude Code live in `%USERPROFILE%\.claude\skills`. To change a published skill, edit it on your machine and choose **Upload a new version** on its page. The rest of this page is the command-line route.
+Choose **Share a skill**, then drag in what you already have: a skill folder, a folder of skill folders (a skill pack), a `SKILL.md`, a zip, or an MCP server's `.json`. Skills Agent Plugins installed for you live in `%USERPROFILE%\.agents\skills`, and Claude Code's own in `%USERPROFILE%\.claude\skills`. **Publish** stays off until the upload holds a usable `SKILL.md`. To change a published skill, choose **Upload a new version** on its page: the portal compares your files with the live version first and names any that the new version would drop. The rest of this page is the command-line route.
 
 ## From an agent
 
@@ -16,7 +28,7 @@ Install the official `publish` skill from the marketplace (search for `official/
 
 > Publish my `review` skill to the marketplace.
 
-The skill validates the package, proposes a better description and tags, runs a dry run, and publishes with your confirmation. The rest of this page is what it does by hand.
+The skill validates the package, proposes a better description and tags, runs a dry run, and publishes with your confirmation. Ask for it "just for me" and it publishes privately. The rest of this page is what it does by hand.
 
 ## From a terminal
 
@@ -30,18 +42,27 @@ The skill validates the package, proposes a better description and tags, runs a 
 
    The `namespace` line is where your packages publish: your lowercase account name, or that name with a number on the end (`christopher-jo-2`) when another account claimed it first. `publishes to` adds every team you are in; publish to one with `--namespace <team>`.
 
-2. Point at the skill directory (it contains `SKILL.md`):
+2. Check the skill directory (it contains `SKILL.md`):
 
    ```
-   agent-plugins publish %USERPROFILE%\.claude\skills\review --version 1.0.0 --tags review,git --changelog "First release."
+   agent-plugins validate %USERPROFILE%\.claude\skills\review
    ```
 
-   The CLI stages a one-package source tree, refuses files that look like credentials, validates it with the same rules the server applies, and prints a summary:
+   It stages the package the way `publish` does, runs every check that needs no network, and lists which apps can use each part. Fix anything it reports.
+
+3. Publish it privately first, with a dry run to see what the server would do:
+
+   ```
+   agent-plugins publish %USERPROFILE%\.claude\skills\review --version 1.0.0 --private --tags review,git --changelog "First release." --dry-run
+   ```
+
+   Then run the same command without `--dry-run`. The CLI prints a summary:
 
    ```
    publish jacob/review 1.0.0
      as        CORP\jacob
      contents  3 file(s), 12 KB (4 KB zipped)
+     who       only you, the space's owners, and people it is shared with
      tags      review, git
      changelog First release.
    Publish? [y/N]
@@ -49,20 +70,20 @@ The skill validates the package, proposes a better description and tags, runs a 
 
    Answer `y`. Add `--yes` to skip the prompt.
 
-3. The response names the package and its page in the portal:
+4. The response names the package and its page in the portal:
 
    ```
    published jacob/review 1.0.0
      https://marketplace.example.com/p/jacob/review
    ```
 
-   The version is live at once: everyone who can see your space finds it at their app's next check, and PCs that already have the package update to it. The card shows your name, the version, and how many people use it.
+   The version is live at once: everyone who can see it finds it at their app's next check, within about 15 minutes, and PCs that already have the package update to it then. A package with an MCP server updates on its own only when the server itself is unchanged; otherwise each person approves the change. When you're happy with it, share it (next section) or choose **Everyone**.
 
    A package with an MCP server that everyone can see waits for an admin once, the first time it is shared with everyone: the CLI then prints `published jacob/review 1.0.0; everyone else sees it once an admin approves its MCP server`. You, your team, and people you share it with can use it straight away. The admin's decision, and any note, is on the package's page in the portal.
 
 ## Choose who can see it
 
-A new package follows its space: your personal space is public, and a team's space is whatever its owners chose when they created it. To change one package, choose **Share** on its page in the portal, or **Share…** on its card in the app:
+A new package published without a choice follows its space: your personal space is public, and a team's space is whatever its owners chose when they created it. The portal asks **Who can install it**, and `--private` or `--visibility` sets it on the command line. To change one package later, choose **Share** on its page in the portal, or **Share…** on its card in the app:
 
 - **Same as its space**, **Private**, or **Everyone at the company**.
 - Add people and teams to the list below. Private means the space's owners plus that list. Sharing lets people see and install it, never change it.
@@ -84,24 +105,28 @@ You can't publish to a space you don't own, but you can suggest a change. Choose
 
 ## What you can publish
 
-| Input                                   | Result                                                                                           |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| A directory with `SKILL.md`             | One `skill` package. The package ID is the frontmatter `name` (a `yourname-` prefix is dropped). |
-| A directory of skill directories        | A skill pack: one package, one `skill` component per subfolder, named after the directory.       |
-| An MCP document in the `mcp.json` shape | One `mcpServer` package named after the file.                                                    |
-| A tree with `agent-plugins.json`        | The single package it declares; `source.id` must equal your namespace.                           |
+| Input                                   | Result                                                                                                                                  |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| A directory with `SKILL.md`             | One `skill` package. The package ID is the frontmatter `name` (a `yourname-` prefix is dropped, on the command line and in the portal). |
+| A directory of skill directories        | A skill pack: one package, one `skill` component per subfolder, named after the directory.                                              |
+| An MCP document in the `mcp.json` shape | One `mcpServer` package named after the file.                                                                                           |
+| A tree with `agent-plugins.json`        | The package it declares, or the one `--package-id` names; `source.id` becomes your namespace. Only the declared paths are published.    |
 
 `--package-id` overrides the package ID. `--namespace official` publishes to the official lane when your account is allowlisted.
 
 ## Versions
 
-Versions are immutable release versions, `major.minor.patch`; a pre-release such as `1.0.0-beta.1` is refused. Publish a new version to change anything; the namespace archive always carries the latest non-yanked version of each package, so clients update on their next sync. Withdraw a version from its page in the portal, or yank it with the API, when it must disappear from the catalog (installed copies are unaffected). A withdrawn version can be restored the same way. A version number that was ever used, including one you withdrew, cannot be reused; the server names the next free one. To take a package off every PC that has it, choose **Remove from every PC** on its page, or run `agent-plugins revoke <namespace>/<package>`; each app uninstalls it at its next check.
+Versions are immutable release versions, `major.minor.patch`; a pre-release such as `1.0.0-beta.1` is refused. Publish a new version to change anything; the namespace archive always carries the highest version that is not withdrawn, so clients update on their next sync. A version lower than the live one is refused, with the next free version named. Publishing to a package that was removed from every PC is refused until it is restored.
+
+Withdraw a version from its page in the portal, or with `agent-plugins withdraw <namespace>/<package> <version>`, when it must disappear from the catalog. Withdrawing the live version makes the one below it live, and PCs move back to it at their next check; a package whose MCP server differs asks each person first. `--undo`, or **Restore** on the page, brings a withdrawn version back. A version number that was ever used, including one you withdrew, cannot be reused.
+
+A publish that timed out can be run again: when the version already holds the same files, it answers that nothing changed. To take a package off every PC that has it, choose **Remove from every PC** on its page, or run `agent-plugins revoke <namespace>/<package>`; each app uninstalls it at its next check.
 
 ## Rules the CLI enforces
 
-- The archive is at most 50 MB and contains no symbolic links.
-- No `.env`, key, certificate, or token-looking content.
-- `SKILL.md` has a non-empty `name` and `description`; the name equals the package ID.
+- The package is at most 2,000 files, 50 MB unzipped, and 50 MB zipped, and contains no symbolic links. The server also refuses a publish that would push the whole namespace past those limits.
+- No credential files, private keys, token-shaped strings, or fixed secrets in an MCP document; see [the credential scan](manifest-reference.md#credential-scan).
+- `SKILL.md` has a non-empty `name` and `description`. The name is rewritten to the package ID.
 - The package validates: the server runs the same validator and credential scan and rejects a mismatch.
 
 The server also refuses more than 10 tags, a tag that is not up to 32 lowercase letters, digits, and single hyphens, and a changelog over 4,096 characters.

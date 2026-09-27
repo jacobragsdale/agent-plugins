@@ -345,7 +345,7 @@ fn validate_repository_tree(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_relative_path(value: &str, label: &str) -> Result<PathBuf, String> {
+pub(crate) fn validate_relative_path(value: &str, label: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(value);
     if value.is_empty() || value.contains('\\') || path.is_absolute() {
         return Err(format!(

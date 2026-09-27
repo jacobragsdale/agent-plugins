@@ -255,6 +255,7 @@ fn host_checks(
     let started = Instant::now();
     match &identity.join {
         JoinState::Domain(domain) => out.push(started, "host.domain", "Domain membership", CheckStatus::Ok, format!("{} on {domain}", identity.account), None, false),
+        JoinState::Cloud => out.push(started, "host.domain", "Domain membership", CheckStatus::Ok, format!("{} on Microsoft Entra ID", identity.account), None, false),
         JoinState::Workgroup => out.push(
             started,
             "host.domain",
@@ -934,7 +935,7 @@ fn agent_checks(out: &mut Collector, input: &PreflightInput<'_>) {
             "Detected agents",
             CheckStatus::Warn,
             "No supported AI app was found on this machine.",
-            manual("Install Claude Desktop, ChatGPT, or Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then refresh."),
+            manual(crate::agent_profiles::INSTALL_AN_APP),
             false,
         );
     } else {
@@ -1115,47 +1116,60 @@ fn dependency_checks(
         ),
     }
 
+    // `dependencies.node` guessed at npx; this asks each installed MCP server
+    // for the program it actually starts.
     let started = Instant::now();
-    let mcp_installed = input.items.iter().any(|item| {
-        matches!(
-            item.status,
-            ItemStatus::Installed
-                | ItemStatus::UpdateAvailable
-                | ItemStatus::PartiallyInstalled
-                | ItemStatus::Modified
-        ) && item
-            .components
-            .iter()
-            .any(|component| component.kind == "mcpServer")
-    });
-    if !mcp_installed {
+    let installed_connectors = input
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.status,
+                ItemStatus::Installed
+                    | ItemStatus::UpdateAvailable
+                    | ItemStatus::PartiallyInstalled
+                    | ItemStatus::Modified
+            )
+        })
+        .flat_map(|item| item.connectors.iter())
+        .collect::<Vec<_>>();
+    let missing = installed_connectors
+        .iter()
+        .filter_map(|connector| {
+            connector
+                .missing_program
+                .as_ref()
+                .map(|program| format!("{} needs {program}", connector.name))
+        })
+        .collect::<Vec<_>>();
+    if installed_connectors.is_empty() {
         out.push(
             started,
-            "dependencies.node",
-            "Node.js (npx)",
+            "dependencies.connectors",
+            "Programs connectors start",
             CheckStatus::Skipped,
-            "No installed MCP server needs it.",
+            "No MCP server is installed.",
             None,
             false,
         );
-    } else if which("npx").is_some() {
+    } else if missing.is_empty() {
         out.push(
             started,
-            "dependencies.node",
-            "Node.js (npx)",
+            "dependencies.connectors",
+            "Programs connectors start",
             CheckStatus::Ok,
-            "npx resolves on PATH.",
+            "Every installed MCP server's program is on this computer.",
             None,
             false,
         );
     } else {
         out.push(
             started,
-            "dependencies.node",
-            "Node.js (npx)",
+            "dependencies.connectors",
+            "Programs connectors start",
             CheckStatus::Warn,
-            "An installed MCP server may need npx, which is not on PATH.",
-            manual("Install Node.js so npx is available."),
+            format!("{}.", missing.join("; ")),
+            manual("Install what each connector needs, or ask IT to, then restart the AI app."),
             false,
         );
     }
@@ -1292,28 +1306,6 @@ fn same_dir(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    let extensions: Vec<String> = if cfg!(windows) {
-        std::env::var("PATHEXT")
-            .unwrap_or_else(|_| ".EXE;.CMD;.BAT".to_string())
-            .split(';')
-            .map(|ext| ext.to_ascii_lowercase())
-            .collect()
-    } else {
-        vec![String::new()]
-    };
-    for dir in std::env::split_paths(&path) {
-        for extension in &extensions {
-            let candidate = dir.join(format!("{name}{extension}"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1397,7 +1389,6 @@ mod tests {
             data: temp.path().join("data"),
             local_data: temp.path().join("local-data"),
             cache: temp.path().join("cache"),
-            onedrive_commercial: None,
         };
         let profiles = [
             profile_state(TargetId::Codex, true),

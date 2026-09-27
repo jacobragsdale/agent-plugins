@@ -46,7 +46,7 @@ public static class SamplePackages
     }
 
     /// <summary>A skill plus an MCP server in one package: the public sees it once an admin approves the server.</summary>
-    public static byte[] SkillAndMcpPackage(string ns, string packageId, string description)
+    public static byte[] SkillAndMcpPackage(string ns, string packageId, string description, string command = "node")
     {
         var manifest = $$"""
             {
@@ -69,8 +69,24 @@ public static class SamplePackages
         {
             ["agent-plugins.json"] = manifest,
             [$"skills/{packageId}/SKILL.md"] = $"---\nname: {packageId}\ndescription: {description}\n---\n\nUse the database server.\n",
-            ["mcp/database.json"] = """{ "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "mcpServers": { "database": { "type": "stdio", "command": "node", "args": ["server.js"] } } }""",
+            ["mcp/database.json"] = $$"""{ "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "mcpServers": { "database": { "type": "stdio", "command": "{{command}}", "args": ["server.js"], "env": { "DB_TOKEN": "${DB_TOKEN}" } } } }""",
         });
+    }
+
+    /// <summary>A skill with <paramref name="extraFiles"/> small files beside its SKILL.md, for the size limits.</summary>
+    public static byte[] ManyFilesPackage(string ns, string packageId, int extraFiles)
+    {
+        var files = new Dictionary<string, string>
+        {
+            ["agent-plugins.json"] = $$"""{ "version": 2, "source": { "id": "{{ns}}", "name": "{{ns}}", "description": "Test packages." }, "packages": [ { "id": "{{packageId}}", "name": "{{packageId}}", "description": "Many files.", "components": [ { "kind": "skill", "path": "skills/{{packageId}}" } ] } ] }""",
+            [$"skills/{packageId}/SKILL.md"] = Skill(packageId, "Has many files."),
+        };
+        for (var index = 0; index < extraFiles; index++)
+        {
+            files[$"skills/{packageId}/data/{index}.txt"] = "x";
+        }
+
+        return Zip(files);
     }
 
     public static byte[] Zip(IReadOnlyDictionary<string, string> files, string prefix = "")

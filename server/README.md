@@ -32,7 +32,7 @@ Production registers only `Negotiate` (Kerberos). The container needs:
 
 1. An AD service account with the SPN `HTTP/<server fqdn>` (`setspn -S HTTP/marketplace.corp.example svc-marketplace`).
 2. A keytab for that account (`ktpass`), mounted at `/etc/krb5.keytab` with `KRB5_KTNAME` pointing at it, and a `krb5.conf` for the realm.
-3. `Auth__LdapDomain=corp.example` if group-based admin or AD groups in share lists are wanted. Groups arrive as the AD group's CN. Teams need no directory: anyone creates one in the portal, the app, or the CLI.
+3. `Auth__LdapDomain=corp.example` if group-based admin or AD groups in share lists are wanted. Groups arrive as the AD group's CN. LDAP binds with the Kerberos client keytab named by `KRB5_CLIENT_KTNAME` (usually the same keytab), or with `Auth__LdapMachineAccountName` and `Auth__LdapMachineAccountPassword`; `/api/health` reports `"ldap": "ok"` once a bind works. Teams need no directory: anyone creates one in the portal, the app, or the CLI.
 
 Negotiate on Linux is Kerberos-only: clients must use the fully qualified name in the URL, and clocks must agree within five minutes. The app's preflight checks both.
 
@@ -40,7 +40,7 @@ Negotiate on Linux is Kerberos-only: clients must use the fully qualified name i
 
 ## Configuration
 
-Every setting in [the API reference](../docs/marketplace-api.md#configuration) can be supplied as `Section__Key` environment variables. The home-lab deployment is `stacks/marketplace/compose.yaml` in the home-server repository; a corporate deployment changes the public URL, the keytab, the Artifact Keeper endpoint and credential, and `AllowDevHeader`.
+Every setting in [the API reference](../docs/marketplace-api.md#configuration) can be supplied as `Section__Key` environment variables. [Roll out Agent Plugins in a company](../docs/rollout-guide.md) walks through a production deployment: Kerberos, a compose file without the development header, the reverse proxy, backups, pointing the desktop fleet at the server by policy, and responding to an incident.
 
 ## Tests
 

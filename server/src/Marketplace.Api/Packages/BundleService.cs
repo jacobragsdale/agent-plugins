@@ -82,6 +82,7 @@ public sealed class BundleService(MarketplaceDbContext db, AccessService access,
         bundle.Members = members;
         bundle.UpdatedBy = identity.Account;
         bundle.UpdatedAt = now;
+        db.Audit(identity.Account, "bundle.save", bundle.CanonicalId, $"{members.Length} packages", now);
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return await GetAsync(identity, ns, bundleId, cancellationToken);
@@ -111,6 +112,7 @@ public sealed class BundleService(MarketplaceDbContext db, AccessService access,
         db.Bundles.Remove(bundle);
         await db.AccessRules.Where(rule => rule.Target == target).ExecuteDeleteAsync(cancellationToken);
         await db.Links.Where(link => link.Target == target).ExecuteDeleteAsync(cancellationToken);
+        db.Audit(identity.Account, "bundle.delete", target, null, timeProvider.GetUtcNow().UtcDateTime);
         await db.SaveChangesAsync(cancellationToken);
     }
 

@@ -157,10 +157,10 @@ fn plan_portable(
         .filter(|profile| profile.enabled)
         .collect::<Vec<_>>();
     if enabled.is_empty() {
-        return Err(
-            "No supported AI app was detected. Install Claude Desktop, ChatGPT, or Microsoft 365 Copilot, or a coding tool such as Cursor, Claude Code, Codex, OpenCode, Grok Build, or GitHub Copilot, then try again."
-                .to_string(),
-        );
+        return Err(format!(
+            "No supported AI app was detected. {}",
+            crate::agent_profiles::INSTALL_AN_APP
+        ));
     }
     let context = PlanningContext {
         paths,
@@ -172,10 +172,15 @@ fn plan_portable(
     }
     let mut plan = OperationPlan::default();
     let overrides = crate::invocation::read_or_default(paths);
+    let choices = crate::choices::read_or_default(paths);
 
     for profile in enabled {
         let target_adapter = adapter(profile.target_id);
         for component in &components {
+            // The person kept this component out of this app.
+            if choices.is_excluded(&item.id, &component.id, profile.target_id.as_str()) {
+                continue;
+            }
             let mut target_plan = target_adapter.plan(component, profile, &context)?;
             let manual = crate::invocation::override_for(&overrides, &item.id, component);
             for resource in &mut target_plan.resources {
@@ -326,6 +331,46 @@ pub(crate) fn requires_approval(
     item.manifest_version == 2 && trust_tier(components) >= 3
 }
 
+/// Whether every MCP entry the plan writes for `component_id` (every
+/// component when `None`) is one the ledger already owns with the same
+/// content, meaning the person approved exactly that when installing.
+pub(crate) fn mcp_entries_owned(
+    plan: &OperationPlan,
+    ledger: &InstallationLedger,
+    component_id: Option<&str>,
+) -> bool {
+    plan.resources.values().all(|planned| {
+        let for_component = component_id.is_none_or(|component_id| {
+            planned.consumer_binding_ids.iter().any(|binding_id| {
+                plan.bindings
+                    .get(binding_id)
+                    .is_some_and(|binding| binding.component_id == component_id)
+            })
+        });
+        !for_component
+            || !matches!(planned.desired, DesiredResource::StructuredEntry(_))
+            || ledger
+                .resource_by_identity(&planned.desired.identity())
+                .is_some_and(|owned| {
+                    planned
+                        .desired
+                        .desired_digest()
+                        .is_ok_and(|digest| digest == owned.desired_digest)
+                })
+    })
+}
+
+/// Whether going ahead with `plan` needs the person's MCP approval: it writes
+/// an MCP server that is new, or changed since they approved it. An update
+/// that leaves every server as it was goes ahead like any other.
+pub(crate) fn needs_approval(
+    item: &CatalogItem,
+    plan: &OperationPlan,
+    ledger: &InstallationLedger,
+) -> bool {
+    preview(item, plan).requires_approval && !mcp_entries_owned(plan, ledger, None)
+}
+
 pub(crate) fn preview(item: &CatalogItem, plan: &OperationPlan) -> InstallPreview {
     let planned_ids = plan
         .compatibility
@@ -374,7 +419,7 @@ pub(crate) fn preview(item: &CatalogItem, plan: &OperationPlan) -> InstallPrevie
 /// One line of the approval prompt, written as the person would type it:
 /// `tracker runs: npx -y @acme/tracker (environment: MODE)`. Environment and
 /// header values stay out; only their names are shown.
-fn risk_detail(name: &str, server: &crate::mcp::McpServer) -> String {
+pub(crate) fn risk_detail(name: &str, server: &crate::mcp::McpServer) -> String {
     let names = |keys: Vec<&String>, label: &str| {
         if keys.is_empty() {
             String::new()
@@ -469,7 +514,6 @@ mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
-            onedrive_commercial: None,
         }
     }
 

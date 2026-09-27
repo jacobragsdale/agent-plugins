@@ -166,9 +166,13 @@ public sealed partial class MarketplaceApiTests(MarketplaceApiFactory factory) :
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
         Assert.Contains("Publish 1.0.1 or later", await Title(conflict));
 
-        // An older version goes live without review but must not take over the listing.
+        // A version below the live one would reach no PC, so it is refused with the next usable number.
         using var older = SamplePackages.PublishForm(SamplePackages.SkillPackage("versioner", "tool", "Old news.", extraFile: "old.txt"), "0.9.0");
-        await PublishLiveAsync(client, "versioner", "tool", older);
+        var lower = await client.PostAsync("/api/packages/versioner/tool/versions", older, ct);
+        Assert.Equal(HttpStatusCode.Conflict, lower.StatusCode);
+        var problem = await lower.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
+        Assert.Contains("lower than the live version 1.0.0", problem.GetProperty("title").GetString());
+        Assert.Equal("1.0.1", problem.GetProperty("suggestedVersion").GetString());
         Assert.Equal("Version one.", IndexEntry(await client.GetFromJsonAsync<JsonElement>("/api/index", Json, ct), "versioner/tool").GetProperty("description").GetString());
         using var newer = SamplePackages.PublishForm(SamplePackages.SkillPackage("versioner", "tool", "Version two.", extraFile: "new.txt"), "1.1.0");
         await PublishLiveAsync(client, "versioner", "tool", newer);
@@ -496,6 +500,14 @@ public sealed partial class MarketplaceApiTests(MarketplaceApiFactory factory) :
         }
 
         Assert.Contains("mcp/database.json", (await owner.GetFromJsonAsync<JsonElement>("/api/packages/uploader/database/versions/1.0.0/files", Json, ct)).EnumerateArray().Select(file => file.GetProperty("path").GetString()));
+
+        // A staging failure names the upload, not the server's scratch folder.
+        using (var form = SamplePackages.UploadForm("1.0.0", new Dictionary<string, string> { ["notes.txt"] = "Not a skill.\n", ["more.txt"] = "Still not.\n" }))
+        {
+            var refused = await owner.PostAsync("/api/packages/uploader/junk/versions", form, ct);
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, refused.StatusCode);
+            Assert.DoesNotContain("marketplace-upload-", await Title(refused));
+        }
     }
 
     [Fact]

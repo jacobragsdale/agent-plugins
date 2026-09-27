@@ -102,6 +102,14 @@ pub(crate) fn resource_state(paths: &SystemPaths, resource: &ResourceRecord) -> 
             }
             match ledger::path_digest(&path, owned.kind) {
                 Ok(digest) if digest == owned.installed_digest => ContentState::Match,
+                // Recorded before leftovers stopped counting.
+                Ok(_)
+                    if owned.kind == OwnedPathKind::Directory
+                        && crate::digest::directory_digest_with_leftovers(&path)
+                            .is_ok_and(|digest| digest == owned.installed_digest) =>
+                {
+                    ContentState::Match
+                }
                 Ok(_) => ContentState::Modified,
                 Err(error) => ContentState::Unknown(error),
             }

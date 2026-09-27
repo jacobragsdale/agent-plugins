@@ -111,6 +111,8 @@ pub(super) fn build_app_state(
         download_url: crate::locator::download_url().map(str::to_string),
         identity: None,
         preflight: None,
+        notifications: Vec::new(),
+        log_path: Some(crate::startup::log_path(paths).display().to_string()),
     })
 }
 
@@ -179,6 +181,8 @@ pub(super) fn remember_identity(
         namespaces: me.namespaces,
         teams: me.teams,
         suggestions_waiting: me.suggestions_waiting,
+        reports_waiting: me.reports_waiting,
+        unread_notifications: me.unread_notifications,
     });
     let rejected = report.checks.iter().any(|check| {
         check.id == "auth.identity"
@@ -302,9 +306,17 @@ pub(super) fn current_item_state(
         || (false, Vec::new()),
         |plan| {
             let preview = crate::planner::preview(item, plan);
-            (preview.requires_approval, preview.risk_details)
+            (
+                crate::planner::needs_approval(item, plan, ledger_state),
+                preview.risk_details,
+            )
         },
     );
+    let connectors = plan
+        .as_ref()
+        .map(|plan| connectors(item, plan, ledger_state, record))
+        .unwrap_or_default();
+    let choices = crate::choices::read_or_default(paths);
     let overrides = crate::invocation::read_or_default(paths);
     let manual = |component| crate::invocation::effective(&overrides, &item.id, component);
     let skills = item
@@ -342,7 +354,11 @@ pub(super) fn current_item_state(
                     status,
                     Some(profiles),
                 ),
-                requires_approval: crate::planner::requires_approval(item, &[component]),
+                requires_approval: crate::planner::requires_approval(item, &[component])
+                    && !plan.as_ref().is_some_and(|plan| {
+                        crate::planner::mcp_entries_owned(plan, ledger_state, Some(&component.id))
+                    }),
+                excluded_apps: choices.excluded(&item.id, &component.id),
             })
             .collect(),
         compatibility,
@@ -350,7 +366,96 @@ pub(super) fn current_item_state(
         status,
         requires_approval: approval.0,
         risk_details: approval.1,
+        connectors,
+        held: choices.held.contains(&item.id),
         marketplace: None,
+    }
+}
+
+/// Each MCP server the package would install, as the approval prompt shows it.
+fn connectors(
+    item: &CatalogItem,
+    plan: &crate::resource::OperationPlan,
+    ledger_state: &ledger::InstallationLedger,
+    record: Option<&InstallationRecord>,
+) -> Vec<crate::app_state::ConnectorState> {
+    item.components
+        .iter()
+        .filter_map(|component| Some((component, component.mcp_server.as_ref()?)))
+        .map(|(component, server)| {
+            let environment = server.environment_names().into_iter().collect::<Vec<_>>();
+            let apps = plan
+                .compatibility
+                .iter()
+                .filter(|report| {
+                    report.component_id == component.id && report.capability.is_supported()
+                })
+                .filter_map(|report| {
+                    agent_profiles::TargetId::ALL
+                        .into_iter()
+                        .find(|target| target.as_str() == report.target_id)
+                        .map(|target| target.display_name().to_string())
+                })
+                .collect();
+            let installed = record.is_some_and(|record| {
+                record.binding_ids.iter().any(|binding_id| {
+                    ledger_state
+                        .bindings
+                        .get(binding_id)
+                        .is_some_and(|binding| binding.component_id == component.id)
+                })
+            });
+            let (summary, missing_program) = match server {
+                crate::mcp::McpServer::Stdio { command, .. } => (
+                    format!("Starts a program called {command} on this computer."),
+                    crate::startup::find_program(command)
+                        .is_none()
+                        .then(|| program_to_install(command)),
+                ),
+                crate::mcp::McpServer::StreamableHttp { url, .. }
+                | crate::mcp::McpServer::Sse { url, .. } => (
+                    format!(
+                        "Sends your requests to {}.",
+                        url::Url::parse(url)
+                            .ok()
+                            .and_then(|url| url.host_str().map(str::to_string))
+                            .unwrap_or_else(|| url.clone())
+                    ),
+                    None,
+                ),
+            };
+            crate::app_state::ConnectorState {
+                component_id: component.id.clone(),
+                name: component.effective_name.clone(),
+                summary,
+                detail: crate::planner::risk_detail(&component.effective_name, server),
+                missing_environment: environment
+                    .iter()
+                    .filter(|name| !crate::startup::environment_has(name))
+                    .cloned()
+                    .collect(),
+                environment,
+                missing_program,
+                apps,
+                changed: installed
+                    && !crate::planner::mcp_entries_owned(plan, ledger_state, Some(&component.id)),
+            }
+        })
+        .collect()
+}
+
+/// What a person installs to get `command`, named the way IT would know it.
+fn program_to_install(command: &str) -> String {
+    match command
+        .to_ascii_lowercase()
+        .trim_end_matches(".exe")
+        .trim_end_matches(".cmd")
+    {
+        "npx" | "node" | "npm" => "Node.js".to_string(),
+        "uvx" | "uv" => "uv".to_string(),
+        "docker" => "Docker Desktop".to_string(),
+        "python" | "python3" | "py" => "Python".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -399,6 +504,7 @@ pub(super) fn removed_item_state(
             manual_invocation: record.disable_model_invocation,
             status: super::status::item_status(paths, ledger_state, None, id),
             requires_approval: false,
+            excluded_apps: Vec::new(),
         }],
         compatibility: Vec::new(),
         destination: destination(paths, record),
@@ -406,6 +512,8 @@ pub(super) fn removed_item_state(
         // An uninstall never needs the Tier 3 approval.
         requires_approval: false,
         risk_details: Vec::new(),
+        connectors: Vec::new(),
+        held: false,
         marketplace: None,
     }
 }
@@ -512,7 +620,6 @@ mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
-            onedrive_commercial: None,
         }
     }
 
@@ -540,6 +647,8 @@ mod tests {
             status,
             requires_approval: false,
             risk_details: Vec::new(),
+            connectors: Vec::new(),
+            held: false,
             marketplace: None,
         }
     }
@@ -579,6 +688,8 @@ mod tests {
             namespaces: Vec::new(),
             teams: Vec::new(),
             suggestions_waiting: 0,
+            reports_waiting: 0,
+            unread_notifications: 0,
         };
         write_identity_cache(cache.path(), Some(&identity));
         let report = |detail: &str| crate::preflight::PreflightReport {

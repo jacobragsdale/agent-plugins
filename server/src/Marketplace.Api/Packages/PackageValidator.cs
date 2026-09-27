@@ -39,10 +39,10 @@ public sealed class ProcessPackageValidator(IOptions<ValidatorOptions> options, 
         var report = Parse(stdout, stderr);
         if (report is null || report.Fatal is not null)
         {
-            return ValidationOutcome.Fatal(report?.Fatal ?? (stderr.Length > 0 ? stderr : "The validator produced no output."));
+            return ValidationOutcome.Fatal(Relative(report?.Fatal ?? (stderr.Length > 0 ? stderr : "The validator produced no output."), sourceDirectory));
         }
 
-        var errors = report.Errors.Select(error => new ValidationError(error.Path, error.Message)).ToArray();
+        var errors = report.Errors.Select(error => new ValidationError(Relative(error.Path, sourceDirectory), Relative(error.Message, sourceDirectory))).ToArray();
         return new ValidationOutcome(errors.Length == 0 && report.ValidInstalls > 0, errors);
     }
 
@@ -64,7 +64,7 @@ public sealed class ProcessPackageValidator(IOptions<ValidatorOptions> options, 
         var report = Parse(stdout, stderr);
         if (report?.Fatal is { } fatal)
         {
-            throw new ProblemException(422, fatal);
+            throw new ProblemException(422, Relative(fatal, request.InputDirectory));
         }
 
         if (!File.Exists(request.OutputZip))
@@ -72,6 +72,10 @@ public sealed class ProcessPackageValidator(IOptions<ValidatorOptions> options, 
             throw new InvalidOperationException($"The validator did not stage the upload: {stderr}");
         }
     }
+
+    /// <summary>The server's scratch folder means nothing to the person uploading, so paths are shown relative to their upload.</summary>
+    private static string Relative(string text, string directory) =>
+        text.Replace(directory + Path.DirectorySeparatorChar, string.Empty, StringComparison.Ordinal).Replace(directory, "the upload", StringComparison.Ordinal);
 
     private async Task<(string Stdout, string Stderr)> RunAsync(IEnumerable<string> arguments, CancellationToken cancellationToken)
     {

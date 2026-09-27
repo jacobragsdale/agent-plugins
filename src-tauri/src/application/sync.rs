@@ -295,6 +295,10 @@ fn fetch_all(cache: &Path, config: SourcesConfig) -> Fetched {
         .into_iter()
         .zip(repositories)
         .collect::<Vec<_>>();
+    let digests = default
+        .as_ref()
+        .map(|default| fresh_digests(default, &default_catalog, &repositories))
+        .unwrap_or_default();
     let listings = default
         .as_ref()
         .and_then(|default| catalog_listing(cache, default, &default_catalog, &repositories))
@@ -324,7 +328,12 @@ fn fetch_all(cache: &Path, config: SourcesConfig) -> Fetched {
         (entry.name.clone(), fetch)
     });
     let sources = crate::parallel::map(&config.sources, |definition| {
-        dead_hosts.fetch(definition.url(), || prepare_source(cache, definition))
+        dead_hosts.fetch(definition.url(), || {
+            digests
+                .get(definition.url())
+                .and_then(|digest| source::unchanged_refresh(definition, cache, digest))
+                .map_or_else(|| prepare_source(cache, definition), Ok)
+        })
     });
     // Fetched here, before activation, so activation can remove what the
     // marketplace revoked under the same lock as every other change.
@@ -396,6 +405,32 @@ fn sweep_stale_preparing(cache: &Path) {
 
 /// The sources the default catalog lists, from this pass's fetch when it
 /// produced a usable catalog, otherwise from the saved copy.
+/// Each listed source's current ETag, from a catalog fetched in this pass. A
+/// saved copy of the catalog could be out of date, so it names none.
+fn fresh_digests(
+    default: &Locator,
+    new_default: &Option<Fetch<RepositoryCandidate>>,
+    repositories: &[(ConfiguredRepository, Fetch<RepositoryCandidate>)],
+) -> std::collections::BTreeMap<String, String> {
+    let candidate = match new_default {
+        Some(Fetch::Ready(candidate)) => Some(candidate),
+        _ => repositories
+            .iter()
+            .find_map(|(definition, fetch)| match fetch {
+                Fetch::Ready(candidate) if definition.locator.same_identity(default) => {
+                    Some(candidate)
+                }
+                _ => None,
+            }),
+    };
+    candidate
+        .and_then(|candidate| candidate.manifest.canonical_sources().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| Some((entry.locator().ok()?.url().to_string(), entry.digest?)))
+        .collect()
+}
+
 fn catalog_listing(
     cache: &Path,
     default: &Locator,
@@ -596,16 +631,23 @@ fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), Strin
         Ok(names) => report.extended_items = names,
         Err(error) => eprintln!("Could not add installed packages to newly found agents: {error}"),
     }
+    let version = |index: &Option<crate::marketplace::Index>, id: &str| {
+        index
+            .as_ref()
+            .and_then(|index| index.package(id))
+            .map(|package| package.version.clone())
+    };
+    for item in &mut report.updated_items {
+        item.to_version = version(&index, &item.id);
+        // A held or approval-waiting update was already listed last time, so
+        // the earlier index names the new version, not the one replaced.
+        item.from_version = version(&previous_index, &item.id)
+            .filter(|from| Some(from) != item.to_version.as_ref());
+    }
     let updates = report
         .updated_items
         .iter()
-        .map(|item| {
-            let from = previous_index
-                .as_ref()
-                .and_then(|index| index.package(&item.id))
-                .map(|package| package.version.clone());
-            (item.id.clone(), from)
-        })
+        .map(|item| (item.id.clone(), item.from_version.clone()))
         .collect();
     // "Last checked" is the last pass that reached the servers.
     let checked = if connectivity == Connectivity::Offline {
@@ -798,6 +840,15 @@ fn enrich_with_marketplace(mut state: AppState, check: MarketplaceCheck) -> AppS
     }
     report.write_cache(&check.cache);
     state.identity = super::project::remember_identity(&check.cache, &report, findings.identity);
+    if crate::WINDOW_RUNNING.load(std::sync::atomic::Ordering::Relaxed)
+        && state.identity.is_some()
+        && !check.marketplace_unreachable
+    {
+        match crate::marketplace::new_notifications(&check.cache) {
+            Ok(news) => state.notifications = news,
+            Err(error) => eprintln!("Could not read marketplace notifications: {error}"),
+        }
+    }
     let checks = report.status_map();
     state.preflight = Some(report);
 
@@ -805,11 +856,19 @@ fn enrich_with_marketplace(mut state: AppState, check: MarketplaceCheck) -> AppS
         .items
         .iter()
         .filter(|item| super::items::counts_as_installed(item.status))
-        .map(|item| item.id.clone())
         .collect::<Vec<_>>();
+    let installed_versions = installed
+        .iter()
+        .filter(|item| item.status == crate::install::ItemStatus::Installed)
+        .filter_map(|item| {
+            let meta = item.marketplace.as_ref()?;
+            Some((item.id.clone(), meta.version.clone()))
+        })
+        .collect();
     let mut events = vec![crate::marketplace::ClientEvent::heartbeat(
         check.agents.clone(),
-        installed,
+        installed.iter().map(|item| item.id.clone()).collect(),
+        installed_versions,
         checks,
     )];
     for (id, from_version) in check.updates {
@@ -1161,6 +1220,7 @@ pub(super) fn reconcile_installed_items(
     let agents_enabled = agent_profiles::read(paths)
         .iter()
         .any(|profile| profile.enabled);
+    let held = crate::choices::read_or_default(paths).held;
     for source in loaded {
         let Some(snapshot) = &source.snapshot else {
             continue;
@@ -1171,8 +1231,15 @@ pub(super) fn reconcile_installed_items(
             if item.manifest_version == 2 && !agents_enabled {
                 continue;
             }
-            if super::status::refined_item_status(paths, &ledger_state, snapshot, item, None, None)
-                != ItemStatus::UpdateAvailable
+            if held.contains(&item.id)
+                || super::status::refined_item_status(
+                    paths,
+                    &ledger_state,
+                    snapshot,
+                    item,
+                    None,
+                    None,
+                ) != ItemStatus::UpdateAvailable
             {
                 continue;
             }
@@ -1188,9 +1255,12 @@ pub(super) fn reconcile_installed_items(
             }
             let identities =
                 match crate::planner::plan(paths, snapshot, item, None, selected.as_deref()) {
-                    // An MCP server needs the user's approval; the card keeps
-                    // offering the update.
-                    Ok(plan) if crate::planner::preview(item, &plan).requires_approval => continue,
+                    // A new or changed MCP server needs the user's approval;
+                    // the card keeps offering the update. One left as it was
+                    // updates with the rest of the package.
+                    Ok(plan) if crate::planner::needs_approval(item, &plan, &ledger_state) => {
+                        continue
+                    }
                     Ok(plan) => plan
                         .resources
                         .values()
@@ -1235,6 +1305,8 @@ pub(super) fn reconcile_installed_items(
                         id: candidate.item.id.clone(),
                         source_id: candidate.item.source_id.clone(),
                         local_id: candidate.item.local_id.clone(),
+                        from_version: None,
+                        to_version: None,
                     })),
                 Err(message) => {
                     report
@@ -1333,6 +1405,27 @@ mod retire_tests {
     }
 
     const DAY: u64 = 86_400;
+
+    #[test]
+    fn a_source_the_catalog_says_is_unchanged_is_not_downloaded_again() {
+        let root = tempfile::tempdir().expect("root");
+        let cache = root.path().join("cache");
+        let definition = ConfiguredSource::test_fixture(
+            "retired",
+            "https://marketplace.test/api/sources/retired/archive",
+        );
+        cache_snapshot(&cache, &definition);
+        let pointer = cache
+            .join("sources")
+            .join(&definition.source_key)
+            .join("current.json");
+        let text = std::fs::read_to_string(&pointer).expect("pointer");
+        let mut value: serde_json::Value = serde_json::from_str(&text).expect("json");
+        value["etag"] = serde_json::json!("\"abc123\"");
+        std::fs::write(&pointer, value.to_string()).expect("etag");
+        assert!(source::unchanged_refresh(&definition, &cache, "abc123").is_some());
+        assert!(source::unchanged_refresh(&definition, &cache, "changed").is_none());
+    }
 
     fn cache_snapshot(cache: &Path, definition: &ConfiguredSource) {
         let staged = cache.join("staged");
@@ -1558,7 +1651,6 @@ mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
-            onedrive_commercial: None,
         }
     }
 
@@ -1579,6 +1671,8 @@ mod tests {
             namespaces: Vec::new(),
             teams: Vec::new(),
             suggestions_waiting: 0,
+            reports_waiting: 0,
+            unread_notifications: 0,
         };
         super::super::project::write_identity_cache(&cache, Some(&identity));
 

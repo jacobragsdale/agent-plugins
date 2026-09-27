@@ -8,13 +8,18 @@ namespace Marketplace.Api;
 /// An error the caller should see: its status, a sentence saying what went wrong, and for validation
 /// failures the per-path errors. <see cref="ProblemExceptionHandler"/> turns it into an RFC 9457 document.
 /// </summary>
-public sealed class ProblemException(int status, string title, IReadOnlyList<ValidationError>? errors = null) : Exception(title)
+public sealed class ProblemException(int status, string title, IReadOnlyList<ValidationError>? errors = null, string? detail = null, IReadOnlyDictionary<string, object?>? extensions = null) : Exception(title)
 {
     public int Status { get; } = status;
 
     public string Title { get; } = title;
 
     public IReadOnlyList<ValidationError> Errors { get; } = errors ?? [];
+
+    public string? Detail { get; } = detail;
+
+    /// <summary>Extra members of the problem document, such as <c>suggestedVersion</c>.</summary>
+    public IReadOnlyDictionary<string, object?> Extensions { get; } = extensions ?? new Dictionary<string, object?>();
 
     /// <summary>The same sentence whether the target is missing or hidden, so a 404 never reveals which.</summary>
     public static ProblemException NotFound(string what) => new(404, $"{what} was not found, or you do not have access to it.");
@@ -35,7 +40,7 @@ public sealed class ProblemExceptionHandler(IProblemDetailsService problems, ILo
     {
         var (status, title, detail, errors) = exception switch
         {
-            ProblemException problem => (problem.Status, problem.Title, null, problem.Errors),
+            ProblemException problem => (problem.Status, problem.Title, problem.Detail, problem.Errors),
             BadHttpRequestException { StatusCode: StatusCodes.Status413PayloadTooLarge } =>
                 (413, $"The request is larger than the {ArchiveInspector.MaxArchiveBytes / 1024 / 1024} MB limit.", null, []),
             BadHttpRequestException bad => (bad.StatusCode, bad.Message, bad.InnerException?.Message, (IReadOnlyList<ValidationError>)[]),
@@ -52,6 +57,11 @@ public sealed class ProblemExceptionHandler(IProblemDetailsService problems, ILo
         if (errors.Count > 0)
         {
             problemDetails.Extensions["errors"] = errors.Select(error => new { path = error.Path, message = error.Message }).ToArray();
+        }
+
+        foreach (var (name, value) in (exception as ProblemException)?.Extensions ?? new Dictionary<string, object?>())
+        {
+            problemDetails.Extensions[name] = value;
         }
 
         if (status == 503 && exception is not ProblemException)

@@ -30,6 +30,23 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
 
     public DbSet<Bundle> Bundles => Set<Bundle>();
 
+    public DbSet<Notification> Notifications => Set<Notification>();
+
+    public DbSet<AuditEvent> AuditEvents => Set<AuditEvent>();
+
+    public DbSet<Block> Blocks => Set<Block>();
+
+    /// <summary>Records who changed what; saved with the caller's next <c>SaveChanges</c>.</summary>
+    public void Audit(string actor, string action, string target, string? detail, DateTime at) =>
+        AuditEvents.Add(new AuditEvent
+        {
+            At = at,
+            Actor = actor,
+            Action = action,
+            Target = target.Length <= 256 ? target : target[..256],
+            Detail = detail is null || detail.Length <= 1024 ? detail : detail[..1024],
+        });
+
     /// <summary>Serializes writes to one namespace until the surrounding transaction ends.</summary>
     public async Task LockNamespaceAsync(string ns, CancellationToken cancellationToken) =>
         await Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock(hashtext({ns}))", cancellationToken);
@@ -109,6 +126,7 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
             entity.Property(package => package.Description).HasMaxLength(1024);
             entity.Property(package => package.RevokedBy).HasMaxLength(256);
             entity.Property(package => package.McpApprovedBy).HasMaxLength(256);
+            entity.Property(package => package.McpApprovedSpec).HasMaxLength(8192);
             entity.Property(package => package.McpDeclineNote).HasMaxLength(2048);
             entity.HasIndex(package => new { package.Namespace, package.PackageId }).IsUnique();
             entity.Ignore(package => package.CanonicalId);
@@ -122,6 +140,8 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
             entity.Property(version => version.ManifestJson).HasColumnType("jsonb");
             entity.Property(version => version.PublishedBy).HasMaxLength(256);
             entity.Property(version => version.Changelog).HasMaxLength(4096);
+            entity.Property(version => version.McpServersJson).HasColumnType("jsonb");
+            entity.Property(version => version.PurgedBy).HasMaxLength(256);
             entity.HasIndex(version => new { version.PackageId, version.Version }).IsUnique();
             entity.HasOne(version => version.Package)
                 .WithMany(package => package.Versions)
@@ -150,8 +170,10 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
 
         modelBuilder.Entity<Heartbeat>(entity =>
         {
-            entity.HasKey(heartbeat => heartbeat.Account);
+            entity.HasKey(heartbeat => new { heartbeat.Account, heartbeat.Device });
             entity.Property(heartbeat => heartbeat.Account).HasMaxLength(256);
+            entity.Property(heartbeat => heartbeat.Device).HasMaxLength(120);
+            entity.Property(heartbeat => heartbeat.InstalledVersionsJson).HasColumnType("jsonb");
             entity.Property(heartbeat => heartbeat.ClientVersion).HasMaxLength(64);
             entity.Property(heartbeat => heartbeat.OsBuild).HasMaxLength(120);
             entity.Property(heartbeat => heartbeat.ChecksJson).HasColumnType("jsonb");
@@ -163,14 +185,43 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
             entity.Property(rule => rule.Target).HasMaxLength(81);
             entity.Property(rule => rule.Visibility).HasConversion<string>().HasMaxLength(16);
             entity.Property(rule => rule.UpdatedBy).HasMaxLength(256);
+            entity.Ignore(rule => rule.HasLink);
         });
 
         modelBuilder.Entity<PackageReport>(entity =>
         {
             entity.Property(report => report.Account).HasMaxLength(256);
             entity.Property(report => report.PackageId).HasMaxLength(81);
+            entity.Property(report => report.Kind).HasMaxLength(16);
             entity.Property(report => report.Reason).HasMaxLength(2048);
             entity.Property(report => report.ResolvedBy).HasMaxLength(256);
+            entity.Property(report => report.Note).HasMaxLength(2048);
+            entity.HasIndex(report => report.PackageId);
+        });
+
+        modelBuilder.Entity<Notification>(entity =>
+        {
+            entity.Property(notification => notification.Account).HasMaxLength(256);
+            entity.Property(notification => notification.Kind).HasMaxLength(32);
+            entity.Property(notification => notification.Text).HasMaxLength(512);
+            entity.Property(notification => notification.Link).HasMaxLength(256);
+            entity.HasIndex(notification => new { notification.Account, notification.Id });
+        });
+
+        modelBuilder.Entity<AuditEvent>(entity =>
+        {
+            entity.Property(audit => audit.Actor).HasMaxLength(256);
+            entity.Property(audit => audit.Action).HasMaxLength(32);
+            entity.Property(audit => audit.Target).HasMaxLength(256);
+            entity.Property(audit => audit.Detail).HasMaxLength(1024);
+        });
+
+        modelBuilder.Entity<Block>(entity =>
+        {
+            entity.HasKey(block => block.Account);
+            entity.Property(block => block.Account).HasMaxLength(256);
+            entity.Property(block => block.BlockedBy).HasMaxLength(256);
+            entity.Property(block => block.Reason).HasMaxLength(1024);
         });
     }
 }

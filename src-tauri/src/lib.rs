@@ -6,6 +6,7 @@ mod app_state;
 mod application;
 mod artifact;
 mod catalog;
+mod choices;
 #[cfg(feature = "app")]
 mod cli;
 mod deep_link;
@@ -24,6 +25,8 @@ mod managed_documents;
 pub mod manifest;
 mod marketplace;
 mod mcp;
+#[cfg(feature = "app")]
+mod notify;
 mod parallel;
 mod paths;
 mod planner;
@@ -37,6 +40,11 @@ mod sources;
 pub mod staging;
 mod startup;
 mod tutorial;
+
+/// The window is running, so marketplace news can be shown. A command-line
+/// sync leaves it unread for the window to show later.
+pub(crate) static WINDOW_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// The host preparation report, for the preflight.
 pub(crate) static STARTUP_REPORT: startup::SharedReport = startup::SharedReport::new();
@@ -64,6 +72,8 @@ pub fn run() {
     if let Some(code) = cli::maybe_run() {
         std::process::exit(code);
     }
+    startup::log_to_file();
+    WINDOW_RUNNING.store(true, std::sync::atomic::Ordering::Relaxed);
     let runtime_state = application::RuntimeState::new();
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
@@ -79,6 +89,7 @@ pub fn run() {
     }));
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init());
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_autostart::init(
@@ -119,6 +130,7 @@ pub fn run() {
                         if let Err(error) = window.hide() {
                             eprintln!("Could not hide Agent Plugins in the system tray: {error}");
                         }
+                        crate::tray::explain_first_close(tauri::Manager::app_handle(window));
                     }
                     tauri::WindowEvent::Focused(true) => {
                         application::sync_on_focus(tauri::Manager::app_handle(window));
@@ -138,6 +150,10 @@ pub fn run() {
             ipc::replace_item,
             ipc::set_manual_invocation,
             ipc::uninstall_item,
+            ipc::keep_my_version,
+            ipc::set_held,
+            ipc::set_excluded_apps,
+            ipc::save_connector_settings,
             ipc::plan_bulk_items,
             ipc::run_bulk_items,
             ipc::plan_source_removal,

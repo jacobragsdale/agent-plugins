@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
-/// Marketplace server base URL. A build-time constant: the corporate build
-/// changes only this value, the SPN it implies, and nothing else. The catalog
+/// Marketplace server base URL when no fleet policy names one. The catalog
 /// document lives at `/api/catalog` and namespace archives under
 /// `/api/sources/{namespace}/archive`. Empty disables the marketplace.
 pub(crate) const MARKETPLACE_URL: &str = "https://marketplace.ragsdale.dev";
@@ -45,21 +44,76 @@ impl Locator {
     }
 }
 
-/// Where a person downloads a newer client. A build-time constant like
-/// `MARKETPLACE_URL`; empty means the app cannot offer a download and says so
-/// instead of opening nothing.
-pub(crate) const DOWNLOAD_URL: &str = "";
-
-/// The download site URL, or `None` when this build has none.
-pub(crate) fn download_url() -> Option<&'static str> {
-    let url = DOWNLOAD_URL.trim().trim_end_matches('/');
-    (!url.is_empty()).then_some(url)
+/// A fleet setting IT sets under `Software\Policies\AgentPlugins`, the
+/// machine's value first, then the user's, so one build serves any company.
+#[cfg(windows)]
+pub(crate) fn policy_value<T: winreg::types::FromRegValue>(name: &str) -> Option<T> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER]
+        .into_iter()
+        .find_map(|root| {
+            winreg::RegKey::predef(root)
+                .open_subkey(r"Software\Policies\AgentPlugins")
+                .ok()?
+                .get_value::<T, _>(name)
+                .ok()
+        })
 }
 
-/// The marketplace base URL without a trailing slash, or `None` when disabled.
+fn policy_url(name: &str) -> Option<String> {
+    #[cfg(windows)]
+    let value = policy_value::<String>(name);
+    #[cfg(not(windows))]
+    let value: Option<String> = {
+        let _ = name;
+        None
+    };
+    let value = value?.trim().trim_end_matches('/').to_string();
+    match url::Url::parse(&value) {
+        Ok(url) if url.scheme() == "https" && url.host_str().is_some() => Some(value),
+        _ => {
+            eprintln!("Ignored the {name} policy: {value:?} is not an https address.");
+            None
+        }
+    }
+}
+
+/// A development build can point at a local marketplace with
+/// `AGENT_PLUGINS_MARKETPLACE_URL`; a release build ignores it.
+fn development_url() -> Option<String> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var("AGENT_PLUGINS_MARKETPLACE_URL")
+        .ok()
+        .map(|url| url.trim().trim_end_matches('/').to_string())
+        .filter(|url| !url.is_empty())
+}
+
+/// The marketplace base URL without a trailing slash, or `None` when disabled:
+/// the `MarketplaceUrl` policy, else the built-in address.
 pub(crate) fn marketplace_base_url() -> Option<&'static str> {
-    let url = MARKETPLACE_URL.trim().trim_end_matches('/');
-    (!url.is_empty()).then_some(url)
+    static URL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    URL.get_or_init(|| {
+        development_url()
+            .or_else(|| policy_url("MarketplaceUrl"))
+            .or_else(|| {
+                let url = MARKETPLACE_URL.trim().trim_end_matches('/');
+                (!url.is_empty()).then(|| url.to_string())
+            })
+    })
+    .as_deref()
+}
+
+/// Where a person downloads a newer client: the `DownloadUrl` policy, else the
+/// marketplace's own download section.
+pub(crate) fn download_url() -> Option<&'static str> {
+    static URL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    URL.get_or_init(|| {
+        policy_url("DownloadUrl")
+            .or_else(|| marketplace_base_url().map(|base| format!("{base}/#download")))
+    })
+    .as_deref()
 }
 
 pub(crate) fn default_catalog_locator() -> Result<Option<Locator>, String> {
@@ -109,7 +163,14 @@ pub(crate) fn canonicalize_artifact_url(input: &str) -> Result<String, String> {
     let (scheme, remainder) = input
         .split_once("://")
         .ok_or_else(|| artifact_url_error("Use an https:// URL."))?;
-    if !scheme.eq_ignore_ascii_case("https") {
+    // A development build pointed at a local marketplace reads it over HTTP.
+    let development = scheme.eq_ignore_ascii_case("http")
+        && development_url().is_some_and(|base| {
+            input
+                .to_ascii_lowercase()
+                .starts_with(&format!("{}/", base.to_ascii_lowercase()))
+        });
+    if !scheme.eq_ignore_ascii_case("https") && !development {
         return Err(artifact_url_error(
             "Only https:// URLs are supported. HTTP, including LAN Nexus, is not accepted.",
         ));
@@ -144,7 +205,7 @@ pub(crate) fn canonicalize_artifact_url(input: &str) -> Result<String, String> {
         return Err(artifact_url_error("The URL must include a path."));
     }
     let (host, port) = canonical_host_and_port(authority)?;
-    let mut canonical = format!("https://{host}");
+    let mut canonical = format!("{}://{host}", if development { "http" } else { "https" });
     if let Some(port) = port {
         canonical.push(':');
         canonical.push_str(port);

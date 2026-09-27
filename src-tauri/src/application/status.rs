@@ -19,6 +19,13 @@ pub(super) fn refined_item_status(
     profiles: Option<&[AgentProfile]>,
 ) -> ItemStatus {
     let record = ledger_state.items.get(&item.id);
+    // Someone's own copy is in the way: offer Replace rather than an install
+    // that can only fail.
+    if record.is_none()
+        && full_plan.is_some_and(|plan| crate::executor::blocked_by_unmanaged(ledger_state, plan))
+    {
+        return ItemStatus::Conflict;
+    }
     let selected = record
         .map(|record| crate::planner::selected_component_ids(record, item))
         .unwrap_or_default();
@@ -217,7 +224,6 @@ pub(super) mod tests {
             data: root.join("data"),
             local_data: root.join("local-data"),
             cache: root.join("cache"),
-            onedrive_commercial: None,
         }
     }
 
@@ -278,6 +284,28 @@ pub(super) mod tests {
     pub(in crate::application) fn enable_cursor(paths: &SystemPaths) {
         crate::agent_profiles::set_enabled(paths, crate::agent_profiles::TargetId::Cursor, true)
             .expect("enable");
+    }
+
+    #[test]
+    fn a_folder_someone_else_put_there_offers_replace() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        enable_cursor(&paths);
+        let (_, snapshot) = two_component_snapshot(root.path());
+        let item = snapshot.catalog.items["tools"].clone();
+        let empty = crate::executor::read_ledger(&paths).expect("ledger");
+        let plan = crate::planner::plan(&paths, &snapshot, &item, None, None).expect("plan");
+        assert_eq!(
+            refined_item_status(&paths, &empty, &snapshot, &item, Some(&plan), None),
+            ItemStatus::Available
+        );
+        let theirs = paths.home.join(".agents/skills/skillbook-review");
+        fs::create_dir_all(&theirs).expect("their folder");
+        fs::write(theirs.join("SKILL.md"), "their own skill").expect("their skill");
+        assert_eq!(
+            refined_item_status(&paths, &empty, &snapshot, &item, Some(&plan), None),
+            ItemStatus::Conflict
+        );
     }
 
     #[test]

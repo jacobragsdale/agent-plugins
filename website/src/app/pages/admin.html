@@ -31,6 +31,30 @@
       </div>
     </mat-tab>
 
+    <mat-tab label="Who has it">
+      <ng-template matTabContent>
+        <div class="tab">
+          <app-installs-lookup />
+        </div>
+      </ng-template>
+    </mat-tab>
+
+    <mat-tab label="Audit log">
+      <ng-template matTabContent>
+        <div class="tab">
+          <app-audit-log />
+        </div>
+      </ng-template>
+    </mat-tab>
+
+    <mat-tab label="People">
+      <ng-template matTabContent>
+        <div class="tab">
+          <app-people-admin />
+        </div>
+      </ng-template>
+    </mat-tab>
+
     <mat-tab label="Usage">
       <div class="tab">
         @if (summary.hasValue()) {

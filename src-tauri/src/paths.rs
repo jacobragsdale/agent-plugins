@@ -10,9 +10,6 @@ pub(crate) struct SystemPaths {
     pub(crate) data: PathBuf,
     pub(crate) local_data: PathBuf,
     pub(crate) cache: PathBuf,
-    /// OneDrive for work or school sync root, where Microsoft 365 Copilot
-    /// Cowork reads skills. `None` when no work account is signed in.
-    pub(crate) onedrive_commercial: Option<PathBuf>,
 }
 
 impl SystemPaths {
@@ -24,7 +21,6 @@ impl SystemPaths {
                 data: root.join("data"),
                 local_data: root.join("local-data"),
                 cache: root.join("cache"),
-                onedrive_commercial: Some(root.join("onedrive")),
             });
         }
         Ok(Self {
@@ -38,7 +34,6 @@ impl SystemPaths {
                 .ok_or_else(|| "Could not find your local data directory.".to_string())?,
             cache: dirs::cache_dir()
                 .ok_or_else(|| "Could not find your cache directory.".to_string())?,
-            onedrive_commercial: onedrive_commercial_root(),
         })
     }
 
@@ -101,31 +96,4 @@ impl SystemPaths {
         }
         Ok(path.to_path_buf())
     }
-}
-
-/// The OneDrive sync client publishes the work-account root as
-/// `OneDriveCommercial`; the registry is the fallback for shells that
-/// started before the variable existed.
-pub(crate) fn onedrive_commercial_root() -> Option<PathBuf> {
-    std::env::var_os("OneDriveCommercial")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(onedrive_commercial_root_from_registry)
-}
-
-#[cfg(windows)]
-fn onedrive_commercial_root_from_registry() -> Option<PathBuf> {
-    winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-        .open_subkey(r"Software\Microsoft\OneDrive\Accounts\Business1")
-        .ok()?
-        .get_value::<String, _>("UserFolder")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-#[cfg(not(windows))]
-fn onedrive_commercial_root_from_registry() -> Option<PathBuf> {
-    None
 }

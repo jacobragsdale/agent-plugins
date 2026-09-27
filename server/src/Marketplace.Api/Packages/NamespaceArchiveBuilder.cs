@@ -10,7 +10,8 @@ public sealed record NamespaceSource(string Namespace, string DisplayName, strin
 
 public sealed record NamespacePackage(string PackageId, JsonObject PackageManifest, ReadOnlyMemory<byte> Archive, string RootPrefix);
 
-public sealed record BuiltArchive(byte[] Bytes, string Digest, int PackageCount);
+/// <summary><see cref="Files"/> and <see cref="UncompressedBytes"/> are what the desktop app counts against its limits.</summary>
+public sealed record BuiltArchive(byte[] Bytes, string Digest, int PackageCount, int Files = 0, long UncompressedBytes = 0);
 
 /// <summary>
 /// Merges the latest version of every package in a namespace into one manifest v2 source archive:
@@ -38,17 +39,23 @@ public static class NamespaceArchiveBuilder
         };
 
         using var output = new MemoryStream();
+        var files = 1;
+        long uncompressed;
         using (var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
         {
-            WriteEntry(zip, ArchiveInspector.ManifestFile, Encoding.UTF8.GetBytes(manifest.ToJsonString(ManifestJson) + "\n"), 0);
+            var manifestBytes = Encoding.UTF8.GetBytes(manifest.ToJsonString(ManifestJson) + "\n");
+            WriteEntry(zip, ArchiveInspector.ManifestFile, manifestBytes, 0);
+            uncompressed = manifestBytes.Length;
             foreach (var package in ordered)
             {
-                CopyPackage(zip, package);
+                var (count, size) = CopyPackage(zip, package);
+                files += count;
+                uncompressed += size;
             }
         }
 
         var bytes = output.ToArray();
-        return new BuiltArchive(bytes, Convert.ToHexStringLower(SHA256.HashData(bytes)), ordered.Length);
+        return new BuiltArchive(bytes, Convert.ToHexStringLower(SHA256.HashData(bytes)), ordered.Length, files, uncompressed);
     }
 
     /// <summary>
@@ -116,8 +123,9 @@ public static class NamespaceArchiveBuilder
         return clone;
     }
 
-    private static void CopyPackage(ZipArchive zip, NamespacePackage package)
+    private static (int Files, long Bytes) CopyPackage(ZipArchive zip, NamespacePackage package)
     {
+        var (files, total) = (0, 0L);
         using var stream = new MemoryStream(package.Archive.ToArray(), writable: false);
         using var input = ArchiveInspector.OpenZip(stream);
         foreach (var entry in input.Entries.OrderBy(entry => entry.FullName, StringComparer.Ordinal))
@@ -138,7 +146,11 @@ public static class NamespaceArchiveBuilder
             using var buffer = new MemoryStream();
             content.CopyTo(buffer);
             WriteEntry(zip, $"{package.PackageId}/{relative}", buffer.ToArray(), entry.ExternalAttributes);
+            files++;
+            total += buffer.Length;
         }
+
+        return (files, total);
     }
 
     private static void WriteEntry(ZipArchive zip, string name, byte[] bytes, int externalAttributes)

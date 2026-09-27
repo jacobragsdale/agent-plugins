@@ -16,7 +16,9 @@ public sealed record ClientEventDto(
     string? PackageId,
     string? Version,
     string? FromVersion,
-    string? ToVersion);
+    string? ToVersion,
+    string? Device = null,
+    Dictionary<string, string>? InstalledVersions = null);
 
 public sealed record EventsBatch(ClientEventDto[] Events);
 
@@ -37,6 +39,9 @@ public sealed record ActiveUsers(int Day, int Week, int Month);
 public sealed record AppView(string Version, string Os, DateTime LastSeenAt, string[] Installed);
 
 public sealed record TopPackage(string Id, int InstalledBase);
+
+/// <summary>One PC that last reported a package installed, for the admin's "who has it" list.</summary>
+public sealed record InstallView(string Account, string Device, string? Version, string ClientVersion, DateTime LastSeenAt);
 
 public sealed record AdminSummary(
     ActiveUsers ActiveUsers,
@@ -70,9 +75,12 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
         var accepted = 0;
         var duplicates = 0;
         var problems = new List<string>();
-        Heartbeat? heartbeat = null;
+        var heartbeats = new Dictionary<string, Heartbeat>(StringComparer.Ordinal);
         var pending = new List<ClientEvent>();
         var seen = new HashSet<(string, DateTime, string?)>();
+        var named = batch.Events.Select(dto => dto?.PackageId).OfType<string>().Distinct(StringComparer.Ordinal).ToArray();
+        var known = (await db.Packages.Select(package => package.Namespace + "/" + package.PackageId).Where(id => named.Contains(id)).ToListAsync(cancellationToken))
+            .ToHashSet(StringComparer.Ordinal);
 
         foreach (var dto in batch.Events)
         {
@@ -104,20 +112,25 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
             var agents = Clean(dto.Agents, 16, 32);
             if (dto.Kind == "heartbeat")
             {
+                var installed = Clean(dto.Installed, 2000, 81);
                 var candidate = new Heartbeat
                 {
                     Account = account,
+                    Device = Clip(dto.Device?.Trim(), 120) ?? string.Empty,
                     OccurredAt = occurredAt,
                     ClientVersion = dto.ClientVersion,
                     OsBuild = (dto.OsBuild ?? string.Empty).Length <= 120 ? dto.OsBuild ?? string.Empty : dto.OsBuild![..120],
                     Agents = agents,
-                    Installed = Clean(dto.Installed, 2000, 81),
+                    Installed = installed,
                     ChecksJson = JsonSerializer.Serialize(CleanChecks(dto.Checks)),
+                    InstalledVersionsJson = JsonSerializer.Serialize((dto.InstalledVersions ?? [])
+                        .Where(pair => installed.Contains(pair.Key) && pair.Value is { Length: > 0 and <= 64 })
+                        .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal)),
                     ReceivedAt = received,
                 };
-                if (heartbeat is null || candidate.OccurredAt > heartbeat.OccurredAt)
+                if (!heartbeats.TryGetValue(candidate.Device, out var latest) || candidate.OccurredAt > latest.OccurredAt)
                 {
-                    heartbeat = candidate;
+                    heartbeats[candidate.Device] = candidate;
                 }
 
                 accepted++;
@@ -127,6 +140,12 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
             if (string.IsNullOrWhiteSpace(dto.PackageId) || dto.PackageId.Length > 81 || !dto.PackageId.Contains('/'))
             {
                 problems.Add($"{dto.Kind} has no canonical package id.");
+                continue;
+            }
+
+            if (!known.Contains(dto.PackageId))
+            {
+                problems.Add($"{dto.Kind} names {dto.PackageId}, which the marketplace has never had.");
                 continue;
             }
 
@@ -172,9 +191,9 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
             }
         }
 
-        if (heartbeat is not null)
+        foreach (var heartbeat in heartbeats.Values)
         {
-            var current = await db.Heartbeats.FindAsync([account], cancellationToken);
+            var current = await db.Heartbeats.FindAsync([account, heartbeat.Device], cancellationToken);
             if (current is null)
             {
                 db.Heartbeats.Add(heartbeat);
@@ -187,6 +206,7 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
                 current.Agents = heartbeat.Agents;
                 current.Installed = heartbeat.Installed;
                 current.ChecksJson = heartbeat.ChecksJson;
+                current.InstalledVersionsJson = heartbeat.InstalledVersionsJson;
                 current.ReceivedAt = heartbeat.ReceivedAt;
             }
         }
@@ -195,9 +215,10 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
         return new EventsAccepted(accepted, duplicates, problems.Count, problems.ToArray());
     }
 
+    /// <summary>The account's most recently heard-from desktop app.</summary>
     public async Task<AppView?> AppAsync(string account, CancellationToken cancellationToken)
     {
-        var heartbeat = await db.Heartbeats.AsNoTracking().SingleOrDefaultAsync(candidate => candidate.Account == account, cancellationToken);
+        var heartbeat = await db.Heartbeats.AsNoTracking().Where(candidate => candidate.Account == account).OrderByDescending(candidate => candidate.OccurredAt).FirstOrDefaultAsync(cancellationToken);
         if (heartbeat is null || heartbeat.OccurredAt < timeProvider.GetUtcNow().UtcDateTime - AppWindow)
         {
             return null;
@@ -221,20 +242,24 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
         return new AppView(heartbeat.ClientVersion, heartbeat.OsBuild, heartbeat.OccurredAt, installed.ToArray());
     }
 
+    /// <summary>A package's installs (distinct accounts), installed base, installs by day, and agent mix.</summary>
     public async Task<PackageStats> PackageStatsAsync(string canonicalId, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var since = now.AddDays(-90);
         var installs = await db.Events
             .Where(item => item.Kind == "install" && item.PackageId == canonicalId)
-            .Select(item => new { item.OccurredAt, item.Agents })
+            .Select(item => new { item.Account, item.OccurredAt, item.Agents })
             .ToListAsync(cancellationToken);
         var installedBase = await db.Heartbeats
-            .CountAsync(heartbeat => heartbeat.OccurredAt >= now.AddDays(-30) && heartbeat.Installed.Contains(canonicalId), cancellationToken);
+            .Where(heartbeat => heartbeat.OccurredAt >= now.AddDays(-30) && heartbeat.Installed.Contains(canonicalId))
+            .Select(heartbeat => heartbeat.Account)
+            .Distinct()
+            .CountAsync(cancellationToken);
         var byDay = installs
             .Where(item => item.OccurredAt >= since)
             .GroupBy(item => DateOnly.FromDateTime(item.OccurredAt))
-            .Select(group => new DailyCount(group.Key, group.Count()))
+            .Select(group => new DailyCount(group.Key, group.Select(item => item.Account).Distinct(StringComparer.OrdinalIgnoreCase).Count()))
             .OrderBy(day => day.Day)
             .ToArray();
         var agentMix = installs
@@ -242,7 +267,60 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
             .SelectMany(item => item.Agents)
             .GroupBy(agent => agent, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
-        return new PackageStats(canonicalId, installs.Count, installedBase, byDay, agentMix);
+        return new PackageStats(canonicalId, installs.Select(item => item.Account).Distinct(StringComparer.OrdinalIgnoreCase).Count(), installedBase, byDay, agentMix);
+    }
+
+    /// <summary>Every package's installs (distinct accounts, all time) and installed base (distinct accounts whose PC reported it in the last 30 days).</summary>
+    public async Task<Dictionary<string, (int Installs, int InstalledBase)>> CountsAsync(CancellationToken cancellationToken)
+    {
+        var installs = await db.Events
+            .Where(clientEvent => clientEvent.Kind == "install" && clientEvent.PackageId != null)
+            .Select(clientEvent => new { PackageId = clientEvent.PackageId!, clientEvent.Account })
+            .Distinct()
+            .GroupBy(pair => pair.PackageId)
+            .Select(group => new { PackageId = group.Key, Count = group.Count() })
+            .ToListAsync(cancellationToken);
+        var since = timeProvider.GetUtcNow().UtcDateTime - AppWindow;
+        var installedBase = await db.Heartbeats
+            .Where(heartbeat => heartbeat.OccurredAt >= since)
+            .SelectMany(heartbeat => heartbeat.Installed, (heartbeat, id) => new { PackageId = id, heartbeat.Account })
+            .Distinct()
+            .GroupBy(pair => pair.PackageId)
+            .Select(group => new { PackageId = group.Key, Count = group.Count() })
+            .ToListAsync(cancellationToken);
+        var result = new Dictionary<string, (int, int)>(StringComparer.Ordinal);
+        foreach (var install in installs)
+        {
+            result[install.PackageId] = (install.Count, 0);
+        }
+
+        foreach (var installed in installedBase)
+        {
+            result[installed.PackageId] = (result.GetValueOrDefault(installed.PackageId).Item1, installed.Count);
+        }
+
+        return result;
+    }
+
+    /// <summary>Whether anyone ever installed the package or reported it installed.</summary>
+    public async Task<bool> EverInstalledAsync(string canonicalId, CancellationToken cancellationToken) =>
+        await db.Events.AnyAsync(item => item.Kind == "install" && item.PackageId == canonicalId, cancellationToken)
+        || await db.Heartbeats.AnyAsync(heartbeat => heartbeat.Installed.Contains(canonicalId), cancellationToken);
+
+    /// <summary>Every PC whose latest heartbeat lists the package, most recent first.</summary>
+    public async Task<InstallView[]> InstallsAsync(string canonicalId, CancellationToken cancellationToken)
+    {
+        var heartbeats = await db.Heartbeats.AsNoTracking()
+            .Where(heartbeat => heartbeat.Installed.Contains(canonicalId))
+            .OrderByDescending(heartbeat => heartbeat.OccurredAt)
+            .ToListAsync(cancellationToken);
+        return heartbeats.Select(heartbeat => new InstallView(
+                heartbeat.Account,
+                heartbeat.Device,
+                JsonSerializer.Deserialize<Dictionary<string, string>>(heartbeat.InstalledVersionsJson)?.GetValueOrDefault(canonicalId),
+                heartbeat.ClientVersion,
+                heartbeat.OccurredAt))
+            .ToArray();
     }
 
     public async Task<AdminSummary> AdminSummaryAsync(CancellationToken cancellationToken)
@@ -301,7 +379,7 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
             recent.SelectMany(heartbeat => heartbeat.Agents.Distinct(StringComparer.Ordinal)).GroupBy(agent => agent, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal),
             installedBase,
             preflight,
-            await db.Reports.CountAsync(report => report.ResolvedAt == null, cancellationToken));
+            await db.Reports.CountAsync(report => report.ResolvedAt == null && report.Kind == PackageReport.Problem, cancellationToken));
     }
 
     private static string[] Clean(string[]? values, int maxCount, int maxLength) =>

@@ -119,7 +119,8 @@ export class FileBranch {
             </li>
           }
         </ul>
-        <section class="preview" aria-live="polite">
+        <section class="preview" aria-label="Preview">
+          <p class="visually-hidden" aria-live="polite">{{ selected()?.path }}</p>
           @if (selected(); as file) {
             @if (file.status === "removed") {
               <p class="muted">This file is removed in this suggestion.</p>

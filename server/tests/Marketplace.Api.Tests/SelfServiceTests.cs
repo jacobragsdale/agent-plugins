@@ -85,7 +85,8 @@ public sealed partial class MarketplaceApiTests
             Assert.Equal(HttpStatusCode.Forbidden, (await byName.PostAsync("/api/packages/data-team/etl/versions", form, ct)).StatusCode);
         }
 
-        // Only owners reset the link, and a reset kills the old one.
+        // Joining lets people publish, so only owners hand out or reset the link, and a reset kills the old one.
+        Assert.Equal(HttpStatusCode.Forbidden, (await joiner.PostAsJsonAsync("/api/teams/data-team/invite", new { reset = false }, Json, ct)).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await joiner.PostAsJsonAsync("/api/teams/data-team/invite", new { reset = true }, Json, ct)).StatusCode);
         var fresh = await InviteAsync(founder, "data-team", reset: true);
         Assert.NotEqual(invite, fresh);
@@ -456,21 +457,27 @@ public sealed partial class MarketplaceApiTests
         var ct = TestContext.Current.CancellationToken;
         using var user = factory.ClientFor("TEST\\appuser");
         Assert.Equal(JsonValueKind.Null, (await user.GetFromJsonAsync<JsonElement>("/api/me", Json, ct)).GetProperty("app").ValueKind);
+        foreach (var packageId in new[] { "one", "two" })
+        {
+            using var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("appuser", packageId), "1.0.0");
+            await PublishLiveAsync(user, "appuser", packageId, form);
+        }
+
         var now = DateTimeOffset.UtcNow;
         var batch = new
         {
             events = new object[]
             {
-                new { kind = "heartbeat", occurredAt = now.AddMinutes(-10), clientVersion = "0.2.0", osBuild = "10.0.26100", agents = new[] { "cursor" }, installed = new[] { "x/one" } },
-                new { kind = "install", occurredAt = now.AddMinutes(-5), clientVersion = "0.2.0", packageId = "x/two", agents = new[] { "cursor" } },
-                new { kind = "uninstall", occurredAt = now.AddMinutes(-1), clientVersion = "0.2.0", packageId = "x/one", agents = new[] { "cursor" } },
+                new { kind = "heartbeat", occurredAt = now.AddMinutes(-10), clientVersion = "0.2.0", osBuild = "10.0.26100", agents = new[] { "cursor" }, installed = new[] { "appuser/one" } },
+                new { kind = "install", occurredAt = now.AddMinutes(-5), clientVersion = "0.2.0", packageId = "appuser/two", agents = new[] { "cursor" } },
+                new { kind = "uninstall", occurredAt = now.AddMinutes(-1), clientVersion = "0.2.0", packageId = "appuser/one", agents = new[] { "cursor" } },
             },
         };
         Assert.Equal(HttpStatusCode.Accepted, (await user.PostAsJsonAsync("/api/events", batch, Json, ct)).StatusCode);
         var app = (await user.GetFromJsonAsync<JsonElement>("/api/me", Json, ct)).GetProperty("app");
         Assert.Equal("0.2.0", app.GetProperty("version").GetString());
         Assert.Equal("10.0.26100", app.GetProperty("os").GetString());
-        Assert.Equal(["x/two"], app.GetProperty("installed").EnumerateArray().Select(id => id.GetString()).ToArray());
+        Assert.Equal(["appuser/two"], app.GetProperty("installed").EnumerateArray().Select(id => id.GetString()).ToArray());
 
         using (var scope = factory.Services.CreateScope())
         {

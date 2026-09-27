@@ -1,5 +1,5 @@
 import { NgOptimizedImage } from "@angular/common";
-import { Component, inject } from "@angular/core";
+import { Component, computed, inject } from "@angular/core";
 import { MatButtonModule } from "@angular/material/button";
 import { MatProgressBarModule } from "@angular/material/progress-bar";
 import { RouterLink, RouterLinkActive } from "@angular/router";
@@ -12,6 +12,12 @@ import { Icon } from "./icon";
   imports: [RouterLink, MatButtonModule, Icon],
   template: `
     @if (session.me(); as me) {
+      <a mat-icon-button routerLink="/notifications" class="bell" [attr.aria-label]="bellLabel()">
+        <app-icon name="notifications" />
+        @if (me.unreadNotifications > 0) {
+          <span class="dot" aria-hidden="true">{{ me.unreadNotifications > 99 ? "99+" : me.unreadNotifications }}</span>
+        }
+      </a>
       <a mat-flat-button routerLink="/publish"><app-icon name="add" />Share a skill</a>
       <span class="who" [title]="me.account">{{ me.displayName }}</span>
       @if (session.devSignedIn()) {
@@ -29,6 +35,21 @@ import { Icon } from "./icon";
       color: var(--muted);
       font: var(--mat-sys-label-large);
     }
+    .bell {
+      position: relative;
+    }
+    .dot {
+      position: absolute;
+      top: 2px;
+      right: 0;
+      min-width: 1.1rem;
+      border-radius: 999px;
+      padding: 0 0.25rem;
+      background: var(--mat-sys-error);
+      color: var(--mat-sys-on-error);
+      font: var(--mat-sys-label-small);
+      line-height: 1.1rem;
+    }
     @media (max-width: 720px) {
       .who {
         display: none;
@@ -38,6 +59,10 @@ import { Icon } from "./icon";
 })
 export class Account {
   protected readonly session = inject(Session);
+  protected readonly bellLabel = computed(() => {
+    const unread = this.session.me()?.unreadNotifications ?? 0;
+    return unread === 0 ? "Notifications" : `Notifications, ${String(unread)} unread`;
+  });
 
   protected signOut(): void {
     this.session.signOut();
@@ -58,8 +83,8 @@ export class Account {
         @if (session.me(); as me) {
           <a routerLink="/mine" routerLinkActive="active" ariaCurrentWhenActive="page">
             My skills
-            @if (me.suggestionsWaiting > 0) {
-              <span class="count">{{ me.suggestionsWaiting }}<span class="visually-hidden"> suggestions waiting for you</span></span>
+            @if (me.suggestionsWaiting + me.reportsWaiting > 0) {
+              <span class="count">{{ me.suggestionsWaiting + me.reportsWaiting }}<span class="visually-hidden"> suggestions and reports waiting for you</span></span>
             }
           </a>
           <a routerLink="/teams" routerLinkActive="active" ariaCurrentWhenActive="page">Teams</a>
@@ -68,7 +93,7 @@ export class Account {
           <a routerLink="/admin" routerLinkActive="active" ariaCurrentWhenActive="page">
             Admin
             @if (session.pendingReviews() > 0) {
-              <span class="count">{{ session.pendingReviews() }}<span class="visually-hidden"> waiting for an admin</span></span>
+              <span class="count">{{ session.pendingReviews() }}<span class="visually-hidden"> reviews and reports waiting for an admin</span></span>
             }
           </a>
         }

@@ -1,10 +1,29 @@
-import { useState, type JSX } from "react";
-import { Badge, Button, Card, Heading, Text } from "@radix-ui/themes";
+import { createContext, useContext, useState, type JSX } from "react";
+import { Badge, Button, Card, DropdownMenu, Heading, Text } from "@radix-ui/themes";
 import { toAppError } from "../ipc/client";
 import type { AppError } from "../ipc/client";
 import type { CatalogComponent, CatalogItem } from "../ipc/schemas";
-import { cardDomId, partCounts } from "../lib/marketplace";
+import { cardDomId, listPhrase, partCounts, unusableReason } from "../lib/marketplace";
 import { componentLabel, primaryActionColor, primaryActionLabel, statusColor, statusLabel } from "../lib/status";
+
+/** What a card offers beyond its main button, supplied once by the window rather than through every group. */
+export type CardExtras = Readonly<{
+  /** Opens the package's page in the marketplace portal; null without a marketplace. */
+  onDetails: ((item: CatalogItem) => void) | null;
+  onKeepMine: (item: CatalogItem) => Promise<void>;
+  onForceRemove: (item: CatalogItem, componentId?: string) => Promise<void>;
+  onHold: (item: CatalogItem, held: boolean) => Promise<void>;
+  /** Chooses which apps a connector goes to. */
+  onApps: (item: CatalogItem, componentId: string) => void;
+  /** Fills in settings such as an API key an installed connector needs. */
+  onSettings: (item: CatalogItem) => void;
+}>;
+
+export const CardExtrasContext = createContext<CardExtras | null>(null);
+
+function isInstalled(status: CatalogItem["status"]): boolean {
+  return status === "installed" || status === "updateAvailable" || status === "partiallyInstalled" || status === "modified" || status === "missing";
+}
 
 export function ItemCard({
   item,
@@ -38,6 +57,13 @@ export function ItemCard({
   };
   const expandable = item.components.length > 1;
   const [componentsOpen, setComponentsOpen] = useState(true);
+  const extras = useContext(CardExtrasContext);
+  const unusable = availableButUnusable(item);
+  const run = (task: Promise<void>): void => {
+    task.catch((reason: unknown) => {
+      onError(toAppError(reason));
+    });
+  };
   return (
     <Card className="skill-card" id={anchor ? cardDomId(item.id) : undefined}>
       <div className="skill-card-main">
@@ -49,7 +75,7 @@ export function ItemCard({
             {uniqueKinds(item.components).map((kind) => (
               <KindBadge key={kind} kind={kind} />
             ))}
-            {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
+            <StatusBadges item={item} />
             {item.components.some((component) => component.kind === "skill") ? (
               <ManualInvocationToggle
                 manual={item.manualInvocation}
@@ -64,6 +90,7 @@ export function ItemCard({
           <Text as="p" color="gray" size="2">
             {item.description}
           </Text>
+          <CardNotes item={item} unusable={unusable} extras={extras} />
           {item.marketplace === null ? null : (
             <div className="marketplace-meta">
               <Text color="gray" size="1">
@@ -93,7 +120,7 @@ export function ItemCard({
           <Button
             className="skill-action skill-action-primary"
             color={primaryActionColor(item.status)}
-            disabled={busy || allBusy || protectedItem}
+            disabled={busy || allBusy || protectedItem || unusable !== null}
             loading={busy}
             onClick={() => {
               onChange(item).catch((reason: unknown) => {
@@ -103,6 +130,7 @@ export function ItemCard({
           >
             {packageActionLabel(item)}
           </Button>
+          <MoreMenu item={item} extras={extras} disabled={busy || allBusy} run={run} />
         </div>
       </div>
       {expandable ? (
@@ -125,6 +153,13 @@ export function ItemCard({
                   allBusy={allBusy}
                   protectedItem={protectedItem}
                   manualLocked={manualLocked}
+                  onApps={
+                    extras === null || component.kind !== "mcpServer" || !isInstalled(component.status)
+                      ? null
+                      : () => {
+                          extras.onApps(item, component.id);
+                        }
+                  }
                   onChange={() => onChange(item, component.id)}
                   onManualToggle={() => {
                     changeManual(!component.manualInvocation, component.id);
@@ -137,6 +172,153 @@ export function ItemCard({
         </details>
       ) : null}
     </Card>
+  );
+}
+
+function availableButUnusable(item: CatalogItem): string | null {
+  return item.status === "available" ? unusableReason(item) : null;
+}
+
+function StatusBadges({ item }: Readonly<{ item: CatalogItem }>): JSX.Element {
+  return (
+    <>
+      {item.status === "available" || item.status === "installed" ? null : <Badge color={statusColor(item.status)}>{statusLabel(item.status)}</Badge>}
+      {item.held ? <Badge color="gray">Updates held</Badge> : null}
+    </>
+  );
+}
+
+/** Which of the less common actions apply to `item`. */
+function menuChoices(item: CatalogItem, extras: CardExtras): Readonly<{ details: boolean; soleConnector: string | null; settings: boolean; hold: boolean; modified: boolean }> {
+  const installed = isInstalled(item.status);
+  const [only] = item.components;
+  return {
+    details: extras.onDetails !== null && item.marketplace !== null,
+    soleConnector: item.components.length === 1 && only?.kind === "mcpServer" && installed ? only.id : null,
+    settings: installed && item.connectors.some((connector) => connector.environment.length > 0),
+    hold: installed && item.status !== "modified",
+    modified: item.status === "modified"
+  };
+}
+
+/** What stands between the person and using the item: no app here can take it, a missing program, or a setting to fill in. */
+function CardNotes({ item, unusable, extras }: Readonly<{ item: CatalogItem; unusable: string | null; extras: CardExtras | null }>): JSX.Element {
+  const installed = isInstalled(item.status);
+  const missingSettings = installed ? [...new Set(item.connectors.flatMap((connector) => connector.missingEnvironment))] : [];
+  const missingPrograms = installed ? [...new Set(item.connectors.flatMap((connector) => (connector.missingProgram === null ? [] : [connector.missingProgram])))] : [];
+  return (
+    <>
+      {unusable === null ? null : (
+        <Text as="p" color="amber" size="2">
+          Can't be added here: {unusable}
+        </Text>
+      )}
+      {missingPrograms.length === 0 ? null : (
+        <Text as="p" color="amber" size="2">
+          Needs {listPhrase(missingPrograms)}, which isn't on this computer. Install it, or ask IT to, before the connector will work.
+        </Text>
+      )}
+      {missingSettings.length === 0 || extras === null ? null : (
+        <div className="skill-title-row">
+          <Text color="amber" size="2">
+            Needs {listPhrase(missingSettings)} before it works.
+          </Text>
+          <Button
+            size="1"
+            variant="soft"
+            color="amber"
+            onClick={() => {
+              extras.onSettings(item);
+            }}
+          >
+            Set…
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** The card's less common actions, kept behind one button so the main one stays obvious. */
+function MoreMenu({ item, extras, disabled, run }: Readonly<{ item: CatalogItem; extras: CardExtras | null; disabled: boolean; run: (task: Promise<void>) => void }>): JSX.Element | null {
+  if (extras === null) {
+    return null;
+  }
+  const choices = menuChoices(item, extras);
+  const { soleConnector } = choices;
+  const nothing = !choices.details && soleConnector === null && !choices.settings && !choices.hold && !choices.modified;
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger disabled={disabled}>
+        <Button variant="soft" color="gray" aria-label={`More for ${item.name}`}>
+          More
+          <DropdownMenu.TriggerIcon />
+        </Button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content>
+        {choices.details ? (
+          <DropdownMenu.Item
+            onSelect={() => {
+              extras.onDetails?.(item);
+            }}
+          >
+            Details and what changed
+          </DropdownMenu.Item>
+        ) : null}
+        {soleConnector === null ? null : (
+          <DropdownMenu.Item
+            onSelect={() => {
+              extras.onApps(item, soleConnector);
+            }}
+          >
+            Choose apps…
+          </DropdownMenu.Item>
+        )}
+        {choices.settings ? (
+          <DropdownMenu.Item
+            onSelect={() => {
+              extras.onSettings(item);
+            }}
+          >
+            Connector settings…
+          </DropdownMenu.Item>
+        ) : null}
+        {choices.hold ? (
+          <DropdownMenu.Item
+            onSelect={() => {
+              run(extras.onHold(item, !item.held));
+            }}
+          >
+            {item.held ? "Resume automatic updates" : "Hold updates"}
+          </DropdownMenu.Item>
+        ) : null}
+        {choices.modified ? <ModifiedItems item={item} extras={extras} run={run} /> : null}
+        {nothing ? <DropdownMenu.Item disabled>Nothing else to do</DropdownMenu.Item> : null}
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
+  );
+}
+
+/** A changed copy can be kept as the person's own, or removed with a backup. */
+function ModifiedItems({ item, extras, run }: Readonly<{ item: CatalogItem; extras: CardExtras; run: (task: Promise<void>) => void }>): JSX.Element {
+  return (
+    <>
+      <DropdownMenu.Item
+        onSelect={() => {
+          run(extras.onKeepMine(item));
+        }}
+      >
+        Keep my version…
+      </DropdownMenu.Item>
+      <DropdownMenu.Item
+        color="red"
+        onSelect={() => {
+          run(extras.onForceRemove(item));
+        }}
+      >
+        Remove…
+      </DropdownMenu.Item>
+    </>
   );
 }
 
@@ -201,6 +383,7 @@ function ComponentRow({
   allBusy,
   protectedItem,
   manualLocked,
+  onApps,
   onChange,
   onManualToggle,
   onError
@@ -210,6 +393,7 @@ function ComponentRow({
   allBusy: boolean;
   protectedItem: boolean;
   manualLocked: boolean;
+  onApps: (() => void) | null;
   onChange: () => Promise<void>;
   onManualToggle: () => void;
   onError: (error: AppError) => void;
@@ -229,7 +413,17 @@ function ComponentRow({
         <Text as="p" color="gray" size="2">
           {component.description}
         </Text>
+        {component.excludedApps.length === 0 ? null : (
+          <Text as="p" color="gray" size="1">
+            Kept out of {String(component.excludedApps.length)} app{component.excludedApps.length === 1 ? "" : "s"}.
+          </Text>
+        )}
       </div>
+      {onApps === null ? null : (
+        <Button size="1" variant="soft" color="gray" disabled={busy || allBusy} onClick={onApps}>
+          Apps…
+        </Button>
+      )}
       <Button
         className="skill-action"
         size="1"

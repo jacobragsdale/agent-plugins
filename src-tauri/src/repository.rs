@@ -65,6 +65,11 @@ pub struct ListedSource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 64))]
     pub updated_at: Option<String>,
+    /// Marketplace listing: the archive's current ETag for this caller, so an
+    /// unchanged source is not asked for again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 128))]
+    pub digest: Option<String>,
 }
 
 impl ListedSource {
@@ -206,6 +211,7 @@ impl RepositoryManifest {
                     publisher: source.publisher.clone(),
                     package_count: source.package_count,
                     updated_at: source.updated_at.clone(),
+                    digest: source.digest.clone(),
                 })
             })
             .collect()

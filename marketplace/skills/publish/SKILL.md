@@ -8,7 +8,8 @@ description: Publish a skill or MCP server configuration to the company marketpl
 Agent Plugins ships a command line, `agent-plugins`, that publishes a package
 under the user's own namespace or one of their teams. Authentication is the
 user's Windows logon, so there is nothing to log in to. A published version is
-live at once; there is no review queue. You do the judgment work (description, tags,
+live at once; there is no review queue: people who can see it can find it and
+install it, and PCs that already have it update within about 15 minutes. You do the judgment work (description, tags,
 version, changelog); the CLI does the trust-sensitive work (validation, secret
 scan, upload).
 
@@ -34,10 +35,14 @@ Every command below accepts the full path in place of `agent-plugins`.
 2. **Confirm identity and space.** Run `agent-plugins whoami`. If its `teams`
    line names any teams, ask whether the package is just for the user or for
    one of those teams. Tell the user the namespace it will publish under: the
-   team's, or the `namespace` line. Pass a team as `--namespace <team>`.
-3. **Validate.** Run `agent-plugins validate <path>` when the path holds an
-   `agent-plugins.json`; otherwise skip to the dry run in step 6, which
-   validates the staged package.
+   team's, or the `namespace` line. Pass a team as `--namespace <team>`. Just
+   for the user means `--private`: only they can see it until they share it.
+   A first publish with `--private` is also the way to try a package before
+   anyone else sees it.
+3. **Validate.** Run `agent-plugins validate <path> [--namespace <team>]`. It
+   takes everything `publish` takes, checks it the way the marketplace will,
+   runs the secret scan, and lists which AI apps can use each skill and MCP
+   server. Fix what it reports before going on.
 4. **Improve the listing.** Read `SKILL.md`. The frontmatter `description` is
    what other people's agents use to decide when to trigger the skill, so make
    sure it states _what_ the skill does and _when_ to use it, in one or two
@@ -48,21 +53,30 @@ Every command below accepts the full path in place of `agent-plugins`.
    version (`1.0.0` for a first publish; bump patch for fixes, minor for new
    behavior). Propose up to five lowercase tags that someone would search for.
    Write a one-line changelog.
-6. **Dry run.** Run the publish command without `--yes`; it prints the
-   package, file count, size, tags, and changelog, then waits for confirmation.
-   Answer `n`, show the summary to the user, and ask them to confirm.
-7. **Publish.** Run with `--yes`:
+6. **Dry run.** Run the publish command with `--dry-run`. The marketplace
+   checks everything, including the version number, and lists the files that
+   are new, changed, or removed compared with the live version; nothing is
+   published. Show the result to the user and ask them to confirm.
+7. **Publish.** Run the same command with `--yes` instead of `--dry-run`:
 
    ```
-   agent-plugins publish <path> [--namespace <team>] --version <semver> --tags <a,b,c> --changelog "<text>" --yes
+   agent-plugins publish <path> [--namespace <team>] [--private] --version <semver> --tags <a,b,c> --changelog "<text>" --yes
    ```
 
-   Report the printed marketplace URL. `published` means everyone who can see
-   the space has it now. For an MCP server that everyone can see, the CLI adds
-   that others see it once an admin approves it; the user's team has it at
-   once. If the CLI refuses because of a secret or a validation error, show
-   the message and fix the cause with the user; never work around the secret
-   scan.
+   Report the printed marketplace URL and any `warning:` lines. `published`
+   means people who can see it can find it and install it now, and PCs that
+   already have it update within about 15 minutes. For an MCP server that
+   everyone can see, the CLI adds that others see it once an admin approves
+   it; the user's team has it at once. If the version is taken or lower than
+   the live one, use the version the error suggests. If the command timed out,
+   run it again: it says when that version is already published. If the CLI
+   refuses because of a secret or a validation error, show the message and fix
+   the cause with the user; never work around the secret scan.
+
+8. **Check on it later.** `agent-plugins status <ns>/<package>` shows the live
+   version, every version, the MCP review state, and how many people use it.
+   If a version turns out bad, `agent-plugins withdraw <ns>/<package> <version>`
+   takes it back; PCs move to the newest version left at their next check.
 
 ## Improving someone else's package
 

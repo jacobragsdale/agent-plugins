@@ -64,7 +64,7 @@ export class Session {
   });
   public readonly isAdmin = computed(() => this.me()?.admin === true);
   public readonly devSignedIn = computed(() => this.devUser.account() !== null);
-  /** MCP servers waiting for an admin before everyone can see them; a badge on the Admin link. */
+  /** MCP servers waiting for an admin before everyone can see them, plus open reports; a badge on the Admin link. */
   public readonly pendingReviews = signal(0);
 
   private readonly api = inject(Api);
@@ -126,7 +126,8 @@ export class Session {
     }
 
     try {
-      this.pendingReviews.set((await this.api.reviews()).length);
+      const [reviews, summary] = await Promise.all([this.api.reviews(), this.api.summary()]);
+      this.pendingReviews.set(reviews.length + summary.openReports);
     } catch {
       // The badge is a convenience; the admin page reports its own errors.
     }

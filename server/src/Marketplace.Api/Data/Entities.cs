@@ -91,10 +91,16 @@ public sealed class Package
 
     public string? RevokedBy { get; set; }
 
-    /// <summary>An admin let the public see this package's MCP server. Later versions keep it.</summary>
+    /// <summary>An admin revoked it, so only an admin may restore it.</summary>
+    public bool RevokedByAdmin { get; set; }
+
+    /// <summary>An admin let the public see this package's MCP server. Later versions keep it while <see cref="McpApprovedSpec"/> matches.</summary>
     public string? McpApprovedBy { get; set; }
 
     public DateTime? McpApprovedAt { get; set; }
+
+    /// <summary>What the approved MCP servers launch (<c>McpServerSummary.LaunchSpec</c>); a version that launches anything else waits again.</summary>
+    public string? McpApprovedSpec { get; set; }
 
     /// <summary>Why an admin kept the MCP server from the public; the next publish clears it.</summary>
     public string? McpDeclineNote { get; set; }
@@ -136,6 +142,14 @@ public sealed class PackageVersion
     public string? Changelog { get; set; }
 
     public bool Yanked { get; set; }
+
+    /// <summary>What each MCP server in the version launches, as a JSON array of <c>McpServerSummary</c>; null before summaries were kept.</summary>
+    public string? McpServersJson { get; set; }
+
+    /// <summary>An admin deleted the stored archive (a leaked secret, say). The row stays so the number is never reused.</summary>
+    public DateTime? PurgedAt { get; set; }
+
+    public string? PurgedBy { get; set; }
 }
 
 /// <summary>The generated source archive a client downloads for one namespace.</summary>
@@ -175,10 +189,12 @@ public sealed class ClientEvent
     public DateTime ReceivedAt { get; set; }
 }
 
-/// <summary>The latest heartbeat per account.</summary>
+/// <summary>The latest heartbeat per account and PC. <see cref="Device"/> is empty for apps that do not send one.</summary>
 public sealed class Heartbeat
 {
     public required string Account { get; set; }
+
+    public string Device { get; set; } = string.Empty;
 
     public DateTime OccurredAt { get; set; }
 
@@ -192,6 +208,9 @@ public sealed class Heartbeat
 
     /// <summary>Preflight check statuses as a JSON object of id to status.</summary>
     public required string ChecksJson { get; set; }
+
+    /// <summary>The installed version of each package, as a JSON object of canonical id to version.</summary>
+    public string InstalledVersionsJson { get; set; } = "{}";
 
     public DateTime ReceivedAt { get; set; }
 }
@@ -216,6 +235,9 @@ public sealed class AccessRule
     public required string UpdatedBy { get; set; }
 
     public DateTime UpdatedAt { get; set; }
+
+    /// <summary>Not stored: a share link exists for the target, set by <c>AccessService.RulesAsync</c>.</summary>
+    public bool HasLink { get; set; }
 }
 
 /// <summary>A namespace is public or private; a package or bundle can also follow its namespace.</summary>
@@ -296,13 +318,19 @@ public sealed class Bundle
     public string CanonicalId => $"{Namespace}/{BundleId}";
 }
 
+/// <summary>A problem (owners and admins see it) or feedback (owners only) about a package.</summary>
 public sealed class PackageReport
 {
+    public const string Problem = "problem";
+    public const string Feedback = "feedback";
+
     public long Id { get; set; }
 
     public required string Account { get; set; }
 
     public required string PackageId { get; set; }
+
+    public string Kind { get; set; } = Problem;
 
     public required string Reason { get; set; }
 
@@ -311,4 +339,55 @@ public sealed class PackageReport
     public DateTime? ResolvedAt { get; set; }
 
     public string? ResolvedBy { get; set; }
+
+    /// <summary>What whoever resolved it told the reporter.</summary>
+    public string? Note { get; set; }
+}
+
+/// <summary>Something one account should hear about, shown in the portal and as a desktop notification.</summary>
+public sealed class Notification
+{
+    public long Id { get; set; }
+
+    /// <summary>A full account, or a bare username (a team member entry) that matches it in any domain.</summary>
+    public required string Account { get; set; }
+
+    public required string Kind { get; set; }
+
+    public required string Text { get; set; }
+
+    /// <summary>A portal path such as <c>/p/ns/id</c>, or null.</summary>
+    public string? Link { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime? ReadAt { get; set; }
+}
+
+/// <summary>Who changed what: every mutation an owner or admin makes. Append-only.</summary>
+public sealed class AuditEvent
+{
+    public long Id { get; set; }
+
+    public DateTime At { get; set; }
+
+    public required string Actor { get; set; }
+
+    public required string Action { get; set; }
+
+    public required string Target { get; set; }
+
+    public string? Detail { get; set; }
+}
+
+/// <summary>An account an admin stopped from changing anything; its personal namespace is hidden.</summary>
+public sealed class Block
+{
+    public required string Account { get; set; }
+
+    public required string BlockedBy { get; set; }
+
+    public DateTime BlockedAt { get; set; }
+
+    public string? Reason { get; set; }
 }

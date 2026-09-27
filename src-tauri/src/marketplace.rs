@@ -22,6 +22,8 @@ pub(crate) const DEV_USER_ENV: &str = "AGENT_PLUGINS_DEV_USER";
 /// so team rules can be exercised where there is no domain.
 pub(crate) const DEV_GROUPS_ENV: &str = "AGENT_PLUGINS_DEV_GROUPS";
 const INDEX_CACHE_FILE: &str = "marketplace-index.json";
+/// The index's ETag, so an unchanged index costs the server a 304.
+const INDEX_ETAG_FILE: &str = "marketplace-index.etag";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// A failed request is tried at most this many more times.
@@ -66,6 +68,61 @@ pub(crate) struct Me {
     /// Suggestions on the caller's packages that wait for their answer.
     #[serde(default)]
     pub(crate) suggestions_waiting: u64,
+    /// Open reports and feedback on the caller's packages.
+    #[serde(default)]
+    pub(crate) reports_waiting: u64,
+    #[serde(default)]
+    pub(crate) unread_notifications: u64,
+}
+
+/// Something the marketplace tells a person: a suggestion waiting, a
+/// connector approved, a report answered.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Notification {
+    pub(crate) id: u64,
+    #[serde(default)]
+    pub(crate) kind: String,
+    pub(crate) text: String,
+    /// A portal path such as `/p/ns/id`.
+    #[serde(default)]
+    pub(crate) link: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NotificationPage {
+    #[serde(default)]
+    items: Vec<Notification>,
+}
+
+const NOTIFICATIONS_SEEN_FILE: &str = "notifications-seen";
+
+/// Marketplace news newer than what this PC already showed. The first look
+/// only remembers where the news stands, so nobody gets a backlog at once.
+pub(crate) fn new_notifications(cache_base: &Path) -> Result<Vec<Notification>, String> {
+    let seen_file = cache_base.join(NOTIFICATIONS_SEEN_FILE);
+    let seen = std::fs::read_to_string(&seen_file)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok());
+    let path = match seen {
+        Some(seen) => format!("notifications?after={seen}&limit=50"),
+        None => "notifications?limit=1".to_string(),
+    };
+    let page = api_json::<NotificationPage>(reqwest::Method::GET, &path, None)?;
+    let newest = page
+        .items
+        .iter()
+        .map(|item| item.id)
+        .max()
+        .or(seen)
+        .unwrap_or(0);
+    let _ = std::fs::create_dir_all(cache_base);
+    let _ = crate::fs_retry::replace_file(&seen_file, newest.to_string().as_bytes());
+    Ok(if seen.is_some() {
+        page.items
+    } else {
+        Vec::new()
+    })
 }
 
 /// A team the caller belongs to, as `/api/me` lists it.
@@ -111,6 +168,12 @@ pub(crate) struct IndexPackage {
     /// The caller sees it only because it was shared with them.
     #[serde(default)]
     pub(crate) shared_with_you: bool,
+    /// What the live version changed, in its publisher's words.
+    #[serde(default)]
+    pub(crate) changelog: Option<String>,
+    /// Whether an admin let everyone see its MCP server; `None` without one.
+    #[serde(default)]
+    pub(crate) mcp_approved: Option<bool>,
 }
 
 /// A named list of packages that install together, from the index.
@@ -187,6 +250,7 @@ pub(crate) fn auth_mode() -> AuthMode {
     let identity = host_identity::current();
     match identity.join {
         JoinState::Domain(domain) => AuthMode::Negotiate(domain),
+        JoinState::Cloud => AuthMode::Negotiate("Microsoft Entra ID".to_string()),
         JoinState::Workgroup | JoinState::NotApplicable => AuthMode::DevHeader(identity.account),
     }
 }
@@ -380,31 +444,68 @@ pub(crate) fn fetch_me() -> Result<Me, String> {
 }
 
 pub(crate) fn fetch_index() -> Result<Index, String> {
+    fetch_index_since(None)?
+        .map(|(index, _)| index)
+        .ok_or_else(|| "The marketplace index did not change.".to_string())
+}
+
+/// The index, or `None` when it still has the ETag `since`, with its new ETag.
+fn fetch_index_since(since: Option<&str>) -> Result<Option<(Index, Option<String>)>, String> {
     let url = format!("{}/api/index", base_url()?);
     let client = client()?;
-    let response = send(&url, || authorize(client.get(&url), &url))?;
+    let response = send(&url, || {
+        let request = authorize(client.get(&url), &url)?;
+        Ok(match since {
+            Some(etag) => request.header(reqwest::header::IF_NONE_MATCH, etag),
+            None => request,
+        })
+    })?;
+    if response.status() == StatusCode::NOT_MODIFIED {
+        return Ok(None);
+    }
     if !response.status().is_success() {
         return Err(failure(&url, response));
     }
-    response
+    let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let index = response
         .json::<Index>()
-        .map_err(|error| format!("{url} returned an unreadable index: {error}"))
+        .map_err(|error| format!("{url} returned an unreadable index: {error}"))?;
+    Ok(Some((index, etag)))
 }
 
 /// Fetches the index and caches it; falls back to the cached copy when the
-/// server is unreachable. Returns `None` when neither is available.
+/// server is unreachable or says it has not changed. Returns `None` when
+/// neither is available.
 pub(crate) fn index_with_cache(cache_base: &Path) -> Option<Index> {
-    match fetch_index() {
-        Ok(index) => {
+    let cached = read_cached_index(cache_base);
+    let etag = cached
+        .as_ref()
+        .and_then(|_| std::fs::read_to_string(cache_base.join(INDEX_ETAG_FILE)).ok());
+    match fetch_index_since(etag.as_deref().map(str::trim)) {
+        Ok(Some((index, etag))) => {
             if let Ok(json) = serde_json::to_vec(&index) {
                 let _ = std::fs::create_dir_all(cache_base);
                 let _ = crate::fs_retry::replace_file(&cache_base.join(INDEX_CACHE_FILE), &json);
+                let etag_file = cache_base.join(INDEX_ETAG_FILE);
+                match etag {
+                    Some(etag) => {
+                        let _ = crate::fs_retry::replace_file(&etag_file, etag.as_bytes());
+                    }
+                    None => {
+                        let _ = std::fs::remove_file(etag_file);
+                    }
+                }
             }
             Some(index)
         }
+        Ok(None) => cached,
         Err(error) => {
             eprintln!("Marketplace index unavailable, using the cached copy: {error}");
-            read_cached_index(cache_base)
+            cached
         }
     }
 }
@@ -531,6 +632,12 @@ pub(crate) struct ClientEvent {
     pub(crate) from_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) to_version: Option<String>,
+    /// This computer's name, so one person's laptop and desktop count apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) device: Option<String>,
+    /// The version of each installed package that is up to date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) installed_versions: Option<BTreeMap<String, String>>,
 }
 
 impl ClientEvent {
@@ -547,18 +654,23 @@ impl ClientEvent {
             version: None,
             from_version: None,
             to_version: None,
+            device: None,
+            installed_versions: None,
         }
     }
 
     pub(crate) fn heartbeat(
         agents: Vec<String>,
         installed: Vec<String>,
+        installed_versions: BTreeMap<String, String>,
         checks: BTreeMap<String, String>,
     ) -> Self {
         let mut event = Self::base("heartbeat", agents);
         event.os_build = Some(os_build());
         event.installed = Some(installed);
+        event.installed_versions = Some(installed_versions);
         event.checks = Some(checks);
+        event.device = device_name();
         event
     }
 
@@ -834,6 +946,16 @@ pub(crate) fn os_build() -> String {
     }
 }
 
+/// This computer's name, as Windows or the host names it.
+fn device_name() -> Option<String> {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
 pub(crate) fn epoch_seconds_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1024,7 +1146,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("dir");
         let outbox = dir.path().join(OUTBOX_FILE);
         let offline = |_: &[ClientEvent]| Err("offline".to_string());
-        let heartbeat = || ClientEvent::heartbeat(Vec::new(), Vec::new(), BTreeMap::new());
+        let heartbeat =
+            || ClientEvent::heartbeat(Vec::new(), Vec::new(), BTreeMap::new(), BTreeMap::new());
         deliver_with_outbox(
             &outbox,
             vec![

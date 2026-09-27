@@ -1,6 +1,7 @@
 import { Component, computed, input } from "@angular/core";
 import { RouterLink } from "@angular/router";
 import type { IndexPackage } from "../api";
+import { worksInNote } from "../format";
 import { AccessBadge } from "./access-badge";
 import { InstallButton } from "./install-button";
 import { LaneBadge } from "./lane-badge";
@@ -23,7 +24,10 @@ import { LaneBadge } from "./lane-badge";
           <span>· {{ item().installedBase }} using it</span>
         }
         @if (hasServer()) {
-          <span class="badge" title="Runs a small program on your PC">MCP server</span>
+          <span class="badge" title="Lets the assistant use a tool or service">MCP server</span>
+        }
+        @if (note(); as missing) {
+          <span class="badge">{{ missing }}</span>
         }
       </div>
       @if (install()) {
@@ -100,6 +104,7 @@ export class PackageCard {
 
   protected readonly link = computed(() => ["/p", this.item().namespace, this.item().packageId]);
   protected readonly hasServer = computed(() => this.item().componentKinds.includes("mcpServer"));
+  protected readonly note = computed(() => worksInNote(this.item().componentKinds, this.item().mcpTransports));
 }
 
 /** "Skill", "MCP server", or "Skill + MCP server", in words non-developers know. */

@@ -9,6 +9,9 @@
 pub(crate) enum JoinState {
     /// Joined to an Active Directory domain with the given name.
     Domain(String),
+    /// Joined only to Microsoft Entra ID (Azure AD). Windows can still get
+    /// Kerberos tickets for on-premises services through cloud Kerberos trust.
+    Cloud,
     /// A workgroup or standalone machine.
     Workgroup,
     /// Not a Windows host, so the question does not apply.
@@ -166,6 +169,14 @@ mod windows {
         (ok != 0 && !written.is_empty()).then(|| String::from_utf16_lossy(written))
     }
 
+    /// Windows records an Entra ID join under `CloudDomainJoin\JoinInfo`,
+    /// one subkey per tenant.
+    fn entra_joined() -> bool {
+        winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+            .open_subkey(r"SYSTEM\CurrentControlSet\Control\CloudDomainJoin\JoinInfo")
+            .is_ok_and(|key| key.enum_keys().flatten().next().is_some())
+    }
+
     pub(super) fn join_state() -> JoinState {
         let mut name: *mut u16 = ptr::null_mut();
         let mut status: i32 = 0;
@@ -194,6 +205,8 @@ mod windows {
         };
         if status == NetSetupDomainName {
             JoinState::Domain(domain)
+        } else if entra_joined() {
+            JoinState::Cloud
         } else {
             JoinState::Workgroup
         }

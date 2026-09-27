@@ -1,32 +1,48 @@
-import { Component, computed, inject, input, linkedSignal, resource, signal } from "@angular/core";
+import { Component, computed, effect, inject, input, linkedSignal, resource, signal, untracked } from "@angular/core";
 import { MatButtonModule } from "@angular/material/button";
+import { MatButtonToggleModule } from "@angular/material/button-toggle";
 import { MatFormFieldModule } from "@angular/material/form-field";
 import { MatInputModule } from "@angular/material/input";
 import { MatProgressBarModule } from "@angular/material/progress-bar";
-import { MatRadioModule } from "@angular/material/radio";
 import { MatSnackBar } from "@angular/material/snack-bar";
 import { Router, RouterLink } from "@angular/router";
-import type { PublishForm } from "../api";
-import { Api, ApiError } from "../api";
+import type { PublishForm, Visibility } from "../api";
+import { Api, ApiError, archiveUrl, versionFiles } from "../api";
 import type { Bump } from "../format";
-import { idPattern, nextVersion, slugify } from "../format";
+import { idPattern, nextVersion, packageIdFor, parseSkillMd, skillMd, slugify } from "../format";
 import { Session } from "../session";
 import { Icon } from "../shared/icon";
 import { runTask } from "../shared/tasks";
 import type { Picked } from "./publish-parts";
-import { pickedArchive, Problem, UploadPicker, VersionFields } from "./publish-parts";
+import { describeUpload, FileChanges, pickedArchive, Problem, PublishTarget, SkillEditor, UploadPicker, VersionFields } from "./publish-parts";
 
 type Mode = "new" | "upload" | "suggest";
 
 const headings: Readonly<Record<Mode, readonly [string, string]>> = {
-  new: ["Share a skill", "Upload a skill folder or zip. You choose who can install it."],
+  new: ["Share a skill", "Write it here, or upload a skill folder or zip. You choose who can install it."],
   upload: ["New version", "The files you upload replace the current version when you publish."],
   suggest: ["Suggest a change", "Upload your improved files. The owners decide whether to publish them."]
 };
 
+type Source = "write" | "upload";
+
 @Component({
   selector: "app-publish",
-  imports: [RouterLink, MatButtonModule, MatFormFieldModule, MatInputModule, MatProgressBarModule, MatRadioModule, Icon, UploadPicker, VersionFields, Problem],
+  imports: [
+    RouterLink,
+    MatButtonModule,
+    MatButtonToggleModule,
+    MatFormFieldModule,
+    MatInputModule,
+    MatProgressBarModule,
+    Icon,
+    UploadPicker,
+    SkillEditor,
+    FileChanges,
+    PublishTarget,
+    VersionFields,
+    Problem
+  ],
   templateUrl: "./publish.html",
   styleUrl: "./publish.scss"
 })
@@ -36,6 +52,8 @@ export class PublishPage {
   public readonly pkg = input<string>();
   /** The space to publish to, preselected when a team page sent the person here. */
   public readonly to = input<string>();
+  /** `true` opens a new version in the editor, filled in from the live SKILL.md. */
+  public readonly edit = input<string>();
 
   protected readonly session = inject(Session);
   private readonly api = inject(Api);
@@ -55,6 +73,11 @@ export class PublishPage {
   });
 
   protected readonly space = linkedSignal(() => this.ns() ?? this.to() ?? this.session.me()?.namespace ?? "");
+  protected readonly source = linkedSignal<Source>(() => (this.edit() === "true" ? "write" : this.mode() === "new" ? "write" : "upload"));
+  /** A personal space starts private, so a first try reaches nobody by surprise; a team follows its own setting. */
+  protected readonly visibility = linkedSignal<Visibility>(() => (this.space() === this.session.me()?.namespace ? "private" : "inherit"));
+  protected readonly skillDescription = signal("");
+  protected readonly skillBody = signal("");
   protected readonly idOverride = signal<string | null>(null);
   protected readonly bump = signal<Bump>("patch");
   protected readonly changelog = signal("");
@@ -66,7 +89,12 @@ export class PublishPage {
   protected readonly submitting = signal(false);
   protected readonly problem = signal<ApiError | null>(null);
 
-  protected readonly spaces = computed(() => (this.mine.value()?.spaces ?? []).map((space) => ({ namespace: space.namespace, label: space.lane === "personal" ? "Just me" : space.displayName })));
+  protected readonly spaces = computed(() =>
+    (this.mine.value()?.spaces ?? []).map((space) => ({
+      namespace: space.namespace,
+      label: `${space.lane === "personal" ? "My space" : space.displayName} · ${space.visibility === "private" ? "private" : "everyone can see it"}`
+    }))
+  );
   protected readonly suggesting = computed(() => this.mode() === "suggest");
 
   protected readonly hasTeam = computed(() => this.mine.value()?.spaces.some((space) => space.lane === "team") === true);
@@ -77,7 +105,25 @@ export class PublishPage {
   });
 
   protected readonly lead = computed(() => headings[this.mode()][1]);
-  protected readonly packageId = computed(() => this.pkg() ?? this.idOverride() ?? slugify(this.title()));
+  protected readonly packageId = computed(() => this.pkg() ?? this.idOverride() ?? packageIdFor(this.title(), this.space()));
+  /** Where the suggester can get the files they are improving. */
+  protected readonly currentFiles = computed(() => {
+    const live = this.existing.value()?.liveVersion;
+    return live === null || live === undefined ? null : archiveUrl(this.space(), this.packageId(), live);
+  });
+
+  /** The live SKILL.md, read once to fill in the editor for a new version. */
+  private readonly liveSkill = resource({
+    params: () => {
+      const detail = this.existing.value();
+      const live = detail?.liveVersion ?? null;
+      return this.edit() === "true" && detail !== undefined && live !== null ? { files: versionFiles(detail.namespace, detail.packageId, live) } : undefined;
+    },
+    loader: async ({ params }) => {
+      const path = (await this.api.files(params.files)).find((file) => file.path.endsWith("SKILL.md"))?.path;
+      return path === undefined ? null : parseSkillMd(await this.api.fileText(params.files, path));
+    }
+  });
   protected readonly version = computed(() => {
     const detail = this.existing.value();
     return detail === undefined
@@ -94,10 +140,44 @@ export class PublishPage {
       return `${this.spaceLabel()} already has a package called “${this.packageId()}”. Pick another name, or publish a new version of that one from My skills.`;
     }
 
-    return this.mode() === "new" && this.uploadTitle().trim().length > 0 && !idPattern.test(this.packageId())
-      ? "The package ID can only use lowercase letters, digits, and single hyphens. Set one under Technical details."
+    if (this.mode() !== "new" || this.uploadTitle().trim().length === 0) {
+      return null;
+    }
+
+    if (!idPattern.test(this.packageId())) {
+      return "The package ID can only use lowercase letters, digits, and single hyphens. Set one under Technical details.";
+    }
+
+    // Installed skills are named <space>-<id>, which must fit in 64 characters.
+    return this.packageId().length > 63 - this.space().length
+      ? `The package ID can be at most ${String(63 - this.space().length)} characters in this space. Shorten it under Technical details.`
       : null;
   });
+
+  /** What will be sent: the written skill as one SKILL.md, or the picked files. */
+  protected readonly files = computed<readonly Picked[]>(() => {
+    if (this.source() === "upload") {
+      return this.picked();
+    }
+
+    const description = this.skillDescription().trim();
+    const body = this.skillBody().trim();
+    if (description.length === 0 || body.length === 0) {
+      return [];
+    }
+
+    const text = skillMd({ name: slugify(this.packageId()), description, body });
+    return [{ path: "SKILL.md", file: new File([text], "SKILL.md", { type: "text/markdown" }) }];
+  });
+
+  /** For a new version: what changes against the live one, checked on the server without publishing. */
+  protected readonly check = resource({
+    params: () => (this.mode() === "upload" && this.source() === "upload" && this.files().length > 0 && this.existing.hasValue() ? { files: this.files(), version: this.version() } : undefined),
+    loader: ({ params }) => this.api.checkPublish(this.space(), this.packageId(), this.formFor(params.files, params.version))
+  });
+
+  protected readonly checked = computed(() => (this.check.hasValue() ? this.check.value() : null));
+  protected readonly checkProblem = computed(() => (this.check.error() === undefined ? null : ApiError.from(this.check.error())));
 
   /** A failed publish, or the package a new version is for failing to load. */
   protected readonly shownProblem = computed(() => this.problem() ?? (this.existing.error() === undefined ? null : ApiError.from(this.existing.error())));
@@ -115,17 +195,30 @@ export class PublishPage {
   protected readonly ready = computed(
     () =>
       !this.submitting() &&
-      idPattern.test(this.packageId()) &&
-      !this.taken() &&
+      this.idProblem() === null &&
       this.space() !== "" &&
-      this.picked().length > 0 &&
+      this.files().length > 0 &&
+      describeUpload(this.files())?.usable === true &&
       (this.mode() === "new" ? this.uploadTitle().trim().length > 0 : this.existing.hasValue()) &&
       (!this.suggesting() || this.message().trim().length > 0)
   );
 
-  protected setSpace(value: unknown): void {
-    if (typeof value === "string") {
-      this.space.set(value);
+  constructor() {
+    // Opening the editor on a new version starts from the live SKILL.md.
+    effect(() => {
+      const skill = this.liveSkill.value() ?? null;
+      if (skill !== null) {
+        untracked(() => {
+          this.skillDescription.set(skill.description);
+          this.skillBody.set(skill.body);
+        });
+      }
+    });
+  }
+
+  protected setSource(value: unknown): void {
+    if (value === "write" || value === "upload") {
+      this.source.set(value);
     }
   }
 
@@ -158,8 +251,9 @@ export class PublishPage {
       const published = await this.api.publish(ns, packageId, this.form());
       const message = published.waitingForPublicReview
         ? `Published version ${published.version}. You and the people you share it with can use it now; everyone else sees it once an admin checks its MCP server.`
-        : `Published version ${published.version}. It's live now.`;
-      this.snackBar.open(message, undefined, { duration: 8000 });
+        : `Published version ${published.version}. Install it now from its page; PCs that already have it get it within about 15 minutes.`;
+      // A warning stays until it is dismissed.
+      this.snackBar.open([message, ...published.warnings].join(" "), "OK", published.warnings.length > 0 ? {} : { duration: 8000 });
       await this.router.navigate(["/p", ns, packageId]);
     } catch (error) {
       this.problem.set(ApiError.from(error));
@@ -168,23 +262,27 @@ export class PublishPage {
     }
   }
 
-  /** A zip goes as an archive; anything else as files with paths. New versions keep the listing. */
   private form(): PublishForm {
-    const picked = this.picked();
+    return this.formFor(this.files(), this.version());
+  }
+
+  /**
+   * A zip goes as an archive; anything else as files with paths. A new version keeps the listing's
+   * name, and its description follows the new SKILL.md; only a new package chooses who can install it.
+   */
+  private formFor(picked: readonly Picked[], version: string): PublishForm {
     const archive = pickedArchive(picked);
-    const files = archive === null ? picked : [];
-    const detail = this.existing.value();
     return {
-      version: this.version(),
+      version,
       changelog: this.changelog().trim(),
       tags: this.tags()
         .split(",")
         .map(slugify)
         .filter((tag) => tag.length > 0),
-      files,
+      files: archive === null ? picked : [],
       ...(archive === null ? {} : { archive }),
       name: this.title().trim(),
-      ...(detail === undefined ? {} : { description: detail.description })
+      ...(this.mode() === "new" ? { visibility: this.visibility() } : {})
     };
   }
 }

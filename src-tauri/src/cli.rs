@@ -1,27 +1,38 @@
 //! Command-line entry points in the application binary.
 //!
-//! `agent-plugins validate|publish|search|install|share|team|review|revoke|bundle|whoami`
-//! run without the window so an agent can drive them. They share the crate's validator,
+//! `agent-plugins validate|publish|search|install|list|status|uninstall|sync|...`
+//! run without the window so an agent or a script can drive them. They share the crate's validator,
 //! locator, identity, and installer, so a CLI publish is the same operation as
 //! one from the app and authenticates the same way (ADR 0004).
 
-use crate::app_state::BulkAction;
+use crate::agent_profiles::{AgentProfile, TargetId};
+use crate::app_state::{AppState, AutoUpdateReport, BulkAction};
 use crate::application::{self, RuntimeState};
+use crate::catalog::CatalogComponent;
 use crate::host_identity;
 use crate::install::ItemStatus;
-use crate::marketplace::{self, IndexBundle, IndexPackage};
+use crate::ipc_error::{IpcError, IpcErrorKind};
+use crate::marketplace;
 use crate::staging::{scan_for_secrets, stage_tree, zip_tree, StageRequest};
 use reqwest::blocking::multipart::{Form, Part};
 use reqwest::Method;
 use serde::Deserialize;
+use serde_json::json;
 use std::io::{self, BufRead as _, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-const COMMANDS: [&str; 14] = [
+const COMMANDS: [&str; 21] = [
     "validate",
     "publish",
     "search",
     "install",
+    "list",
+    "status",
+    "uninstall",
+    "sync",
+    "withdraw",
+    "hold",
+    "keep",
     "share",
     "team",
     "review",
@@ -34,6 +45,39 @@ const COMMANDS: [&str; 14] = [
     "-h",
 ];
 const MAX_ARCHIVE_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Exit codes a script can act on; anything else that fails is 1.
+const EXIT_USAGE: i32 = 2;
+const EXIT_NEEDS_APPROVAL: i32 = 3;
+const EXIT_NOT_FOUND: i32 = 4;
+const EXIT_OFFLINE: i32 = 5;
+/// The flag every "needs approval" message names, from the CLI or the installer.
+const APPROVE_FLAG: &str = "--approve-mcp";
+/// How the marketplace, the catalog, and the ledger say something isn't there.
+const NOT_FOUND: [&str; 4] = [
+    "was not found",
+    "is not in the catalog",
+    "is not installed",
+    "Unknown source",
+];
+
+/// The exit code for a failure message.
+fn exit_code(message: &str) -> i32 {
+    if message == usage()
+        || message.starts_with("Unknown option")
+        || message.ends_with("needs a value.")
+    {
+        EXIT_USAGE
+    } else if message.contains(APPROVE_FLAG) || message.contains("Tier 3 approval") {
+        EXIT_NEEDS_APPROVAL
+    } else if NOT_FOUND.iter().any(|marker| message.contains(marker)) {
+        EXIT_NOT_FOUND
+    } else if IpcError::from(message.to_string()).kind == IpcErrorKind::Offline {
+        EXIT_OFFLINE
+    } else {
+        1
+    }
+}
 
 /// Runs a CLI command when the first argument names one. Returns the exit code.
 pub(crate) fn maybe_run() -> Option<i32> {
@@ -55,7 +99,7 @@ pub(crate) fn maybe_run() -> Option<i32> {
         Ok(()) => 0,
         Err(message) => {
             eprintln!("error: {message}");
-            1
+            exit_code(&message)
         }
     };
     marketplace::flush_events();
@@ -70,11 +114,18 @@ fn dispatch(command: &str, args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     match command {
-        "whoami" => whoami(),
+        "whoami" => whoami(args),
         "validate" => validate(args),
         "search" => search(args),
         "publish" => publish(args),
         "install" => install(args),
+        "list" => list(args),
+        "status" => status(args),
+        "uninstall" => uninstall(args),
+        "sync" => sync(args),
+        "withdraw" => withdraw(args),
+        "hold" => hold(args),
+        "keep" => keep(args),
         "share" => share(args),
         "team" => team(args),
         "review" => review(args),
@@ -94,11 +145,19 @@ fn usage() -> String {
     format!(
         "Agent Plugins {}\n\n\
 usage:\n  \
-agent-plugins whoami\n  \
-agent-plugins validate <path>\n  \
-agent-plugins search [query]\n  \
-agent-plugins publish <path> --version <major.minor.patch> [--namespace <ns>] [--package-id <id>] [--tags a,b] [--changelog <text>] [--message <text>] [--yes]\n  \
-agent-plugins install <ns>/<package> | <ns>/<package>/<skill> | <ns>/<bundle> | <link> [--approve-mcp]\n  \
+agent-plugins whoami [--json]\n  \
+agent-plugins validate <path> | <https archive url> [--namespace <ns>] [--package-id <id>]\n  \
+agent-plugins search [words...] [--json]\n  \
+agent-plugins publish <path> --version <major.minor.patch> [--namespace <ns>] [--package-id <id>] [--private | --visibility <inherit|public|private>] [--tags a,b] [--changelog <text> | --changelog-file <path>] [--message <text>] [--dry-run] [--yes]\n  \
+agent-plugins install <ns>/<package> | <ns>/<package>/<skill> | <ns>/<bundle> | <link> [--approve-mcp] [--replace]\n  \
+agent-plugins install --local <path> [--approve-mcp]\n  \
+agent-plugins list [--json]\n  \
+agent-plugins status <ns>/<package> [--json]\n  \
+agent-plugins uninstall <ns>/<package>[/<component>] [--force]\n  \
+agent-plugins sync\n  \
+agent-plugins withdraw <ns>/<package> <version> [--undo]\n  \
+agent-plugins hold <ns>/<package> [--undo]\n  \
+agent-plugins keep <ns>/<package>\n  \
 agent-plugins share <ns>[/<id>] [--public | --private | --inherit] [--add <entry>]... [--remove <entry>]...\n  \
 agent-plugins share <ns>[/<id>] --link [--reset]\n  \
 agent-plugins team [<ns>]\n  \
@@ -113,11 +172,19 @@ agent-plugins revoke <ns>/<package> [--undo] [--yes]\n  \
 agent-plugins bundle <ns>/<id>\n  \
 agent-plugins bundle set <ns>/<id> --name <name> [--description <text>] <ns>/<package>...\n  \
 agent-plugins bundle delete <ns>/<id> [--yes]\n\n\
-<path> for publish is a skill directory containing SKILL.md, a folder of skill\n\
-directories (a skill pack), an MCP document (mcp.json shape), or a source tree\n\
-with agent-plugins.json declaring one package. Publishing to a package you don't\n\
-own sends your change to its owners as a suggestion.\n\
-<entry> for share is an account, team:<ns>, or group:<name>.\n",
+<path> for validate, publish, and install --local is a skill directory containing\n\
+SKILL.md, a folder of skill directories (a skill pack), an MCP document (mcp.json\n\
+shape), or a source tree with agent-plugins.json (choose one of several packages\n\
+with --package-id). Publishing to a package you don't own sends your change to\n\
+its owners as a suggestion. Publish a first version with --private to try it\n\
+yourself before anyone else can see it; --dry-run checks everything and shows\n\
+what would change without publishing.\n\
+<entry> for share is an account, team:<ns>, or group:<name>.\n\
+uninstall --force also removes a copy you edited, after saving it to backups.\n\
+hold stops background updates of a package; keep stops managing it and leaves\n\
+its files as they are.\n\n\
+exit codes: 0 done, 1 failed, 2 usage, 3 needs --approve-mcp, 4 not found,\n\
+5 the marketplace could not be reached.\n",
         marketplace::CLIENT_VERSION
     )
 }
@@ -174,11 +241,28 @@ fn parse_args(
     Ok(parsed)
 }
 
-fn whoami() -> Result<(), String> {
+fn whoami(args: &[String]) -> Result<(), String> {
+    let json = parse_args(args, &[], &["--json"])?.has("--json");
     let mode = marketplace::auth_mode();
-    println!("host account: {}", host_identity::current().account);
-    println!("identity: {}", mode.describe());
+    let host = host_identity::current().account;
     let me = marketplace::fetch_me()?;
+    if json {
+        return print_json(&json!({
+            "hostAccount": host,
+            "identity": mode.describe(),
+            "account": me.account,
+            "namespace": me.namespace,
+            "namespaces": me.namespaces,
+            "teams": me.teams,
+            "groups": me.groups,
+            "admin": me.admin,
+            "suggestionsWaiting": me.suggestions_waiting,
+            "reportsWaiting": me.reports_waiting,
+            "unreadNotifications": me.unread_notifications,
+        }));
+    }
+    println!("host account: {host}");
+    println!("identity: {}", mode.describe());
     println!("marketplace account: {}", me.account);
     println!("namespace: {}", me.namespace);
     println!("publishes to: {}", me.namespaces.join(", "));
@@ -197,14 +281,65 @@ fn whoami() -> Result<(), String> {
     println!("groups: {}", me.groups.join(", "));
     println!("admin: {}", me.admin);
     println!("suggestions waiting: {}", me.suggestions_waiting);
+    println!("reports waiting: {}", me.reports_waiting);
+    println!("unread notifications: {}", me.unread_notifications);
     Ok(())
 }
 
+fn print_json(value: &serde_json::Value) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
+    println!("{text}");
+    Ok(())
+}
+
+/// Checks what `publish` would send, without the network: staging, the
+/// manifest rules, the secret scan, the size limits, and which apps can use
+/// each part.
 fn validate(args: &[String]) -> Result<(), String> {
-    let [path] = args else {
+    let parsed = parse_args(args, &["--namespace", "--package-id"], &[])?;
+    let [path] = parsed.positional.as_slice() else {
         return Err(usage());
     };
-    let report = crate::source::validate_source(path)?;
+    // An archive a source repository lists is checked as the app would fetch it.
+    if path.starts_with("https://") {
+        return validate_archive(path);
+    }
+    let path = PathBuf::from(path);
+    let manifest = std::fs::read(path.join(crate::manifest::SOURCE_MANIFEST_FILE))
+        .ok()
+        .and_then(|bytes| crate::manifest::SourceManifest::from_slice(&bytes).ok())
+        .map(|crate::manifest::SourceManifest::V2(manifest)| manifest);
+    let namespace = parsed
+        .value("--namespace")
+        .map(str::to_string)
+        .or_else(|| manifest.as_ref().map(|manifest| manifest.source.id.clone()))
+        .unwrap_or_else(default_namespace);
+    // Each package of a source tree is published on its own, so each is checked so.
+    let package_ids = match (parsed.value("--package-id"), &manifest) {
+        (Some(id), _) => vec![Some(id.to_string())],
+        (None, Some(manifest)) if manifest.packages.len() > 1 => manifest
+            .packages
+            .iter()
+            .map(|package| Some(package.id.clone()))
+            .collect(),
+        _ => vec![None],
+    };
+    let mut valid = true;
+    for package_id in package_ids {
+        let staging = tempfile_dir("validate")?;
+        let checked = check_package(&path, &namespace, package_id.as_deref(), &staging);
+        let _ = std::fs::remove_dir_all(&staging);
+        valid &= checked?;
+    }
+    if valid {
+        Ok(())
+    } else {
+        Err("validation failed".to_string())
+    }
+}
+
+fn validate_archive(url: &str) -> Result<(), String> {
+    let report = crate::source::validate_source(url)?;
     println!(
         "{}: {} valid install(s), {} catalog error(s)",
         report.source_id,
@@ -221,19 +356,198 @@ fn validate(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// Stages one package into `staging` and prints every problem with it, then
+/// the apps that can use each part. Returns whether it would publish.
+fn check_package(
+    path: &Path,
+    namespace: &str,
+    package_id: Option<&str>,
+    staging: &Path,
+) -> Result<bool, String> {
+    let request = StageRequest {
+        namespace,
+        package_id,
+        name: None,
+        description: None,
+    };
+    let staged = stage_tree(path, &request, staging)?;
+    let root = staged.root.display().to_string();
+    let report = crate::source::validate_source(&root)?;
+    let secrets = scan_for_secrets(&staged.root)?;
+    let archive_bytes = zip_tree(&staged.root)?.len() as u64;
+    let limits = size_problems(staged.file_count, staged.total_bytes, archive_bytes);
+    let valid = report.errors.is_empty()
+        && report.valid_installs > 0
+        && secrets.is_empty()
+        && limits.is_empty();
+    println!(
+        "{namespace}/{}: {} file(s), {} KB ({} KB zipped){}",
+        staged.package_id,
+        staged.file_count,
+        staged.total_bytes / 1024,
+        archive_bytes / 1024,
+        if valid { "" } else { ", not publishable" }
+    );
+    for error in &report.errors {
+        println!("  error: {}: {}", error.path, error.message);
+    }
+    for finding in &secrets {
+        println!("  secret: {}: {}", finding.path, finding.reason);
+    }
+    for limit in &limits {
+        println!("  too big: {limit}");
+    }
+    let catalog = crate::catalog::read_manifest_catalog(&staged.root, "validate")?;
+    let apps = tempfile_dir("validate-apps")?;
+    for item in catalog.items.values() {
+        for component in &item.components {
+            println!("  {} {}", component_label(component), component.id);
+            for (app, verdict) in compatibility(component, &staged.root, &apps) {
+                match verdict {
+                    Ok(()) => println!("    {app:<18} yes"),
+                    Err(reason) => println!("    {app:<18} no: {reason}"),
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&apps);
+    Ok(valid)
+}
+
+fn component_label(component: &CatalogComponent) -> &'static str {
+    match component.kind {
+        crate::catalog::CatalogComponentKind::Skill => "skill",
+        crate::catalog::CatalogComponentKind::McpServer => "MCP server",
+    }
+}
+
+/// Whether each app, primary ones first, can use `component`, planned against
+/// an empty home under `home` so the answer doesn't depend on this computer.
+fn compatibility(
+    component: &CatalogComponent,
+    source_root: &Path,
+    home: &Path,
+) -> Vec<(&'static str, Result<(), String>)> {
+    let paths = crate::paths::SystemPaths {
+        home: home.join("home"),
+        config: home.join("config"),
+        data: home.join("data"),
+        local_data: home.join("local-data"),
+        cache: home.join("cache"),
+    };
+    let context = crate::adapters::PlanningContext {
+        paths: &paths,
+        source_root,
+    };
+    TargetId::ALL
+        .into_iter()
+        .map(|target| {
+            let profile = AgentProfile {
+                target_id: target,
+                enabled: true,
+                scopes: vec!["user".to_string()],
+                dialect_id: target.current_dialect(),
+            };
+            let verdict = crate::adapters::adapter(target)
+                .plan(component, &profile, &context)
+                .and_then(|plan| match plan.capability {
+                    crate::resource::CapabilityResult::Unsupported { reason }
+                    | crate::resource::CapabilityResult::Blocked { reason, .. } => Err(reason),
+                    _ => Ok(()),
+                });
+            (target.display_name(), verdict)
+        })
+        .collect()
+}
+
+/// What the desktop app would refuse to download, in its own limits.
+fn size_problems(files: usize, bytes: u64, archive_bytes: u64) -> Vec<String> {
+    let mut problems = Vec::new();
+    if files > crate::sources::MAX_SOURCE_FILES {
+        problems.push(format!(
+            "{files} files; a package holds at most {}",
+            crate::sources::MAX_SOURCE_FILES
+        ));
+    }
+    if bytes > crate::sources::MAX_SOURCE_BYTES {
+        problems.push(format!(
+            "{} MB unzipped; the limit is 50 MB",
+            bytes / (1024 * 1024)
+        ));
+    }
+    if archive_bytes > MAX_ARCHIVE_BYTES {
+        problems.push(format!(
+            "{} MB zipped; the limit is 50 MB",
+            archive_bytes / (1024 * 1024)
+        ));
+    }
+    problems
+}
+
+/// A namespace to validate under when none is named: the account the
+/// marketplace would see (the Windows user, or a development user), the way
+/// it derives a personal space.
+fn default_namespace() -> String {
+    let account = match marketplace::auth_mode() {
+        marketplace::AuthMode::DevHeader(account) => account,
+        marketplace::AuthMode::Negotiate(_) => host_identity::current().account,
+    };
+    let user = account.rsplit('\\').next().unwrap_or(&account);
+    let slug = user
+        .split('@')
+        .next()
+        .unwrap_or(user)
+        .to_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>();
+    let slug = slug.trim_matches('-').chars().take(16).collect::<String>();
+    if slug.len() < 2 {
+        "me".to_string()
+    } else {
+        slug
+    }
+}
+
 fn search(args: &[String]) -> Result<(), String> {
-    let query = args.join(" ").to_lowercase();
+    let parsed = parse_args(args, &[], &["--json"])?;
+    let query = parsed.positional.join(" ");
     let index = marketplace::fetch_index()?;
     let matches = index
         .packages
         .iter()
-        .filter(|package| query.is_empty() || matches_query(package, &query))
+        .filter(|package| {
+            let tags = package.tags.join(" ");
+            matches_all_words(
+                &[
+                    &package.id,
+                    &package.name,
+                    &package.description,
+                    &tags,
+                    &package.publisher.display_name,
+                ],
+                &query,
+            )
+        })
         .collect::<Vec<_>>();
     let bundles = index
         .bundles
         .iter()
-        .filter(|bundle| query.is_empty() || bundle_matches(bundle, &query))
+        .filter(|bundle| {
+            matches_all_words(
+                &[
+                    &bundle.id,
+                    &bundle.name,
+                    &bundle.description,
+                    &bundle.publisher.display_name,
+                ],
+                &query,
+            )
+        })
         .collect::<Vec<_>>();
+    if parsed.has("--json") {
+        return print_json(&json!({ "packages": matches, "bundles": bundles }));
+    }
     if matches.is_empty() && bundles.is_empty() {
         println!("No packages match.");
         return Ok(());
@@ -271,23 +585,14 @@ fn search(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn matches_query(package: &IndexPackage, query: &str) -> bool {
-    package.id.to_lowercase().contains(query)
-        || package.name.to_lowercase().contains(query)
-        || package.description.to_lowercase().contains(query)
-        || package.tags.iter().any(|tag| tag.contains(query))
-        || package
-            .publisher
-            .display_name
-            .to_lowercase()
-            .contains(query)
-}
-
-fn bundle_matches(bundle: &IndexBundle, query: &str) -> bool {
-    bundle.id.to_lowercase().contains(query)
-        || bundle.name.to_lowercase().contains(query)
-        || bundle.description.to_lowercase().contains(query)
-        || bundle.publisher.display_name.to_lowercase().contains(query)
+/// Every word of `query` appears somewhere in `fields`, ignoring case, the way
+/// the portal and the window search.
+fn matches_all_words(fields: &[&str], query: &str) -> bool {
+    let haystack = fields.join("\n").to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|word| haystack.contains(word))
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -306,6 +611,9 @@ struct PublishArgs {
     tags: Vec<String>,
     changelog: Option<String>,
     message: Option<String>,
+    /// `inherit`, `public`, or `private`; `None` leaves the package's setting.
+    visibility: Option<String>,
+    dry_run: bool,
     yes: bool,
 }
 
@@ -318,12 +626,41 @@ fn parse_publish_args(args: &[String]) -> Result<PublishArgs, String> {
             "--package-id",
             "--tags",
             "--changelog",
+            "--changelog-file",
             "--message",
+            "--visibility",
         ],
-        &["--yes"],
+        &["--yes", "--private", "--dry-run"],
     )?;
     let [path] = parsed.positional.as_slice() else {
         return Err(usage());
+    };
+    let visibility = match (parsed.has("--private"), parsed.value("--visibility")) {
+        (true, Some(_)) => return Err("Choose --private or --visibility, not both.".to_string()),
+        (true, None) => Some("private".to_string()),
+        (false, Some(value @ ("inherit" | "public" | "private"))) => Some(value.to_string()),
+        (false, Some(value)) => {
+            return Err(format!(
+                "--visibility is inherit, public, or private, not {value}."
+            ))
+        }
+        (false, None) => None,
+    };
+    let changelog = match (
+        parsed.value("--changelog"),
+        parsed.value("--changelog-file"),
+    ) {
+        (Some(_), Some(_)) => {
+            return Err("Choose --changelog or --changelog-file, not both.".to_string())
+        }
+        (Some(text), None) => Some(text.to_string()),
+        (None, Some(file)) => Some(
+            std::fs::read_to_string(file)
+                .map_err(|error| format!("Could not read {file}: {error}"))?
+                .trim()
+                .to_string(),
+        ),
+        (None, None) => None,
     };
     Ok(PublishArgs {
         path: PathBuf::from(path),
@@ -337,8 +674,10 @@ fn parse_publish_args(args: &[String]) -> Result<PublishArgs, String> {
             .map(|tag| tag.trim().to_string())
             .filter(|tag| !tag.is_empty())
             .collect(),
-        changelog: parsed.value("--changelog").map(str::to_string),
+        changelog,
         message: parsed.value("--message").map(str::to_string),
+        visibility,
+        dry_run: parsed.has("--dry-run"),
         yes: parsed.has("--yes"),
     })
 }
@@ -349,6 +688,24 @@ fn parse_publish_args(args: &[String]) -> Result<PublishArgs, String> {
 struct Published {
     #[serde(default)]
     waiting_for_public_review: bool,
+    #[serde(default)]
+    warnings: Vec<String>,
+}
+
+/// What a dry run would change, compared with the live version.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DryRun {
+    #[serde(default)]
+    warnings: Vec<String>,
+    #[serde(default)]
+    files: Vec<DryRunFile>,
+}
+
+#[derive(Deserialize)]
+struct DryRunFile {
+    path: String,
+    status: String,
 }
 
 fn publish(args: &[String]) -> Result<(), String> {
@@ -423,6 +780,10 @@ fn publish(args: &[String]) -> Result<(), String> {
         println!("  as        {}", me.account);
         println!("  contents  {contents}");
         println!("  message   {message}");
+        if args.dry_run {
+            println!("dry run: the checks passed and nothing was sent");
+            return Ok(());
+        }
         if !args.yes
             && !confirm(&format!(
                 "You don't own {id}. Send this to its owners as a suggestion? [y/N] "
@@ -449,13 +810,16 @@ fn publish(args: &[String]) -> Result<(), String> {
     println!("publish {id} {}", args.version);
     println!("  as        {}", me.account);
     println!("  contents  {contents}");
+    if let Some(visibility) = &args.visibility {
+        println!("  who       {}", visibility_words(visibility));
+    }
     if !args.tags.is_empty() {
         println!("  tags      {}", args.tags.join(", "));
     }
     if let Some(changelog) = &args.changelog {
         println!("  changelog {changelog}");
     }
-    if !args.yes && !confirm("Publish? [y/N] ")? {
+    if !args.dry_run && !args.yes && !confirm("Publish? [y/N] ")? {
         return Err("Cancelled.".to_string());
     }
     let mut form = archive_form(archive)?
@@ -464,13 +828,45 @@ fn publish(args: &[String]) -> Result<(), String> {
     if let Some(changelog) = &args.changelog {
         form = form.text("changelog", changelog.clone());
     }
+    if let Some(visibility) = &args.visibility {
+        form = form.text("visibility", visibility.clone());
+    }
+    if args.dry_run {
+        form = form.text("dryRun", "true");
+    }
     let (status, body) = upload(&format!("{base}/api/packages/{id}/versions"), form)?;
-    if status != 201 {
+    if !matches!(status, 200 | 201) {
         return Err(describe_problem(status, &body));
     }
-    let waiting = serde_json::from_str::<Published>(&body)
-        .is_ok_and(|published| published.waiting_for_public_review);
-    if waiting {
+    if args.dry_run {
+        let dry_run = serde_json::from_str::<DryRun>(&body).map_err(|error| {
+            format!("The marketplace answered with an unreadable dry run: {error}")
+        })?;
+        let unchanged = dry_run
+            .files
+            .iter()
+            .filter(|file| file.status == "same")
+            .count();
+        for file in dry_run.files.iter().filter(|file| file.status != "same") {
+            println!("  {:<8} {}", file.status, file.path);
+        }
+        if unchanged > 0 {
+            println!("  {unchanged} file(s) unchanged");
+        }
+        for warning in &dry_run.warnings {
+            println!("warning: {warning}");
+        }
+        println!("dry run: the checks passed and nothing was published");
+        return Ok(());
+    }
+    let published = serde_json::from_str::<Published>(&body)
+        .map_err(|error| format!("The marketplace answered with an unreadable version: {error}"))?;
+    if status == 200 {
+        println!(
+            "{id} {} was already published with these files; nothing changed",
+            args.version
+        );
+    } else if published.waiting_for_public_review {
         println!(
             "published {id} {}; everyone else sees it once an admin approves its MCP server",
             args.version
@@ -478,8 +874,19 @@ fn publish(args: &[String]) -> Result<(), String> {
     } else {
         println!("published {id} {}", args.version);
     }
+    for warning in &published.warnings {
+        println!("warning: {warning}");
+    }
     println!("  {base}/p/{id}");
     Ok(())
+}
+
+fn visibility_words(visibility: &str) -> &'static str {
+    match visibility {
+        "private" => "only you, the space's owners, and people it is shared with",
+        "public" => "everyone at the company",
+        _ => "the same people as its space",
+    }
 }
 
 fn archive_form(archive: Vec<u8>) -> Result<Form, String> {
@@ -510,7 +917,14 @@ fn upload(url: &str, form: Form) -> Result<(u16, String), String> {
 fn describe_problem(status: u16, body: &str) -> String {
     let message = marketplace::problem_message(body)
         .unwrap_or_else(|| "The marketplace rejected the request.".to_string());
-    format!("HTTP {status}: {message}")
+    let suggested = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|problem| problem["suggestedVersion"].as_str().map(str::to_string));
+    // The server's own words usually name the version already.
+    match suggested.filter(|version| !message.contains(version.as_str())) {
+        Some(version) => format!("HTTP {status}: {message}\n  Publish {version} or higher."),
+        None => format!("HTTP {status}: {message}"),
+    }
 }
 
 fn confirm(prompt: &str) -> Result<bool, String> {
@@ -547,11 +961,18 @@ struct LinkInfo {
 }
 
 fn install(args: &[String]) -> Result<(), String> {
-    let parsed = parse_args(args, &[], &["--approve-mcp"])?;
+    let parsed = parse_args(args, &["--local"], &["--approve-mcp", "--replace"])?;
+    let approve_mcp = parsed.has(APPROVE_FLAG);
+    if let Some(path) = parsed.value("--local") {
+        if !parsed.positional.is_empty() {
+            return Err(usage());
+        }
+        return install_local(Path::new(path), approve_mcp);
+    }
     let [requested] = parsed.positional.as_slice() else {
         return Err(usage());
     };
-    let approve_mcp = parsed.has("--approve-mcp");
+    let replace = parsed.has("--replace");
     // A share link is redeemed first, so what it shares is in the catalog the
     // sync below fetches.
     let target = if requested.contains("/l/") {
@@ -574,6 +995,8 @@ fn install(args: &[String]) -> Result<(), String> {
     runtime.block_on(async {
         let state = RuntimeState::new();
         let app = application::sync_app_state(&state).await?;
+        // The sync also updated or removed other packages; say so.
+        print_report(&app.auto_update_report, &app);
         let not_found = || format!("{target} is not in the catalog. Try `agent-plugins search`.");
         let ids = match parts.as_slice() {
             [source_id, local_id] | [source_id, local_id, _] => {
@@ -604,18 +1027,20 @@ fn install(args: &[String]) -> Result<(), String> {
                     if requires_approval && !approve_mcp {
                         return Err(approval_needed(&[item.name.as_str()]));
                     }
-                    let outcome = application::install_item(
-                        &state,
-                        source_id,
-                        local_id,
-                        approve_mcp,
-                        component,
-                    )
-                    .await?;
-                    println!("installed {target} ({})", item.name);
-                    for path in outcome.backup_paths {
-                        println!("  backed up {path}");
+                    if item.status == ItemStatus::Conflict && !replace {
+                        return Err(format!(
+                            "Files or settings that Agent Plugins didn't install are in the way of {target}. Run again with --replace to back them up and replace them."
+                        ));
                     }
+                    let outcome = if replace {
+                        application::replace_item(&state, source_id, local_id, approve_mcp, component)
+                            .await?
+                    } else {
+                        application::install_item(&state, source_id, local_id, approve_mcp, component)
+                            .await?
+                    };
+                    println!("installed {target} ({})", item.name);
+                    print_outcome(&outcome);
                     return Ok(());
                 }
                 if parts.len() == 3 {
@@ -643,9 +1068,459 @@ fn install(args: &[String]) -> Result<(), String> {
 
 fn approval_needed(names: &[&str]) -> String {
     format!(
-        "{} includes a connector that runs a program on this computer. Run again with --approve-mcp to allow it.",
+        "{} includes a connector that runs a program on this computer. Run again with {APPROVE_FLAG} to allow it.",
         names.join(", ")
     )
+}
+
+fn print_outcome(outcome: &crate::install::OperationOutcome) {
+    for path in &outcome.backup_paths {
+        println!("  backed up {path}");
+    }
+    for warning in &outcome.warnings {
+        println!("warning: {warning}");
+    }
+}
+
+/// What a sync did to installed packages, one line each.
+fn print_report(report: &AutoUpdateReport, app: &AppState) {
+    let name = |id: &str| {
+        app.items
+            .iter()
+            .find(|item| item.id == id)
+            .map_or_else(|| id.to_string(), |item| item.name.clone())
+    };
+    for updated in &report.updated_items {
+        let versions = match (&updated.from_version, &updated.to_version) {
+            (Some(from), Some(to)) => format!(" {from} -> {to}"),
+            (None, Some(to)) => format!(" to {to}"),
+            _ => String::new(),
+        };
+        println!("updated {} ({}){versions}", updated.id, name(&updated.id));
+    }
+    for removed in &report.removed_items {
+        println!("removed {removed}: its publisher or an admin pulled it");
+    }
+    for repaired in &report.repaired_items {
+        println!("repaired {repaired}: put back files that were missing");
+    }
+    for extended in &report.extended_items {
+        println!("added {extended} to newly found apps");
+    }
+    for failure in &report.failed_items {
+        eprintln!("could not update {}: {}", failure.id, failure.message);
+    }
+}
+
+/// Where a local test install's source lives: its own source key, named
+/// after the folder, so it never takes a published package's place.
+const LOCAL_NAMESPACE: &str = "local";
+
+/// Installs a folder on this computer as the `local` space's package, the way
+/// a published one would install, without publishing anything. Background
+/// syncs leave it alone because no configured source lists it; `uninstall
+/// local/<id>` removes it.
+fn install_local(path: &Path, approve_mcp: bool) -> Result<(), String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let staging = tempfile_dir("local")?;
+    let installed = install_staged_locally(&canonical, &staging, approve_mcp);
+    let _ = std::fs::remove_dir_all(&staging);
+    installed
+}
+
+fn install_staged_locally(path: &Path, staging: &Path, approve_mcp: bool) -> Result<(), String> {
+    crate::prepare_host();
+    let paths = crate::paths::SystemPaths::from_system()?;
+    crate::agent_profiles::apply_detected_defaults(&paths);
+    let (item, outcome) = install_folder(&paths, path, staging, approve_mcp)?;
+    println!(
+        "installed {} ({}) from {}",
+        item.id,
+        item.name,
+        path.display()
+    );
+    print_outcome(&outcome);
+    println!("  remove it with: agent-plugins uninstall {}", item.id);
+    Ok(())
+}
+
+/// The source a local folder installs from. Its key comes from the folder's
+/// path, so installing the same folder again updates that install.
+fn local_source(path: &Path) -> crate::source::ConfiguredSource {
+    let locator = crate::locator::Locator::display_url(format!("file://{}", path.display()));
+    crate::source::ConfiguredSource {
+        source_key: locator.source_key(),
+        source_id: LOCAL_NAMESPACE.to_string(),
+        name: "This computer".to_string(),
+        description: format!("Installed for testing from {}.", path.display()),
+        locator,
+        repository_key: None,
+    }
+}
+
+fn install_folder(
+    paths: &crate::paths::SystemPaths,
+    path: &Path,
+    staging: &Path,
+    approve_mcp: bool,
+) -> Result<
+    (
+        crate::catalog::CatalogItem,
+        crate::install::OperationOutcome,
+    ),
+    String,
+> {
+    let request = StageRequest {
+        namespace: LOCAL_NAMESPACE,
+        package_id: None,
+        name: None,
+        description: None,
+    };
+    let staged = stage_tree(path, &request, staging)?;
+    let source = local_source(path);
+    let catalog = crate::catalog::read_manifest_catalog(&staged.root, &source.source_key)?;
+    let item = catalog
+        .items
+        .values()
+        .next()
+        .cloned()
+        .ok_or_else(|| "The folder has no package that can be installed.".to_string())?;
+    let snapshot = crate::source::SourceSnapshot {
+        definition: source.clone(),
+        commit: "local".to_string(),
+        path: staged.root.clone(),
+        catalog,
+    };
+    let outcome = crate::install::install_item_components_approved(
+        paths,
+        &source,
+        &snapshot,
+        &item,
+        approve_mcp,
+        None,
+    )
+    .map_err(|error| {
+        if error.contains("Tier 3 approval") {
+            approval_needed(&[item.name.as_str()])
+        } else {
+            error
+        }
+    })?;
+    Ok((item, outcome))
+}
+
+fn run<T>(work: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+    tokio::runtime::Runtime::new()
+        .map_err(|error| error.to_string())?
+        .block_on(work)
+}
+
+/// `<ns>/<package>` or `<ns>/<package>/<component>`, checked.
+fn package_parts(target: &str) -> Result<(&str, &str, Option<&str>), String> {
+    let parts = target.split('/').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [namespace, package] => {
+            marketplace::target_path(target)?;
+            Ok((namespace, package, None))
+        }
+        [namespace, package, component] if !component.is_empty() => {
+            marketplace::target_path(&format!("{namespace}/{package}"))?;
+            Ok((namespace, package, Some(component)))
+        }
+        _ => Err(format!("Name it as <namespace>/<package>, not {target}.")),
+    }
+}
+
+/// Statuses that mean the package is on this computer.
+fn is_installed(status: ItemStatus) -> bool {
+    !matches!(status, ItemStatus::Available | ItemStatus::Conflict)
+}
+
+fn status_word(status: ItemStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// The version on this computer, when the marketplace's current one is it.
+fn installed_version(item: &crate::app_state::CatalogItemState) -> Option<&str> {
+    matches!(
+        item.status,
+        ItemStatus::Installed | ItemStatus::Modified | ItemStatus::PartiallyInstalled
+    )
+    .then(|| item.marketplace.as_ref().map(|meta| meta.version.as_str()))
+    .flatten()
+}
+
+fn cached_state() -> Result<AppState, String> {
+    let state = RuntimeState::new();
+    run(application::load_cached_app_state(&state))?.ok_or_else(|| {
+        "Agent Plugins has no saved state yet. Run `agent-plugins sync`.".to_string()
+    })
+}
+
+fn list(args: &[String]) -> Result<(), String> {
+    let json = parse_args(args, &[], &["--json"])?.has("--json");
+    let app = cached_state()?;
+    let installed = app
+        .items
+        .iter()
+        .filter(|item| is_installed(item.status))
+        .collect::<Vec<_>>();
+    if json {
+        return print_json(&serde_json::Value::Array(
+            installed
+                .iter()
+                .map(|item| {
+                    json!({
+                        "id": item.id,
+                        "name": item.name,
+                        "status": status_word(item.status),
+                        "installedVersion": installed_version(item),
+                        "latestVersion": item.marketplace.as_ref().map(|meta| &meta.version),
+                        "held": item.held,
+                    })
+                })
+                .collect(),
+        ));
+    }
+    if installed.is_empty() {
+        println!("Nothing is installed.");
+        return Ok(());
+    }
+    println!("{:<32} {:<20} {:<10} name", "package", "status", "version");
+    for item in installed {
+        let status = if item.held {
+            format!("{} (held)", status_word(item.status))
+        } else {
+            status_word(item.status)
+        };
+        println!(
+            "{:<32} {:<20} {:<10} {}",
+            item.id,
+            status,
+            installed_version(item).unwrap_or("-"),
+            item.name
+        );
+    }
+    Ok(())
+}
+
+fn status(args: &[String]) -> Result<(), String> {
+    let parsed = parse_args(args, &[], &["--json"])?;
+    let [target] = parsed.positional.as_slice() else {
+        return Err(usage());
+    };
+    let (namespace, package, _) = package_parts(target)?;
+    let id = format!("{namespace}/{package}");
+    let view =
+        marketplace::api_json::<serde_json::Value>(Method::GET, &format!("packages/{id}"), None)?;
+    let local = cached_state()
+        .ok()
+        .and_then(|app| app.items.into_iter().find(|item| item.id == id));
+    let versions = view["versions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|version| {
+            json!({
+                "version": version["version"],
+                "publishedAt": version["publishedAt"],
+                "publishedBy": version["publishedBy"],
+                "changelog": version["changelog"],
+                "withdrawn": version["yanked"].as_bool().unwrap_or(false),
+                "purged": version["purged"].as_bool().unwrap_or(false),
+            })
+        })
+        .collect::<Vec<_>>();
+    let summary = json!({
+        "id": id,
+        "name": view["name"],
+        "liveVersion": view["liveVersion"],
+        "visibility": view["effective"],
+        "revoked": view["revoked"].as_bool().unwrap_or(false),
+        "revokedByAdmin": view["revokedByAdmin"].as_bool().unwrap_or(false),
+        "review": view["publicReview"]["state"],
+        "reviewNote": view["publicReview"]["note"],
+        "installs": view["installs"],
+        "installedBase": view["installedBase"],
+        "versions": versions,
+        "local": local.as_ref().map(|item| json!({
+            "status": status_word(item.status),
+            "installedVersion": installed_version(item),
+            "held": item.held,
+        })),
+    });
+    if parsed.has("--json") {
+        return print_json(&summary);
+    }
+    let text = |value: &serde_json::Value| match value {
+        serde_json::Value::Null => "-".to_string(),
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    println!("{} ({id})", text(&summary["name"]));
+    println!("  live version  {}", text(&summary["liveVersion"]));
+    println!("  visible to    {}", text(&summary["visibility"]));
+    if summary["revoked"] == true {
+        let by = if summary["revokedByAdmin"] == true {
+            "an admin"
+        } else {
+            "its owners"
+        };
+        println!("  removed       from every PC by {by}");
+    }
+    if !summary["review"].is_null() {
+        println!("  MCP review    {}", text(&summary["review"]));
+        if !summary["reviewNote"].is_null() {
+            println!("  review note   {}", text(&summary["reviewNote"]));
+        }
+    }
+    println!(
+        "  installs      {} ({} using it in the last 30 days)",
+        text(&summary["installs"]),
+        text(&summary["installedBase"])
+    );
+    match &local {
+        Some(item) => println!(
+            "  this computer {}{}",
+            status_word(item.status),
+            if item.held { ", updates held" } else { "" }
+        ),
+        None => println!("  this computer not installed"),
+    }
+    for version in &versions {
+        let date = text(&version["publishedAt"])
+            .chars()
+            .take(10)
+            .collect::<String>();
+        let state = if version["purged"] == true {
+            "  purged"
+        } else if version["withdrawn"] == true {
+            "  withdrawn"
+        } else {
+            ""
+        };
+        println!("  {:<12} {date}{state}", text(&version["version"]));
+    }
+    Ok(())
+}
+
+fn uninstall(args: &[String]) -> Result<(), String> {
+    let parsed = parse_args(args, &[], &["--force"])?;
+    let [target] = parsed.positional.as_slice() else {
+        return Err(usage());
+    };
+    let (namespace, package, component) = package_parts(target)?;
+    let state = RuntimeState::new();
+    let outcome = run(application::uninstall_item(
+        &state,
+        namespace,
+        package,
+        component,
+        parsed.has("--force"),
+    ))
+    .map_err(|error| {
+        if error.contains(crate::executor::LOCAL_CHANGES) {
+            format!("{error} Run again with --force to remove it anyway; your copy is saved to backups first.")
+        } else {
+            error
+        }
+    })?;
+    println!("uninstalled {target}");
+    print_outcome(&outcome);
+    Ok(())
+}
+
+fn sync(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err(usage());
+    }
+    crate::prepare_host();
+    let state = RuntimeState::new();
+    let app = run(application::sync_app_state(&state))?;
+    let report = &app.auto_update_report;
+    print_report(report, &app);
+    if let Some(message) = &app.catalog_message {
+        eprintln!("{message}");
+    }
+    if report.updated_items.is_empty()
+        && report.removed_items.is_empty()
+        && report.repaired_items.is_empty()
+        && report.extended_items.is_empty()
+        && report.failed_items.is_empty()
+    {
+        println!("Everything is up to date.");
+    }
+    if report.failed_items.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} package(s) could not be updated.",
+            report.failed_items.len()
+        ))
+    }
+}
+
+fn withdraw(args: &[String]) -> Result<(), String> {
+    let parsed = parse_args(args, &[], &["--undo"])?;
+    let [target, version] = parsed.positional.as_slice() else {
+        return Err(usage());
+    };
+    let id = item_target(target, "package")?;
+    if version.is_empty()
+        || !version
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+'))
+    {
+        return Err(format!("{version} is not a version number."));
+    }
+    let path = format!("packages/{id}/versions/{version}/yank");
+    if parsed.has("--undo") {
+        marketplace::api(Method::DELETE, &path, None)?;
+        println!("restored {id} {version}");
+    } else {
+        marketplace::api(Method::PUT, &path, None)?;
+        println!("withdrew {id} {version}: PCs that have it move to the newest version left at their next check");
+    }
+    Ok(())
+}
+
+fn hold(args: &[String]) -> Result<(), String> {
+    let parsed = parse_args(args, &[], &["--undo"])?;
+    let [target] = parsed.positional.as_slice() else {
+        return Err(usage());
+    };
+    let (namespace, package, None) = package_parts(target)? else {
+        return Err(usage());
+    };
+    let held = !parsed.has("--undo");
+    let state = RuntimeState::new();
+    run(application::set_held(&state, namespace, package, held))?;
+    if held {
+        println!("holding {target}: it no longer updates on its own; `agent-plugins install {target}` updates it when you choose");
+    } else {
+        println!("{target} updates on its own again");
+    }
+    Ok(())
+}
+
+fn keep(args: &[String]) -> Result<(), String> {
+    let [target] = args else {
+        return Err(usage());
+    };
+    let (namespace, package, None) = package_parts(target)? else {
+        return Err(usage());
+    };
+    let state = RuntimeState::new();
+    run(application::keep_my_version(&state, namespace, package))?;
+    println!(
+        "Agent Plugins no longer manages {target}; its files stay where they are and are yours now"
+    );
+    Ok(())
 }
 
 /// Installs a bundle's or a space's packages in one batch, each in its own
@@ -1358,5 +2233,212 @@ mod tests {
         );
         assert!(item_target("starter", "bundle").is_err());
         assert!(item_target("data-team/Bad Name", "bundle").is_err());
+    }
+
+    #[test]
+    fn failures_map_to_exit_codes_a_script_can_act_on() {
+        assert_eq!(exit_code(&usage()), EXIT_USAGE);
+        assert_eq!(exit_code("Unknown option --bogus."), EXIT_USAGE);
+        assert_eq!(
+            exit_code(&approval_needed(&["Weather"])),
+            EXIT_NEEDS_APPROVAL
+        );
+        assert_eq!(
+            exit_code("acme/weather contains an MCP server and requires explicit Tier 3 approval."),
+            EXIT_NEEDS_APPROVAL
+        );
+        assert_eq!(
+            exit_code("The package acme/nope was not found, or you do not have access to it."),
+            EXIT_NOT_FOUND
+        );
+        assert_eq!(exit_code("acme/nope is not installed."), EXIT_NOT_FOUND);
+        assert_eq!(
+            exit_code("Could not connect to https://marketplace.test/api/index: dns error"),
+            EXIT_OFFLINE
+        );
+        assert_eq!(
+            exit_code("HTTP 409: Version 1.0.0 is already published."),
+            1
+        );
+    }
+
+    #[test]
+    fn search_needs_every_word_somewhere() {
+        let fields = [
+            "acme/report-pdf",
+            "Report builder",
+            "Makes PDF reports.",
+            "docs",
+        ];
+        assert!(matches_all_words(&fields, "report pdf"));
+        assert!(matches_all_words(&fields, "PDF  Builder"));
+        assert!(matches_all_words(&fields, ""));
+        assert!(!matches_all_words(&fields, "report excel"));
+    }
+
+    #[test]
+    fn publish_takes_visibility_dry_run_and_a_changelog_file() {
+        let root = tempfile::tempdir().expect("root");
+        let changelog = root.path().join("CHANGELOG.txt");
+        std::fs::write(&changelog, "Fixed step 2.\n").expect("changelog");
+        let file = changelog.display().to_string();
+        let parsed = parse_publish_args(&strings(&[
+            "./skill",
+            "--version",
+            "1.0.0",
+            "--private",
+            "--dry-run",
+            "--changelog-file",
+            &file,
+        ]))
+        .expect("parse");
+        assert_eq!(parsed.visibility.as_deref(), Some("private"));
+        assert!(parsed.dry_run);
+        assert_eq!(parsed.changelog.as_deref(), Some("Fixed step 2."));
+        let public =
+            parse_publish_args(&strings(&["./skill", "--visibility", "public"])).expect("parse");
+        assert_eq!(public.visibility.as_deref(), Some("public"));
+        assert!(parse_publish_args(&strings(&["./skill", "--visibility", "team"])).is_err());
+        assert!(parse_publish_args(&strings(&[
+            "./skill",
+            "--private",
+            "--visibility",
+            "public"
+        ]))
+        .is_err());
+        assert!(parse_publish_args(&strings(&[
+            "./skill",
+            "--changelog",
+            "a",
+            "--changelog-file",
+            &file
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn a_version_conflict_says_which_version_to_publish() {
+        let body = r#"{"title":"Version 1.0.1 is lower than the live version 1.1.0.","status":409,"suggestedVersion":"1.1.1"}"#;
+        let message = describe_problem(409, body);
+        assert!(message.contains("lower than the live version"), "{message}");
+        assert!(message.ends_with("Publish 1.1.1 or higher."), "{message}");
+        let named = r#"{"title":"1.0.1 is lower than 1.1.0. Publish 1.1.1 or later.","status":409,"suggestedVersion":"1.1.1"}"#;
+        assert_eq!(describe_problem(409, named).matches("1.1.1").count(), 1);
+    }
+
+    #[test]
+    fn package_targets_name_a_namespace_a_package_and_maybe_a_component() {
+        assert_eq!(package_parts("acme/tools"), Ok(("acme", "tools", None)));
+        assert_eq!(
+            package_parts("acme/tools/review"),
+            Ok(("acme", "tools", Some("review")))
+        );
+        assert!(package_parts("tools").is_err());
+        assert!(package_parts("acme/tools/").is_err());
+        assert!(package_parts("acme/Bad Name").is_err());
+    }
+
+    #[test]
+    fn compatibility_puts_the_primary_apps_first_and_says_why_not() {
+        let root = tempfile::tempdir().expect("root");
+        let skill = CatalogComponent {
+            id: "notes".to_string(),
+            kind: crate::catalog::CatalogComponentKind::Skill,
+            source: "skills/notes".to_string(),
+            source_is_directory: true,
+            digest: "digest".to_string(),
+            effective_name: "jacob-notes".to_string(),
+            description: "Takes notes.".to_string(),
+            disable_model_invocation: false,
+            mcp_server: None,
+        };
+        let rows = compatibility(&skill, root.path(), root.path());
+        assert_eq!(rows[0].0, "GitHub Copilot");
+        assert!(rows
+            .iter()
+            .find(|(app, _)| *app == "Cursor")
+            .is_some_and(|(_, verdict)| verdict.is_ok()));
+        let desktop = rows
+            .iter()
+            .find(|(app, _)| *app == "Claude Desktop")
+            .expect("row");
+        assert!(desktop
+            .1
+            .as_ref()
+            .is_err_and(|reason| reason.contains("claude.ai")));
+        let server = CatalogComponent {
+            kind: crate::catalog::CatalogComponentKind::McpServer,
+            mcp_server: Some(crate::mcp::McpServer::Stdio {
+                command: "uvx".to_string(),
+                args: Vec::new(),
+                env: std::collections::BTreeMap::new(),
+                cwd: None,
+            }),
+            ..skill
+        };
+        let rows = compatibility(&server, root.path(), root.path());
+        assert!(rows
+            .iter()
+            .find(|(app, _)| *app == "pi")
+            .is_some_and(|(_, verdict)| verdict.is_err()));
+        assert!(rows
+            .iter()
+            .find(|(app, _)| *app == "Claude Code")
+            .is_some_and(|(_, verdict)| verdict.is_ok()));
+    }
+
+    #[test]
+    fn size_limits_match_what_the_app_downloads() {
+        assert!(size_problems(10, 1024, 512).is_empty());
+        assert_eq!(size_problems(2_001, 1024, 512).len(), 1);
+        assert_eq!(
+            size_problems(10, 51 * 1024 * 1024, 51 * 1024 * 1024).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_local_folder_installs_under_its_own_source_and_comes_off_again() {
+        use crate::agent_profiles::{set_enabled, TargetId};
+        let root = tempfile::tempdir().expect("root");
+        let paths = crate::paths::SystemPaths {
+            home: root.path().join("home"),
+            config: root.path().join("config"),
+            data: root.path().join("data"),
+            local_data: root.path().join("local-data"),
+            cache: root.path().join("cache"),
+        };
+        set_enabled(&paths, TargetId::Cursor, true).expect("cursor");
+        let skill = root.path().join("notes");
+        std::fs::create_dir_all(&skill).expect("skill");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: notes\ndescription: Takes meeting notes.\n---\nBody\n",
+        )
+        .expect("skill");
+        let staging = root.path().join("staging");
+        let (item, _) = install_folder(&paths, &skill, &staging, false).expect("install");
+        assert_eq!(item.id, "local/notes");
+        let installed = paths.home.join(".agents/skills/local-notes/SKILL.md");
+        assert!(installed.is_file());
+        // Installing the same folder again, changed, updates that install.
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: notes\ndescription: Takes meeting notes.\n---\nBetter body\n",
+        )
+        .expect("edit");
+        install_folder(&paths, &skill, &root.path().join("again"), false).expect("reinstall");
+        assert!(std::fs::read_to_string(&installed)
+            .expect("skill")
+            .contains("Better body"));
+        crate::install::uninstall_item_components(
+            &paths,
+            &local_source(&skill),
+            &item.id,
+            None,
+            false,
+        )
+        .expect("uninstall");
+        assert!(!installed.exists());
     }
 }

@@ -11,18 +11,39 @@ public sealed record InspectedArchive(
     JsonObject PackageManifest,
     IReadOnlyList<string> ComponentKinds,
     /// <summary>The archive's root prefix, empty when <c>agent-plugins.json</c> is at the top level.</summary>
-    string RootPrefix);
+    string RootPrefix,
+    IReadOnlyList<McpServerSummary> McpServers);
+
+/// <summary>What one MCP server in a package runs or connects to: environment variable and header names only, never values.</summary>
+public sealed record McpServerSummary(string Name, string Transport, string? Command, string[] Args, string[] EnvNames, string? Url, string[] HeaderNames)
+{
+    private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web);
+
+    public static string ToJson(IReadOnlyList<McpServerSummary> servers) => JsonSerializer.Serialize(servers, Web);
+
+    public static McpServerSummary[] FromJson(string? json) =>
+        json is null ? [] : JsonSerializer.Deserialize<McpServerSummary[]>(json, Web) ?? [];
+
+    /// <summary>What an admin approves: each server's name, transport, command, arguments, and URL. Null when unknown.</summary>
+    public static string? LaunchSpec(string? json) =>
+        json is null ? null : JsonSerializer.Serialize(FromJson(json).OrderBy(server => server.Name, StringComparer.Ordinal).Select(server => new { server.Name, server.Transport, server.Command, server.Args, server.Url }), Web);
+}
 
 /// <summary>
-/// Reads a zip upload safely: no absolute paths, no <c>..</c>, no symlinks, bounded entry count and
+/// Reads a zip upload safely: no absolute paths, no <c>..</c>, no symlinks, bounded file count and
 /// uncompressed size. Requires manifest v2 with exactly one package.
 /// </summary>
 public static class ArchiveInspector
 {
     public const string ManifestFile = "agent-plugins.json";
+
+    /// <summary>The desktop app's limits for one source (<c>artifact.rs</c>, <c>sources.rs</c>); a package and a whole namespace archive must both fit.</summary>
     public const long MaxArchiveBytes = 50L * 1024 * 1024;
-    public const long MaxUncompressedBytes = 200L * 1024 * 1024;
-    public const int MaxEntries = 5000;
+    public const long MaxUncompressedBytes = 50L * 1024 * 1024;
+    public const int MaxFiles = 2000;
+
+    /// <summary>Files and folders together, as the desktop app counts entries.</summary>
+    public const int MaxEntries = 2 * MaxFiles;
     private const int SymlinkMode = 0xA000;
 
     public static InspectedArchive Inspect(ReadOnlyMemory<byte> bytes)
@@ -62,10 +83,59 @@ public static class ArchiveInspector
 
         var packageId = Text(package["id"])
             ?? throw new ProblemException(422, "The package has no id string.");
-        var kinds = package["components"] is JsonArray components
-            ? components.Select(component => Text((component as JsonObject)?["kind"]) ?? "unknown").Distinct().ToArray()
-            : [];
-        return new InspectedArchive(sourceId, packageId, (JsonObject)package.DeepClone(), kinds, prefix);
+        var components = (package["components"] as JsonArray)?.OfType<JsonObject>().ToArray() ?? [];
+        var kinds = components.Select(component => Text(component["kind"]) ?? "unknown").Distinct().ToArray();
+        var servers = components
+            .Where(component => Text(component["kind"]) == PublishService.McpServerKind && Text(component["path"]) is not null)
+            .SelectMany(component => McpServers(zip.GetEntry(prefix + Text(component["path"])!.TrimStart('/'))))
+            .ToArray();
+        return new InspectedArchive(sourceId, packageId, (JsonObject)package.DeepClone(), kinds, prefix, servers);
+    }
+
+    /// <summary>The servers an MCP document declares. The validator has already checked it, so anything unreadable is skipped.</summary>
+    private static McpServerSummary[] McpServers(ZipArchiveEntry? entry)
+    {
+        JsonObject? servers;
+        try
+        {
+            using var stream = entry?.Open();
+            servers = (stream is null ? null : JsonNode.Parse(stream) as JsonObject)?["mcpServers"] as JsonObject;
+        }
+        catch (Exception error) when (error is JsonException or InvalidDataException)
+        {
+            return [];
+        }
+
+        string[] Keys(JsonObject server, string field) => (server[field] as JsonObject)?.Select(pair => pair.Key).Order(StringComparer.Ordinal).ToArray() ?? [];
+        return (servers ?? [])
+            .Where(pair => pair.Value is JsonObject)
+            .Select(pair => (pair.Key, Server: (JsonObject)pair.Value!))
+            .Select(pair => new McpServerSummary(
+                pair.Key,
+                Text(pair.Server["type"]) ?? "unknown",
+                Text(pair.Server["command"]),
+                (pair.Server["args"] as JsonArray)?.Select(Text).OfType<string>().ToArray() ?? [],
+                Keys(pair.Server, "env"),
+                Text(pair.Server["url"]),
+                Keys(pair.Server, "headers")))
+            .ToArray();
+    }
+
+    /// <summary>Every file under the archive's root, by its path relative to the root.</summary>
+    public static Dictionary<string, byte[]> ReadFiles(byte[] archive)
+    {
+        using var zip = OpenZip(new MemoryStream(archive, writable: false));
+        var prefix = RootPrefix(zip.Entries.Select(entry => entry.FullName).ToArray());
+        var files = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var entry in zip.Entries.Where(entry => entry.FullName.StartsWith(prefix, StringComparison.Ordinal) && !entry.FullName.EndsWith('/')))
+        {
+            using var stream = entry.Open();
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            files[entry.FullName[prefix.Length..]] = buffer.ToArray();
+        }
+
+        return files;
     }
 
     /// <summary>
@@ -186,16 +256,17 @@ public static class ArchiveInspector
             throw new ProblemException(422, "The archive is larger than the 50 MB limit.");
         }
 
-        if (zip.Entries.Count > MaxEntries)
+        var files = zip.Entries.Count(entry => !entry.FullName.EndsWith('/'));
+        if (files > MaxFiles || zip.Entries.Count > MaxEntries)
         {
-            throw new ProblemException(422, $"The archive has more than {MaxEntries} entries.");
+            throw new ProblemException(422, $"The archive has more than {MaxFiles:N0} files, the most the desktop app installs from one source.");
         }
 
         var names = zip.Entries.Select(SafeName).OfType<string>().ToList();
         CheckUnique(names);
         if (zip.Entries.Sum(entry => entry.Length) > MaxUncompressedBytes)
         {
-            throw new ProblemException(422, "The archive expands to more than 200 MB.");
+            throw new ProblemException(422, $"The archive expands to more than {MaxUncompressedBytes / 1024 / 1024} MB, the most the desktop app installs from one source.");
         }
 
         return (names, RootPrefix(names));

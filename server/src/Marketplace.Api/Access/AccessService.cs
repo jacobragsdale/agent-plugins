@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using Marketplace.Api.Auth;
 using Marketplace.Api.Configuration;
 using Marketplace.Api.Data;
+using Marketplace.Api.Notifications;
 using Marketplace.Api.Packages;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -28,16 +29,53 @@ public sealed record LivePackage(string Namespace, string PackageId, bool Gated)
 /// plus the share list: accounts, teams, and AD groups. A package that follows a private namespace is
 /// also shared with its own list. Anything hidden answers 404 so the desktop app treats it as gone.
 /// </summary>
-public sealed class AccessService(MarketplaceDbContext db, IOptions<ServerOptions> server, TimeProvider timeProvider)
+public sealed class AccessService(MarketplaceDbContext db, NotificationService notifications, IOptions<ServerOptions> server, TimeProvider timeProvider)
 {
     public const int MaxEntries = 200;
     public const int MaxEntryLength = 256;
 
     private Dictionary<string, AccessRule>? _rules;
 
-    /// <summary>Every rule, keyed by target, loaded once per request.</summary>
-    public async Task<IReadOnlyDictionary<string, AccessRule>> RulesAsync(CancellationToken cancellationToken) =>
-        _rules ??= await db.AccessRules.AsNoTracking().ToDictionaryAsync(rule => rule.Target, StringComparer.Ordinal, cancellationToken);
+    /// <summary>
+    /// Every rule, keyed by target, loaded once per request. Rules are marked <see cref="AccessRule.HasLink"/>
+    /// where a share link exists, and a blocked account's personal namespace reads as private to its owners alone.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, AccessRule>> RulesAsync(CancellationToken cancellationToken)
+    {
+        if (_rules is not null)
+        {
+            return _rules;
+        }
+
+        var rules = await db.AccessRules.AsNoTracking().ToDictionaryAsync(rule => rule.Target, StringComparer.Ordinal, cancellationToken);
+        foreach (var target in await db.Links.AsNoTracking().Where(link => link.Kind == Link.Share).Select(link => link.Target).ToListAsync(cancellationToken))
+        {
+            // A link's target without a rule follows its parent; the added rule changes nothing but carries the mark.
+            var rule = rules.GetValueOrDefault(target) ?? (rules[target] = new AccessRule { Target = target, Visibility = target.Contains('/') ? Visibility.Inherit : Visibility.Public, UpdatedBy = string.Empty });
+            rule.HasLink = true;
+        }
+
+        var blocked = await db.Blocks.AsNoTracking().Select(block => block.Account).ToListAsync(cancellationToken);
+        if (blocked.Count > 0)
+        {
+            // Matched like the block itself, so CORP\jane also hides jane@corp.example.com's space.
+            var hidden = (await db.Publishers.AsNoTracking()
+                    .Where(publisher => publisher.Kind == PublisherKind.Personal)
+                    .Select(publisher => new { publisher.Namespace, publisher.Account })
+                    .ToListAsync(cancellationToken))
+                .Where(publisher => blocked.Any(block => IdentityResolver.EntryMatches(block, publisher.Account)))
+                .Select(publisher => publisher.Namespace);
+            foreach (var ns in hidden)
+            {
+                foreach (var target in rules.Keys.Where(key => key.StartsWith(ns + "/", StringComparison.Ordinal)).Append(ns).ToArray())
+                {
+                    rules[target] = new AccessRule { Target = target, Visibility = Visibility.Private, UpdatedBy = string.Empty };
+                }
+            }
+        }
+
+        return _rules = rules;
+    }
 
     /// <summary>Whether <c>ns</c> or <c>ns/id</c> is private, and the rules whose lists share it.</summary>
     public static (bool Private, AccessRule?[] Lists) Effective(IReadOnlyDictionary<string, AccessRule> rules, string ns, string? id)
@@ -61,8 +99,77 @@ public sealed class AccessService(MarketplaceDbContext db, IOptions<ServerOption
             return true;
         }
 
+        if (gated && NeedsReview(rules, ns, id))
+        {
+            return false;
+        }
+
         var (isPrivate, lists) = Effective(rules, ns, id);
-        return isPrivate ? lists.Any(rule => Listed(rule, identity)) : !gated;
+        return !isPrivate || lists.Any(rule => Listed(rule, identity));
+    }
+
+    /// <summary>
+    /// Whether the public MCP gate applies: the target is public, or private but shared with an AD group or by a
+    /// link, either of which can reach as many people as public does.
+    /// </summary>
+    public static bool NeedsReview(IReadOnlyDictionary<string, AccessRule> rules, string ns, string? id)
+    {
+        var (isPrivate, lists) = Effective(rules, ns, id);
+        return !isPrivate || lists.Any(rule => rule is not null && (rule.Groups.Length > 0 || rule.HasLink));
+    }
+
+    /// <summary>Who can see it, in words for the admin review queue.</summary>
+    public static string Audience(IReadOnlyDictionary<string, AccessRule> rules, string ns, string? id)
+    {
+        var (isPrivate, lists) = Effective(rules, ns, id);
+        if (!isPrivate)
+        {
+            return "Everyone";
+        }
+
+        static string Count(int count, string one, string many) => count == 1 ? $"1 {one}" : $"{count} {many}";
+        var present = lists.OfType<AccessRule>().ToArray();
+        var parts = new[]
+        {
+            (Count: present.Sum(rule => rule.Users.Length), One: "person", Many: "people"),
+            (Count: present.Sum(rule => rule.Teams.Length), One: "team", Many: "teams"),
+            (Count: present.Sum(rule => rule.Groups.Length), One: "AD group", Many: "AD groups"),
+        }
+            .Where(part => part.Count > 0)
+            .Select(part => Count(part.Count, part.One, part.Many))
+            .Concat(present.Any(rule => rule.HasLink) ? ["a share link"] : [])
+            .ToArray();
+        return parts.Length == 0 ? "Private: its owners only" : "Private: " + string.Join(", ", parts);
+    }
+
+    /// <summary>
+    /// The ETag the namespace archive answers a caller with: the stored digest, or for a caller who may see only
+    /// some of its <paramref name="liveCount"/> live packages, a digest of that digest and the kept ids.
+    /// </summary>
+    public static string ArchiveDigest(string archiveDigest, IReadOnlyCollection<string> keep, int liveCount) =>
+        keep.Count == liveCount
+            ? archiveDigest
+            : Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Join('\n', keep.Order(StringComparer.Ordinal).Prepend(archiveDigest)))));
+
+    /// <summary>Sets a package's own visibility as part of a publish; the caller saves.</summary>
+    public async Task ApplyVisibilityAsync(string target, Visibility visibility, string account, DateTime now, CancellationToken cancellationToken)
+    {
+        var rule = await db.AccessRules.FindAsync([target], cancellationToken);
+        if (rule is null)
+        {
+            if (visibility == Visibility.Inherit)
+            {
+                return;
+            }
+
+            rule = db.AccessRules.Add(new AccessRule { Target = target, UpdatedBy = account }).Entity;
+        }
+
+        rule.Visibility = visibility;
+        rule.UpdatedBy = account;
+        rule.UpdatedAt = now;
+        db.Audit(account, "access.set", target, $"visibility {visibility.ToString().ToLowerInvariant()} on publish", now);
+        _rules = null;
     }
 
     /// <summary>Visible only because a share list names the caller: they do not own it and it is private.</summary>
@@ -186,6 +293,7 @@ public sealed class AccessService(MarketplaceDbContext db, IOptions<ServerOption
             throw new ProblemException(422, $"There is no team called {string.Join(", ", unknown)}.");
         }
 
+        var before = (await db.AccessRules.AsNoTracking().SingleOrDefaultAsync(candidate => candidate.Target == target, cancellationToken))?.Users ?? [];
         var empty = users.Length + teams.Length + groups.Length == 0;
         var visibility = request.Visibility ?? (!empty ? Visibility.Private : id is null ? Visibility.Public : Visibility.Inherit);
         if (id is null && visibility == Visibility.Inherit)
@@ -217,9 +325,31 @@ public sealed class AccessService(MarketplaceDbContext db, IOptions<ServerOption
             rule.UpdatedAt = timeProvider.GetUtcNow().UtcDateTime;
         }
 
+        db.Audit(identity.Account, "access.set", target, $"{visibility.ToString().ToLowerInvariant()}; {users.Length} people, {teams.Length} teams, {groups.Length} groups", timeProvider.GetUtcNow().UtcDateTime);
+        var added = users.Where(user => !before.Contains(user, StringComparer.OrdinalIgnoreCase)).ToArray();
+        if (added.Length > 0 && visibility != Visibility.Public)
+        {
+            var (name, link) = await DescribeAsync(ns, id, cancellationToken);
+            notifications.Notify(added, identity.Account, "share.added", $"{identity.DisplayName} shared {name} with you.", link);
+        }
+
         await db.SaveChangesAsync(cancellationToken);
         _rules = null;
         return await GetAsync(identity, ns, id, cancellationToken);
+    }
+
+    /// <summary>A space, package, or bundle's name and portal path, for notifications.</summary>
+    private async Task<(string Name, string? Link)> DescribeAsync(string ns, string? id, CancellationToken cancellationToken)
+    {
+        if (id is null)
+        {
+            return ((await db.Publishers.AsNoTracking().SingleOrDefaultAsync(publisher => publisher.Namespace == ns, cancellationToken))?.DisplayName is { Length: > 0 } space ? space : ns, null);
+        }
+
+        var package = await db.Packages.AsNoTracking().Where(candidate => candidate.Namespace == ns && candidate.PackageId == id).Select(candidate => candidate.Name).SingleOrDefaultAsync(cancellationToken);
+        return package is not null
+            ? (package, $"/p/{ns}/{id}")
+            : ((await db.Bundles.AsNoTracking().Where(bundle => bundle.Namespace == ns && bundle.BundleId == id).Select(bundle => bundle.Name).SingleOrDefaultAsync(cancellationToken)) ?? id, $"/b/{ns}/{id}");
     }
 
     /// <summary>The target's share link, created on first request; <paramref name="reset"/> replaces it.</summary>
@@ -249,9 +379,12 @@ public sealed class AccessService(MarketplaceDbContext db, IOptions<ServerOption
             await db.SaveChangesAsync(cancellationToken);
         }
 
+        var now = timeProvider.GetUtcNow().UtcDateTime;
         var code = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));
-        db.Links.Add(new Link { Code = code, Kind = kind, Target = target, CreatedBy = account, CreatedAt = timeProvider.GetUtcNow().UtcDateTime });
+        db.Links.Add(new Link { Code = code, Kind = kind, Target = target, CreatedBy = account, CreatedAt = now });
+        db.Audit(account, existing is null ? "link.create" : "link.reset", target, kind, now);
         await db.SaveChangesAsync(cancellationToken);
+        _rules = null;
         return LinkUrl(code);
     }
 
@@ -273,6 +406,7 @@ public sealed class AccessService(MarketplaceDbContext db, IOptions<ServerOption
 
         rule.Users = [.. rule.Users, identity.Account];
         rule.UpdatedAt = timeProvider.GetUtcNow().UtcDateTime;
+        db.Audit(identity.Account, "link.redeem", target, "share", rule.UpdatedAt);
         await db.SaveChangesAsync(cancellationToken);
         _rules = null;
         return true;

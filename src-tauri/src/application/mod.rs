@@ -16,8 +16,9 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::sync::Mutex;
 
 pub(crate) use items::{
-    bulk_plan, bulk_run, install_item, plan_items, plan_source_removal, remove_source,
-    replace_item, reset_app, run_items, set_manual_invocation, uninstall_item,
+    bulk_plan, bulk_run, install_item, keep_my_version, plan_items, plan_source_removal,
+    remove_source, replace_item, reset_app, run_items, save_connector_settings, set_excluded_apps,
+    set_held, set_manual_invocation, uninstall_item,
 };
 pub(crate) use sources::{cancel_prepared_source, confirm_source, prepare_source};
 pub(crate) use sync::{load_cached_app_state, run_preflight, sync_app_state};
@@ -166,8 +167,11 @@ pub(crate) async fn run_scheduled_sync<R: Runtime>(app: AppHandle<R>) {
             eprintln!("Scheduled source sync stopped because runtime state is unavailable.");
             return;
         };
-        let event =
-            crate::app_state::ScheduledSync::from_result(sync_app_state(runtime.inner()).await);
+        let result = sync_app_state(runtime.inner()).await;
+        if let Ok(state) = &result {
+            crate::notify::after_sync(&app, state);
+        }
+        let event = crate::app_state::ScheduledSync::from_result(result);
         if let Err(error) = app.emit(SCHEDULED_SYNC_EVENT, &event) {
             eprintln!("Could not publish scheduled source sync: {error}");
         }
@@ -228,9 +232,14 @@ pub(crate) fn spawn_app_sync<R: Runtime>(app: AppHandle<R>) {
         };
         // Report a failed manual check the same way the scheduler does, so
         // "Check for Updates Now" is never silent.
-        let event =
-            crate::app_state::ScheduledSync::from_result(sync_app_state(runtime.inner()).await);
-        let _ = app.emit(SCHEDULED_SYNC_EVENT, event);
+        let result = sync_app_state(runtime.inner()).await;
+        if let Ok(state) = &result {
+            crate::notify::after_sync(&app, state);
+        }
+        let _ = app.emit(
+            SCHEDULED_SYNC_EVENT,
+            crate::app_state::ScheduledSync::from_result(result),
+        );
     });
 }
 

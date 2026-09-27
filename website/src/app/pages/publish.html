@@ -2,6 +2,11 @@
   <header>
     <h1>{{ heading() }}</h1>
     <p class="lead">{{ lead() }}</p>
+    @if (suggesting() && currentFiles(); as href) {
+      <p>
+        <a mat-button [href]="href" download><app-icon name="download" />Download the current files</a> to start from them.
+      </p>
+    }
   </header>
 
   @if (session.state().kind === "loading") {
@@ -14,23 +19,17 @@
   } @else if (session.me() !== null) {
     <form class="stack" (submit)="submit($event)">
       @if (mode() === "new") {
-        <section class="card stack">
-          <h2 id="space-heading">Publish to</h2>
-          <mat-radio-group class="spaces" aria-labelledby="space-heading" [value]="space()" (change)="setSpace($event.value)">
-            @for (option of spaces(); track option.namespace) {
-              <mat-radio-button [value]="option.namespace">{{ option.label }}</mat-radio-button>
-            }
-          </mat-radio-group>
-          <p class="muted">
-            @if (hasTeam()) {
-              A team space is shared: everyone on the team can publish new versions.
-            }
-            Need a shared space? <a routerLink="/teams">Create a team</a>.
-          </p>
-        </section>
+        <app-publish-target [spaces]="spaces()" [hasTeam]="hasTeam()" [(space)]="space" [(visibility)]="visibility" />
       }
 
-      <app-upload-picker [showName]="mode() === 'new'" [(picked)]="picked" [(title)]="uploadTitle" />
+      <mat-button-toggle-group aria-label="How to add the skill" hideSingleSelectionIndicator [hidden]="suggesting()" [value]="source()" (change)="setSource($event.value)">
+        <mat-button-toggle value="write"><app-icon name="edit" />Write it here</mat-button-toggle>
+        <mat-button-toggle value="upload"><app-icon name="upload" />Upload files</mat-button-toggle>
+      </mat-button-toggle-group>
+
+      <app-skill-editor [hidden]="source() !== 'write' || suggesting()" [showName]="mode() === 'new'" [(name)]="uploadTitle" [(description)]="skillDescription" [(body)]="skillBody" />
+      <app-upload-picker [hidden]="source() === 'write' && !suggesting()" [showName]="mode() === 'new'" [(picked)]="picked" [(title)]="uploadTitle" />
+      <app-file-changes [loading]="check.isLoading()" [problem]="checkProblem()" [check]="checked()" />
 
       @if (suggesting()) {
         <section class="card stack">

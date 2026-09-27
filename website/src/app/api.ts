@@ -1,5 +1,6 @@
 import { HttpClient, HttpErrorResponse } from "@angular/common/http";
 import { Injectable, inject } from "@angular/core";
+import type { Observable } from "rxjs";
 import { firstValueFrom } from "rxjs";
 import { z } from "zod";
 
@@ -20,8 +21,9 @@ export const effectiveSchema = z.enum(["public", "private"]);
 
 const publisherSchema = z.strictObject({ account: z.string(), displayName: z.string() }).readonly();
 
+// Health is the first call every page makes, so a field a newer server adds must not break sign-in.
 export const healthSchema = z
-  .strictObject({ serverVersion: z.string(), minimumClientVersion: z.string(), latestClientVersion: z.string(), environment: z.string(), authSchemes: stringList, adGroups: z.boolean() })
+  .object({ serverVersion: z.string(), minimumClientVersion: z.string(), latestClientVersion: z.string(), environment: z.string(), authSchemes: stringList, adGroups: z.boolean() })
   .readonly();
 export type Health = z.infer<typeof healthSchema>;
 
@@ -39,6 +41,8 @@ export const meSchema = z
     groups: stringList,
     teams: z.array(z.strictObject({ namespace: z.string(), displayName: z.string(), owner: z.boolean() }).readonly()).readonly(),
     suggestionsWaiting: z.number().int(),
+    reportsWaiting: z.number().int(),
+    unreadNotifications: z.number().int(),
     app: appSchema.nullable()
   })
   .readonly();
@@ -57,6 +61,12 @@ export const indexPackageSchema = z
     tags: stringList,
     componentKinds: stringList,
     publishedAt: timestamp,
+    createdAt: timestamp,
+    changelog: z.string().nullable(),
+    /** Null unless the live version has an MCP server; then whether an admin checked it for everyone. */
+    mcpApproved: z.boolean().nullable(),
+    /** `stdio`, `streamable-http`, `sse`; empty when there is no MCP server or it isn't known. */
+    mcpTransports: stringList,
     installs: z.number().int(),
     installedBase: z.number().int(),
     restricted: z.boolean(),
@@ -94,10 +104,18 @@ export const versionSchema = z
     publishedAt: timestamp,
     changelog: z.string().nullable(),
     yanked: z.boolean(),
+    /** An admin deleted its files for good; it stays listed so its number isn't reused. */
+    purged: z.boolean(),
     componentKinds: stringList
   })
   .readonly();
 export type PackageVersion = z.infer<typeof versionSchema>;
+
+/** What an MCP server in a package runs or connects to, read from its files when it was published. */
+export const mcpServerSchema = z
+  .strictObject({ name: z.string(), transport: z.string(), command: z.string().nullish(), args: stringList, envNames: stringList, url: z.string().nullish(), headerNames: stringList })
+  .readonly();
+export type McpServer = z.infer<typeof mcpServerSchema>;
 
 export const packageSchema = z
   .strictObject({
@@ -114,6 +132,14 @@ export const packageSchema = z
     effective: effectiveSchema,
     sharedWithYou: z.boolean(),
     revoked: z.boolean(),
+    /** An admin pulled it, so only an admin can restore it. */
+    revokedByAdmin: z.boolean(),
+    createdAt: timestamp,
+    publisher: publisherSchema,
+    lane: laneSchema,
+    installs: z.number().int(),
+    installedBase: z.number().int(),
+    mcpServers: z.array(mcpServerSchema).readonly(),
     /** Only for a package with an MCP server: whether an admin let everyone see it. */
     publicReview: z
       .strictObject({ state: z.enum(["approved", "declined", "waiting"]), note: z.string().nullable() })
@@ -204,10 +230,23 @@ export const publishedSchema = z
     publishedAt: timestamp,
     componentKinds: stringList,
     tags: stringList,
-    waitingForPublicReview: z.boolean()
+    waitingForPublicReview: z.boolean(),
+    warnings: stringList
   })
   .readonly();
 export type Published = z.infer<typeof publishedSchema>;
+
+/** A publish checked but not committed: each file against the live version, and anything worth knowing. */
+export const dryRunSchema = z
+  .strictObject({
+    version: z.string(),
+    componentKinds: stringList,
+    sizeBytes: z.number().int(),
+    warnings: stringList,
+    files: z.array(z.strictObject({ path: z.string(), status: z.enum(["new", "changed", "removed", "same"]) }).readonly()).readonly()
+  })
+  .readonly();
+export type DryRun = z.infer<typeof dryRunSchema>;
 
 export const statsSchema = z
   .strictObject({
@@ -283,14 +322,32 @@ export const publicReviewSchema = z
     publishedBy: z.string(),
     publishedAt: timestamp,
     changelog: z.string().nullable(),
-    componentKinds: stringList
+    componentKinds: stringList,
+    mcpServers: z.array(mcpServerSchema).readonly(),
+    /** Who can see it now, in words: "Everyone", or "Private: 3 people, 1 team". */
+    audience: z.string(),
+    installedBase: z.number().int()
   })
   .readonly();
 export type PublicReview = z.infer<typeof publicReviewSchema>;
 const reviewListSchema = z.array(publicReviewSchema).readonly();
 
+export const reportKindSchema = z.enum(["problem", "feedback"]);
+export type ReportKind = z.infer<typeof reportKindSchema>;
+
+/** A problem or a piece of feedback about a package; owners and admins answer it with an optional note. */
 export const reportSchema = z
-  .strictObject({ id: z.number().int(), account: z.string(), packageId: z.string(), reason: z.string(), createdAt: timestamp, resolvedAt: timestamp.nullable(), resolvedBy: z.string().nullable() })
+  .strictObject({
+    id: z.number().int(),
+    account: z.string(),
+    packageId: z.string(),
+    kind: reportKindSchema,
+    reason: z.string(),
+    createdAt: timestamp,
+    resolvedAt: timestamp.nullable(),
+    resolvedBy: z.string().nullable(),
+    note: z.string().nullable()
+  })
   .readonly();
 export type Report = z.infer<typeof reportSchema>;
 const reportListSchema = z.array(reportSchema).readonly();
@@ -308,6 +365,22 @@ export const summarySchema = z
   })
   .readonly();
 export type Summary = z.infer<typeof summarySchema>;
+
+export const notificationSchema = z.strictObject({ id: z.number().int(), kind: z.string(), text: z.string(), link: z.string().nullable(), createdAt: timestamp, read: z.boolean() }).readonly();
+export type Notification = z.infer<typeof notificationSchema>;
+const notificationsSchema = z.strictObject({ items: z.array(notificationSchema).readonly() }).readonly();
+
+/** Who has a package installed, per PC, from the desktop apps' last check-ins. */
+export const installRowSchema = z
+  .strictObject({ account: z.string(), device: z.string().nullable(), version: z.string().nullable(), clientVersion: z.string().nullable(), lastSeenAt: timestamp })
+  .readonly();
+export type InstallRow = z.infer<typeof installRowSchema>;
+
+export const auditEntrySchema = z.strictObject({ id: z.number().int(), at: timestamp, actor: z.string(), action: z.string(), target: z.string(), detail: z.string().nullable() }).readonly();
+export type AuditEntry = z.infer<typeof auditEntrySchema>;
+
+export const blockSchema = z.strictObject({ account: z.string(), blockedBy: z.string(), blockedAt: timestamp, reason: z.string().nullable() }).readonly();
+export type Block = z.infer<typeof blockSchema>;
 
 /** RFC 9457 lets a problem carry extension members, so only the fields the portal reads are checked. */
 const problemSchema = z
@@ -384,6 +457,12 @@ export function fileUrl(files: string, path: string): string {
   return `${files}/${filePath(path)}`;
 }
 
+export function installsUrl(ns: string, packageId: string): string {
+  return `/api/admin/packages/${segment(ns)}/${segment(packageId)}/installs`;
+}
+
+export const auditCsvUrl = "/api/admin/audit?format=csv&limit=10000";
+
 /** What a publish sends: an archive, or files with their paths, plus the version fields. */
 export interface PublishForm {
   readonly version: string;
@@ -393,6 +472,8 @@ export interface PublishForm {
   readonly archive?: Blob;
   readonly name?: string;
   readonly description?: string;
+  /** Who can install it; left out, a new package follows its space and an existing one keeps its setting. */
+  readonly visibility?: Visibility;
 }
 
 /** The upload part of a publish or a suggestion. */
@@ -410,6 +491,24 @@ function uploadBody(form: Pick<PublishForm, "files" | "archive">): FormData {
   return body;
 }
 
+function publishBody(form: PublishForm): FormData {
+  const body = uploadBody(form);
+  body.set("version", form.version);
+  body.set("changelog", form.changelog);
+  body.set("tags", form.tags.join(","));
+  for (const [key, value] of [
+    ["name", form.name],
+    ["description", form.description],
+    ["visibility", form.visibility]
+  ] as const) {
+    if (value !== undefined && value.length > 0) {
+      body.set(key, value);
+    }
+  }
+
+  return body;
+}
+
 /** `ns`, or `ns/id` for a package or bundle, as the access routes spell it. */
 function target(ns: string, id?: string): string {
   return id === undefined ? segment(ns) : `${segment(ns)}/${segment(id)}`;
@@ -418,6 +517,7 @@ function target(ns: string, id?: string): string {
 @Injectable({ providedIn: "root" })
 export class Api {
   private readonly http = inject(HttpClient);
+  private indexCache: Promise<Index> | null = null;
 
   public health(): Promise<Health> {
     return this.get("/api/health", healthSchema);
@@ -427,8 +527,17 @@ export class Api {
     return this.get("/api/me", meSchema);
   }
 
+  /** One copy per page load, shared by every page; a change made from this portal drops it. */
   public index(): Promise<Index> {
-    return this.get("/api/index", indexSchema);
+    this.indexCache ??= this.get("/api/index", indexSchema).catch((error: unknown) => {
+      this.indexCache = null;
+      throw error;
+    });
+    return this.indexCache;
+  }
+
+  public forgetIndex(): void {
+    this.indexCache = null;
   }
 
   public package(ns: string, packageId: string): Promise<PackageDetail> {
@@ -462,8 +571,10 @@ export class Api {
     return this.get(`/api/access/${target(ns, id)}`, shareSchema);
   }
 
-  public setShare(ns: string, id: string | undefined, update: ShareUpdate): Promise<Share> {
-    return this.send(() => firstValueFrom(this.http.put<unknown>(`/api/access/${target(ns, id)}`, update)), shareSchema);
+  public async setShare(ns: string, id: string | undefined, update: ShareUpdate): Promise<Share> {
+    const saved = await this.send(() => firstValueFrom(this.http.put<unknown>(`/api/access/${target(ns, id)}`, update)), shareSchema);
+    this.forgetIndex();
+    return saved;
   }
 
   /** The share link, created on first use; `reset` replaces it so the old one stops working. */
@@ -471,47 +582,77 @@ export class Api {
     return (await this.send(() => firstValueFrom(this.http.post<unknown>(`/api/access/${target(ns, id)}/link`, { reset })), linkSchema)).link;
   }
 
-  public publish(ns: string, packageId: string, form: PublishForm): Promise<Published> {
-    const body = uploadBody(form);
-    body.set("version", form.version);
-    body.set("changelog", form.changelog);
-    body.set("tags", form.tags.join(","));
-    for (const [key, value] of [
-      ["name", form.name],
-      ["description", form.description]
-    ] as const) {
-      if (value !== undefined && value.length > 0) {
-        body.set(key, value);
-      }
-    }
+  public async publish(ns: string, packageId: string, form: PublishForm): Promise<Published> {
+    const published = await this.send(() => firstValueFrom(this.http.post<unknown>(`${packageUrl(ns, packageId)}/versions`, publishBody(form))), publishedSchema);
+    this.forgetIndex();
+    return published;
+  }
 
-    return this.send(() => firstValueFrom(this.http.post<unknown>(`${packageUrl(ns, packageId)}/versions`, body)), publishedSchema);
+  /** Runs every check a publish would, and compares the files with the live version, without publishing. */
+  public checkPublish(ns: string, packageId: string, form: PublishForm): Promise<DryRun> {
+    const body = publishBody(form);
+    body.set("dryRun", "true");
+    return this.send(() => firstValueFrom(this.http.post<unknown>(`${packageUrl(ns, packageId)}/versions`, body)), dryRunSchema);
+  }
+
+  /** Deletes a package nobody installed (admins: any package); its ID can be used again. */
+  public async deletePackage(ns: string, packageId: string): Promise<void> {
+    await this.request(async () => {
+      await firstValueFrom(this.http.delete(packageUrl(ns, packageId)));
+    });
+    this.forgetIndex();
   }
 
   public withdraw(ns: string, packageId: string, version: string): Promise<void> {
-    return this.request(async () => {
-      await firstValueFrom(this.http.put(this.yankUrl(ns, packageId, version), null));
-    });
+    return this.change(() => this.http.put(this.yankUrl(ns, packageId, version), null));
   }
 
   /** Undoes a withdrawal. */
   public restore(ns: string, packageId: string, version: string): Promise<void> {
-    return this.request(async () => {
-      await firstValueFrom(this.http.delete(this.yankUrl(ns, packageId, version)));
-    });
+    return this.change(() => this.http.delete(this.yankUrl(ns, packageId, version)));
   }
 
   /** Removes the package from every PC at their next check; `revoked: false` offers it again. */
   public setRevoked(ns: string, packageId: string, revoked: boolean): Promise<void> {
     const url = `${packageUrl(ns, packageId)}/revoke`;
+    return this.change(() => (revoked ? this.http.put(url, null) : this.http.delete(url)));
+  }
+
+  /** Admins only: deletes a version's files for good; its number stays used. */
+  public purgeVersion(ns: string, packageId: string, version: string): Promise<void> {
+    return this.change(() => this.http.delete(`/api/admin/packages/${segment(ns)}/${segment(packageId)}/versions/${segment(version)}`));
+  }
+
+  /** A problem reaches the owners and the admins; feedback reaches the owners. */
+  public report(ns: string, packageId: string, reason: string, kind: ReportKind): Promise<void> {
     return this.request(async () => {
-      await firstValueFrom(revoked ? this.http.put(url, null) : this.http.delete(url));
+      await firstValueFrom(this.http.post(`${packageUrl(ns, packageId)}/reports`, { reason, kind }));
     });
   }
 
-  public report(ns: string, packageId: string, reason: string): Promise<void> {
+  /** Reports and feedback on a package, for its owners and admins. */
+  public packageReports(ns: string, packageId: string): Promise<readonly Report[]> {
+    return this.get(`${packageUrl(ns, packageId)}/reports`, reportListSchema);
+  }
+
+  /** What the caller reported, and what became of it. */
+  public myReports(): Promise<readonly Report[]> {
+    return this.get("/api/reports/mine", reportListSchema);
+  }
+
+  public resolveReport(id: number, note: string): Promise<void> {
     return this.request(async () => {
-      await firstValueFrom(this.http.post(`${packageUrl(ns, packageId)}/reports`, { reason }));
+      await firstValueFrom(this.http.post(`/api/reports/${String(id)}/resolve`, note.length > 0 ? { note } : {}));
+    });
+  }
+
+  public async notifications(): Promise<readonly Notification[]> {
+    return (await this.get("/api/notifications", notificationsSchema)).items;
+  }
+
+  public markNotificationsRead(upTo: number): Promise<void> {
+    return this.request(async () => {
+      await firstValueFrom(this.http.post("/api/notifications/read", { upTo }));
     });
   }
 
@@ -530,8 +671,10 @@ export class Api {
     return this.get(`/api/suggestions/${String(id)}`, suggestionSchema);
   }
 
-  public decideSuggestion(id: number, decision: { readonly decision: "accept"; readonly version: string } | { readonly decision: "decline"; readonly note: string }): Promise<Suggestion> {
-    return this.send(() => firstValueFrom(this.http.post<unknown>(`/api/suggestions/${String(id)}`, decision)), suggestionSchema);
+  public async decideSuggestion(id: number, decision: { readonly decision: "accept"; readonly version: string } | { readonly decision: "decline"; readonly note: string }): Promise<Suggestion> {
+    const suggestion = await this.send(() => firstValueFrom(this.http.post<unknown>(`/api/suggestions/${String(id)}`, decision)), suggestionSchema);
+    this.forgetIndex();
+    return suggestion;
   }
 
   public withdrawSuggestion(id: number): Promise<void> {
@@ -548,23 +691,30 @@ export class Api {
     return this.get(this.teamUrl(ns), teamSchema);
   }
 
-  public createTeam(namespace: string, displayName: string, visibility: "public" | "private"): Promise<Team> {
-    return this.send(() => firstValueFrom(this.http.post<unknown>("/api/teams", { namespace, displayName, visibility })), teamSchema);
+  public async createTeam(namespace: string, displayName: string, visibility: "public" | "private"): Promise<Team> {
+    const result = await this.send(() => firstValueFrom(this.http.post<unknown>("/api/teams", { namespace, displayName, visibility })), teamSchema);
+    this.forgetIndex();
+    return result;
   }
 
-  public renameTeam(ns: string, displayName: string): Promise<Team> {
-    return this.send(() => firstValueFrom(this.http.put<unknown>(this.teamUrl(ns), { displayName })), teamSchema);
+  public async renameTeam(ns: string, displayName: string): Promise<Team> {
+    const result = await this.send(() => firstValueFrom(this.http.put<unknown>(this.teamUrl(ns), { displayName })), teamSchema);
+    this.forgetIndex();
+    return result;
   }
 
   /** Adds a member, or changes whether they are an owner. */
-  public setMember(ns: string, account: string, owner: boolean): Promise<Team> {
-    return this.send(() => firstValueFrom(this.http.post<unknown>(`${this.teamUrl(ns)}/members`, { account, owner })), teamSchema);
+  public async setMember(ns: string, account: string, owner: boolean): Promise<Team> {
+    const result = await this.send(() => firstValueFrom(this.http.post<unknown>(`${this.teamUrl(ns)}/members`, { account, owner })), teamSchema);
+    this.forgetIndex();
+    return result;
   }
 
   /** Removes a member; with your own account, leaves the team. */
   public removeMember(ns: string, account: string): Promise<void> {
     return this.request(async () => {
       await firstValueFrom(this.http.delete(`${this.teamUrl(ns)}/members`, { params: { account } }));
+      this.forgetIndex();
     });
   }
 
@@ -573,9 +723,7 @@ export class Api {
   }
 
   public deleteTeam(ns: string): Promise<void> {
-    return this.request(async () => {
-      await firstValueFrom(this.http.delete(this.teamUrl(ns)));
-    });
+    return this.change(() => this.http.delete(this.teamUrl(ns)));
   }
 
   public directory(query: string): Promise<Directory> {
@@ -586,22 +734,24 @@ export class Api {
     return this.get(`/api/links/${segment(code)}`, linkPreviewSchema);
   }
 
-  public redeemLink(code: string): Promise<LinkResult> {
-    return this.send(() => firstValueFrom(this.http.post<unknown>(`/api/links/${segment(code)}`, null)), linkResultSchema);
+  public async redeemLink(code: string): Promise<LinkResult> {
+    const result = await this.send(() => firstValueFrom(this.http.post<unknown>(`/api/links/${segment(code)}`, null)), linkResultSchema);
+    this.forgetIndex();
+    return result;
   }
 
   public bundle(ns: string, bundleId: string): Promise<Bundle> {
     return this.get(this.bundleUrl(ns, bundleId), bundleSchema);
   }
 
-  public saveBundle(ns: string, bundleId: string, bundle: { readonly name: string; readonly description: string; readonly members: readonly string[] }): Promise<Bundle> {
-    return this.send(() => firstValueFrom(this.http.put<unknown>(this.bundleUrl(ns, bundleId), bundle)), bundleSchema);
+  public async saveBundle(ns: string, bundleId: string, bundle: { readonly name: string; readonly description: string; readonly members: readonly string[] }): Promise<Bundle> {
+    const saved = await this.send(() => firstValueFrom(this.http.put<unknown>(this.bundleUrl(ns, bundleId), bundle)), bundleSchema);
+    this.forgetIndex();
+    return saved;
   }
 
   public deleteBundle(ns: string, bundleId: string): Promise<void> {
-    return this.request(async () => {
-      await firstValueFrom(this.http.delete(this.bundleUrl(ns, bundleId)));
-    });
+    return this.change(() => this.http.delete(this.bundleUrl(ns, bundleId)));
   }
 
   public reviews(): Promise<readonly PublicReview[]> {
@@ -611,6 +761,7 @@ export class Api {
   public review(ns: string, packageId: string, decision: "approve" | "decline", note: string): Promise<void> {
     return this.request(async () => {
       await firstValueFrom(this.http.post(`/api/admin/reviews/${segment(ns)}/${segment(packageId)}`, { decision, note }));
+      this.forgetIndex();
     });
   }
 
@@ -618,14 +769,39 @@ export class Api {
     return this.get("/api/admin/reports", reportListSchema);
   }
 
-  public resolveReport(id: number): Promise<void> {
-    return this.request(async () => {
-      await firstValueFrom(this.http.post(`/api/admin/reports/${String(id)}/resolve`, null));
-    });
-  }
-
   public summary(): Promise<Summary> {
     return this.get("/api/admin/summary", summarySchema);
+  }
+
+  /** Who has a package installed; `installsCsv` is the same list as a download. */
+  public installs(ns: string, packageId: string): Promise<readonly InstallRow[]> {
+    return this.get(installsUrl(ns, packageId), z.array(installRowSchema).readonly());
+  }
+
+  /** Newest first; `before` pages back from an entry's id. */
+  public audit(before?: number): Promise<readonly AuditEntry[]> {
+    return this.send(
+      () => firstValueFrom(this.http.get<unknown>("/api/admin/audit", { params: before === undefined ? { limit: 100 } : { before, limit: 100 } })),
+      z.array(auditEntrySchema).readonly()
+    );
+  }
+
+  public blocks(): Promise<readonly Block[]> {
+    return this.get("/api/admin/blocks", z.array(blockSchema).readonly());
+  }
+
+  /** Stops an account publishing, suggesting, and sharing, and hides its space; `reason: null` lifts it. */
+  public setBlocked(account: string, reason: string | null): Promise<void> {
+    const url = `/api/admin/blocks/${segment(account)}`;
+    return this.change(() => (reason === null ? this.http.delete(url) : this.http.put(url, reason.length > 0 ? { reason } : {})));
+  }
+
+  /** Hands a personal space to another account. */
+  public transferSpace(ns: string, account: string): Promise<void> {
+    return this.request(async () => {
+      await firstValueFrom(this.http.put(`/api/admin/namespaces/${segment(ns)}/owner`, { account }));
+      this.forgetIndex();
+    });
   }
 
   private yankUrl(ns: string, packageId: string, version: string): string {
@@ -647,6 +823,12 @@ export class Api {
   private async send<T>(call: () => Promise<unknown>, schema: z.ZodType<T>): Promise<T> {
     const payload = await this.request(call);
     return schema.parse(payload);
+  }
+
+  /** A change that can alter what the index lists. */
+  private async change(call: () => Observable<unknown>): Promise<void> {
+    await this.request(() => firstValueFrom(call()));
+    this.forgetIndex();
   }
 
   private async request<T>(call: () => Promise<T>): Promise<T> {

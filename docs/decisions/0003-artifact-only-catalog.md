@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-08-15
 - Supersedes: Git locators and user-authored URLs from [ADR 0002](0002-source-repositories-and-locators.md)
+- Superseded by: [ADR 0004](0004-internal-marketplace.md). The marketplace server replaced the Nexus catalog this record describes.
 
 ## Context
 

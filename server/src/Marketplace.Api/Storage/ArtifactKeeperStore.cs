@@ -79,6 +79,33 @@ public sealed class ArtifactKeeperStore(
         return await response.Content.ReadAsByteArrayAsync(cancellationToken);
     }
 
+    public async Task DeleteAsync(string path, CancellationToken cancellationToken)
+    {
+        var full = FullPath(path);
+        using var response = await SendAsync(
+            () => new HttpRequestMessage(HttpMethod.Delete, $"api/v1/repositories/{options.Value.Repository}/artifacts/{full}"),
+            cancellationToken);
+        if (!response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.NotFound)
+        {
+            logger.LogError("Artifact Keeper refused to delete {Path} with HTTP {Status}.", full, (int)response.StatusCode);
+            throw new ProblemException(502, $"The package store refused to delete {full} (HTTP {(int)response.StatusCode}). Try again, or delete it in Artifact Keeper.");
+        }
+    }
+
+    public async Task<bool> CheckAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await TokenAsync(forceRefresh: true, cancellationToken);
+            return true;
+        }
+        catch (Exception error) when (error is HttpRequestException or ProblemException or TaskCanceledException or JsonException or InvalidOperationException)
+        {
+            logger.LogWarning(error, "Artifact Keeper health check failed.");
+            return false;
+        }
+    }
+
     private string FullPath(string path)
     {
         if (path.Length == 0 || path.StartsWith('/') || path.Contains("..", StringComparison.Ordinal) || path.Contains('\\'))

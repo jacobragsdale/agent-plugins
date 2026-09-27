@@ -3,7 +3,7 @@
   "connectivity": "offline",
   "syncInProgress": false,
   "autoUpdateReport": {
-    "updatedItems": [{ "id": "official/publish", "sourceId": "official", "localId": "publish" }],
+    "updatedItems": [{ "id": "official/publish", "sourceId": "official", "localId": "publish", "fromVersion": "1.3.2", "toVersion": "1.4.0" }],
     "failedItems": [{ "id": "team-data/sql-helper", "message": "Could not replace C:\\Users\\sam\\.claude\\skills\\sql-helper: another app is using it. Close that app, then try again." }],
     "repairedItems": ["Meeting notes"],
     "extendedItems": ["Publish"],
@@ -82,15 +82,17 @@
       "source": "skills/publish",
       "sourceIsDirectory": true,
       "manifestVersion": 2,
-      "components": [{ "id": "publish", "kind": "skill", "description": "The publish skill.", "manualInvocation": true, "status": "installed", "requiresApproval": false }],
+      "components": [{ "id": "publish", "kind": "skill", "description": "The publish skill.", "manualInvocation": true, "status": "installed", "requiresApproval": false, "excludedApps": [] }],
       "compatibility": [
         { "componentId": "publish", "targetId": "claude-desktop", "capability": { "level": "native" } },
-        { "componentId": "publish", "targetId": "m365-copilot", "capability": { "level": "lossyTranslation", "losses": ["Scripts are not supported."] } }
+        { "componentId": "publish", "targetId": "pi", "capability": { "level": "lossyTranslation", "losses": ["Scripts are not supported."] } }
       ],
       "destination": "C:\\Users\\sam\\.claude\\skills\\publish",
       "status": "installed",
       "requiresApproval": false,
       "riskDetails": [],
+      "connectors": [],
+      "held": false,
       "marketplace": {
         "publisher": "Platform team",
         "publisherAccount": "CORP\\platform",
@@ -101,7 +103,9 @@
         "installs": 120,
         "installedBase": 87,
         "restricted": false,
-        "sharedWithYou": false
+        "sharedWithYou": false,
+        "changelog": "Publishes skill packs from a folder.",
+        "mcpApproved": null
       }
     },
     {
@@ -118,14 +122,16 @@
       "sourceIsDirectory": true,
       "manifestVersion": 2,
       "components": [
-        { "id": "sql-style", "kind": "skill", "description": "The sql-style skill.", "manualInvocation": false, "status": "installed", "requiresApproval": false },
-        { "id": "warehouse", "kind": "mcpServer", "description": "The warehouse mcpServer.", "manualInvocation": false, "status": "available", "requiresApproval": true }
+        { "id": "sql-style", "kind": "skill", "description": "The sql-style skill.", "manualInvocation": false, "status": "installed", "requiresApproval": false, "excludedApps": [] },
+        { "id": "warehouse", "kind": "mcpServer", "description": "The warehouse mcpServer.", "manualInvocation": false, "status": "available", "requiresApproval": true, "excludedApps": [] }
       ],
       "compatibility": [{ "componentId": "warehouse", "targetId": "chatgpt", "capability": { "level": "unsupported", "reason": "ChatGPT does not load local servers." } }],
       "destination": "C:\\Users\\sam\\.claude\\skills\\sql-helper",
       "status": "partiallyInstalled",
       "requiresApproval": true,
       "riskDetails": ["warehouse runs: uvx warehouse-mcp --read-only"],
+      "connectors": [],
+      "held": false,
       "marketplace": null
     },
     {
@@ -141,12 +147,14 @@
       "source": "skills/chart-style",
       "sourceIsDirectory": true,
       "manifestVersion": 2,
-      "components": [{ "id": "chart-style", "kind": "skill", "description": "The chart-style skill.", "manualInvocation": false, "status": "conflict", "requiresApproval": false }],
+      "components": [{ "id": "chart-style", "kind": "skill", "description": "The chart-style skill.", "manualInvocation": false, "status": "conflict", "requiresApproval": false, "excludedApps": [] }],
       "compatibility": [],
       "destination": "C:\\Users\\sam\\.claude\\skills\\chart-style",
       "status": "conflict",
       "requiresApproval": false,
       "riskDetails": [],
+      "connectors": [],
+      "held": false,
       "marketplace": null
     },
     {
@@ -162,12 +170,14 @@
       "source": "skills/review",
       "sourceIsDirectory": true,
       "manifestVersion": 2,
-      "components": [{ "id": "review", "kind": "skill", "description": "The review skill.", "manualInvocation": false, "status": "available", "requiresApproval": false }],
+      "components": [{ "id": "review", "kind": "skill", "description": "The review skill.", "manualInvocation": false, "status": "available", "requiresApproval": false, "excludedApps": [] }],
       "compatibility": [],
       "destination": null,
       "status": "available",
       "requiresApproval": false,
       "riskDetails": [],
+      "connectors": [],
+      "held": false,
       "marketplace": null
     },
     {
@@ -183,12 +193,16 @@
       "source": "skills/release-notes",
       "sourceIsDirectory": true,
       "manifestVersion": 2,
-      "components": [{ "id": "release-notes", "kind": "skill", "description": "The release-notes skill.", "manualInvocation": false, "status": "updateAvailable", "requiresApproval": false }],
+      "components": [
+        { "id": "release-notes", "kind": "skill", "description": "The release-notes skill.", "manualInvocation": false, "status": "updateAvailable", "requiresApproval": false, "excludedApps": [] }
+      ],
       "compatibility": [],
       "destination": "C:\\Users\\sam\\.claude\\skills\\release-notes",
       "status": "updateAvailable",
       "requiresApproval": false,
       "riskDetails": [],
+      "connectors": [],
+      "held": false,
       "marketplace": null
     },
     {
@@ -204,12 +218,16 @@
       "source": "skills/meeting-notes",
       "sourceIsDirectory": true,
       "manifestVersion": 2,
-      "components": [{ "id": "meeting-notes", "kind": "skill", "description": "The meeting-notes skill.", "manualInvocation": false, "status": "missing", "requiresApproval": false }],
+      "components": [
+        { "id": "meeting-notes", "kind": "skill", "description": "The meeting-notes skill.", "manualInvocation": false, "status": "missing", "requiresApproval": false, "excludedApps": [] }
+      ],
       "compatibility": [],
       "destination": "C:\\Users\\sam\\.claude\\skills\\meeting-notes",
       "status": "missing",
       "requiresApproval": false,
       "riskDetails": [],
+      "connectors": [],
+      "held": false,
       "marketplace": null
     },
     {
@@ -225,12 +243,14 @@
       "source": "skills/tone",
       "sourceIsDirectory": true,
       "manifestVersion": 2,
-      "components": [{ "id": "tone", "kind": "skill", "description": "The tone skill.", "manualInvocation": false, "status": "modified", "requiresApproval": false }],
+      "components": [{ "id": "tone", "kind": "skill", "description": "The tone skill.", "manualInvocation": false, "status": "modified", "requiresApproval": false, "excludedApps": [] }],
       "compatibility": [],
       "destination": "C:\\Users\\sam\\.claude\\skills\\tone",
       "status": "modified",
       "requiresApproval": false,
       "riskDetails": [],
+      "connectors": [],
+      "held": false,
       "marketplace": null
     },
     {
@@ -246,12 +266,16 @@
       "source": "skills/legacy-style",
       "sourceIsDirectory": true,
       "manifestVersion": 2,
-      "components": [{ "id": "legacy-style", "kind": "skill", "description": "The legacy-style skill.", "manualInvocation": false, "status": "removed", "requiresApproval": false }],
+      "components": [
+        { "id": "legacy-style", "kind": "skill", "description": "The legacy-style skill.", "manualInvocation": false, "status": "removed", "requiresApproval": false, "excludedApps": [] }
+      ],
       "compatibility": [],
       "destination": null,
       "status": "removed",
       "requiresApproval": false,
       "riskDetails": [],
+      "connectors": [],
+      "held": false,
       "marketplace": null
     },
     {
@@ -267,12 +291,16 @@
       "source": "skills/dashboards",
       "sourceIsDirectory": true,
       "manifestVersion": 2,
-      "components": [{ "id": "dashboards", "kind": "skill", "description": "The dashboards skill.", "manualInvocation": false, "status": "sourceConflict", "requiresApproval": false }],
+      "components": [
+        { "id": "dashboards", "kind": "skill", "description": "The dashboards skill.", "manualInvocation": false, "status": "sourceConflict", "requiresApproval": false, "excludedApps": [] }
+      ],
       "compatibility": [],
       "destination": "C:\\Users\\sam\\.claude\\skills\\dashboards",
       "status": "sourceConflict",
       "requiresApproval": false,
       "riskDetails": [],
+      "connectors": [],
+      "held": false,
       "marketplace": null
     }
   ],
@@ -307,18 +335,18 @@
       "skillDirectoryShared": true
     },
     {
-      "targetId": "m365-copilot",
-      "displayName": "Microsoft 365 Copilot",
+      "targetId": "pi",
+      "displayName": "pi",
       "enabled": true,
       "scopes": ["user"],
-      "dialectId": "m365",
+      "dialectId": "pi",
       "detected": false,
       "detectedVersion": null,
       "detectionMessage": null,
-      "verificationGuidance": "Open Microsoft 365 Copilot and look for the new skills.",
-      "reloadGuidance": "Quit Microsoft 365 Copilot and open it again.",
-      "skillDirectory": "C:\\Users\\sam\\AppData\\Local\\AgentPlugins\\m365",
-      "skillDirectoryShared": false
+      "verificationGuidance": "Open pi and look for the new skills.",
+      "reloadGuidance": "Quit pi and open it again.",
+      "skillDirectory": "~/.agents/skills",
+      "skillDirectoryShared": true
     }
   ],
   "tutorial": "cursor",
@@ -332,7 +360,9 @@
     "authMode": "Windows sign-in (Kerberos)",
     "namespaces": ["sam", "team-data"],
     "teams": [{ "namespace": "team-data", "displayName": "Data team", "owner": true }],
-    "suggestionsWaiting": 0
+    "suggestionsWaiting": 0,
+    "reportsWaiting": 0,
+    "unreadNotifications": 0
   },
   "preflight": {
     "startedAtEpochSeconds": 1789999000,
@@ -352,5 +382,7 @@
       },
       { "id": "dependencies.uv", "group": "dependencies", "title": "uv", "status": "ok", "detail": "uv is installed.", "remediation": { "kind": "autoFixed" }, "blocking": false, "durationMillis": 30 }
     ]
-  }
+  },
+  "notifications": [{ "id": 41, "kind": "suggestion.created", "text": "Dana suggested a change to SQL helper.", "link": "/suggestions/12" }],
+  "logPath": "C:\\Users\\sam\\AppData\\Local\\agent-plugins\\agent-plugins.log"
 }

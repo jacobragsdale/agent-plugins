@@ -54,8 +54,37 @@ pub(crate) struct CatalogItemState {
     pub(crate) requires_approval: bool,
     /// One line per MCP server: what it runs, so a person can decide.
     pub(crate) risk_details: Vec<String>,
+    /// What each MCP server does, in plain words, for the approval prompt.
+    pub(crate) connectors: Vec<ConnectorState>,
+    /// The person holds this package's updates.
+    pub(crate) held: bool,
     /// Marketplace index metadata, when the package is listed there.
     pub(crate) marketplace: Option<MarketplaceMeta>,
+}
+
+/// One MCP server in a package, as a person deciding whether to allow it
+/// needs to see it.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConnectorState {
+    pub(crate) component_id: String,
+    /// The name the AI apps list it under.
+    pub(crate) name: String,
+    /// "Starts a program called uvx on this computer." or "Sends requests to
+    /// mcp.example.com."
+    pub(crate) summary: String,
+    /// The exact command line or address, for people who read those.
+    pub(crate) detail: String,
+    /// Environment variables it reads, such as an API key.
+    pub(crate) environment: Vec<String>,
+    /// Those not set for this person yet.
+    pub(crate) missing_environment: Vec<String>,
+    /// What to install first when its program is not on this computer.
+    pub(crate) missing_program: Option<String>,
+    /// The apps that get it, by display name.
+    pub(crate) apps: Vec<String>,
+    /// It is installed and this version changes what it runs.
+    pub(crate) changed: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -71,6 +100,10 @@ pub(crate) struct MarketplaceMeta {
     pub(crate) installed_base: u64,
     pub(crate) restricted: bool,
     pub(crate) shared_with_you: bool,
+    /// What the live version changed.
+    pub(crate) changelog: Option<String>,
+    /// Whether an admin let everyone see its MCP server; `None` without one.
+    pub(crate) mcp_approved: Option<bool>,
 }
 
 impl MarketplaceMeta {
@@ -86,6 +119,8 @@ impl MarketplaceMeta {
             installed_base: package.installed_base,
             restricted: package.restricted,
             shared_with_you: package.shared_with_you,
+            changelog: package.changelog.clone(),
+            mcp_approved: package.mcp_approved,
         }
     }
 }
@@ -142,6 +177,11 @@ pub(crate) struct MarketplaceIdentity {
     pub(crate) teams: Vec<crate::marketplace::TeamMembership>,
     #[serde(default)]
     pub(crate) suggestions_waiting: u64,
+    /// Open reports and feedback on this person's packages.
+    #[serde(default)]
+    pub(crate) reports_waiting: u64,
+    #[serde(default)]
+    pub(crate) unread_notifications: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -153,6 +193,8 @@ pub(crate) struct ComponentState {
     pub(crate) manual_invocation: bool,
     pub(crate) status: ItemStatus,
     pub(crate) requires_approval: bool,
+    /// Target IDs the person kept this component out of.
+    pub(crate) excluded_apps: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -180,6 +222,11 @@ pub(crate) struct ItemReference {
     pub(crate) id: String,
     pub(crate) source_id: String,
     pub(crate) local_id: String,
+    /// For an update: the marketplace versions before and after.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) from_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) to_version: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -225,6 +272,10 @@ pub(crate) struct AppState {
     pub(crate) download_url: Option<String>,
     pub(crate) identity: Option<MarketplaceIdentity>,
     pub(crate) preflight: Option<crate::preflight::PreflightReport>,
+    /// Marketplace news that arrived since the last sync.
+    pub(crate) notifications: Vec<crate::marketplace::Notification>,
+    /// Where the app writes its log, for "Open logs".
+    pub(crate) log_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -359,6 +410,7 @@ mod tests {
             manual_invocation: false,
             status,
             requires_approval: approval,
+            excluded_apps: Vec::new(),
         }
     }
 
@@ -389,6 +441,8 @@ mod tests {
             status,
             requires_approval: false,
             risk_details: Vec::new(),
+            connectors: Vec::new(),
+            held: false,
             marketplace: None,
         }
     }
@@ -435,7 +489,7 @@ mod tests {
             },
             CompatibilityReport {
                 component_id: text("publish"),
-                target_id: text("m365-copilot"),
+                target_id: text("pi"),
                 capability: CapabilityResult::LossyTranslation {
                     losses: vec![text("Scripts are not supported.")],
                 },
@@ -452,6 +506,8 @@ mod tests {
             installed_base: 87,
             restricted: false,
             shared_with_you: false,
+            changelog: Some(text("Publishes skill packs from a folder.")),
+            mcp_approved: None,
         });
 
         let mut sql = item(
@@ -521,6 +577,8 @@ mod tests {
                     id: text("official/publish"),
                     source_id: text("official"),
                     local_id: text("publish"),
+                    from_version: Some(text("1.3.2")),
+                    to_version: Some(text("1.4.0")),
                 }],
                 failed_items: vec![ItemFailure {
                     id: text("team-data/sql-helper"),
@@ -626,12 +684,12 @@ mod tests {
                     true,
                 ),
                 profile(
-                    TargetId::M365Copilot,
-                    "Microsoft 365 Copilot",
-                    "m365",
+                    TargetId::Pi,
+                    "pi",
+                    "pi",
                     false,
-                    "C:\\Users\\sam\\AppData\\Local\\AgentPlugins\\m365",
-                    false,
+                    "~/.agents/skills",
+                    true,
                 ),
             ],
             tutorial: Some(TargetId::Cursor),
@@ -650,6 +708,8 @@ mod tests {
                     owner: true,
                 }],
                 suggestions_waiting: 0,
+                reports_waiting: 0,
+                unread_notifications: 0,
             }),
             preflight: Some(PreflightReport {
                 started_at_epoch_seconds: 1_789_999_000,
@@ -681,6 +741,13 @@ mod tests {
                     },
                 ],
             }),
+            notifications: vec![crate::marketplace::Notification {
+                id: 41,
+                kind: text("suggestion.created"),
+                text: text("Dana suggested a change to SQL helper."),
+                link: Some(text("/suggestions/12")),
+            }],
+            log_path: Some(text("C:\\Users\\sam\\AppData\\Local\\agent-plugins\\agent-plugins.log")),
         }
     }
 
@@ -755,12 +822,15 @@ mod tests {
                     manual_invocation: false,
                     status: ItemStatus::Available,
                     requires_approval: false,
+                    excluded_apps: Vec::new(),
                 }],
                 compatibility: Vec::new(),
                 destination: None,
                 status: ItemStatus::Available,
                 requires_approval: false,
                 risk_details: Vec::new(),
+                connectors: Vec::new(),
+                held: false,
                 marketplace: None,
             }],
             agent_profiles: Vec::new(),
@@ -769,6 +839,8 @@ mod tests {
             download_url: None,
             identity: None,
             preflight: None,
+            notifications: Vec::new(),
+            log_path: None,
         };
         let value = serde_json::to_value(&state).expect("json");
         assert!(value

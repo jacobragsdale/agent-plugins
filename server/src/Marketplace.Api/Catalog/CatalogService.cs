@@ -5,6 +5,7 @@ using Marketplace.Api.Access;
 using Marketplace.Api.Auth;
 using Marketplace.Api.Configuration;
 using Marketplace.Api.Data;
+using Marketplace.Api.Events;
 using Marketplace.Api.Packages;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -30,7 +31,11 @@ public sealed record IndexPackage(
     int Installs,
     int InstalledBase,
     bool Restricted,
-    bool SharedWithYou);
+    bool SharedWithYou,
+    DateTime CreatedAt,
+    string? Changelog,
+    bool? McpApproved,
+    string[] McpTransports);
 
 public sealed record IndexBundle(
     string Id,
@@ -45,17 +50,19 @@ public sealed record IndexBundle(
     bool Restricted,
     bool SharedWithYou);
 
-/// <summary><see cref="Revoked"/>: pulled packages the caller could see or last reported installed, for clients to uninstall.</summary>
+/// <summary>
+/// <see cref="Revoked"/>: pulled packages the caller could see or last reported installed, for clients to uninstall.
+/// <see cref="GeneratedAt"/> is when the listed content last changed, so the same content is the same bytes and ETag.
+/// </summary>
 public sealed record IndexDocument(DateTime GeneratedAt, IReadOnlyList<IndexPackage> Packages, IReadOnlyList<IndexBundle> Bundles, IReadOnlyList<string> Revoked);
 
 public sealed class CatalogService(
     MarketplaceDbContext db,
     AccessService access,
-    IOptions<ServerOptions> server,
-    TimeProvider timeProvider)
+    EventsService events,
+    IOptions<ServerOptions> server)
 {
     private static readonly JsonSerializerOptions CatalogJson = new(JsonSerializerDefaults.Web) { WriteIndented = true };
-    private static readonly TimeSpan InstalledBaseWindow = TimeSpan.FromDays(30);
 
     /// <summary>
     /// The catalog v1 document the desktop app already understands, one listed source per namespace.
@@ -63,13 +70,17 @@ public sealed class CatalogService(
     /// </summary>
     public async Task<CatalogDocument> CatalogAsync(MarketplaceIdentity identity, CancellationToken cancellationToken)
     {
-        var visible = (await access.VisiblePackagesAsync(identity, null, cancellationToken))
+        var live = await access.LivePackagesAsync(null, cancellationToken);
+        var rules = await access.RulesAsync(cancellationToken);
+        var liveCounts = live.GroupBy(package => package.Namespace, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+        var visible = live
+            .Where(package => AccessService.IsVisible(rules, identity, package.Namespace, package.PackageId, package.Gated))
             .GroupBy(package => package.Namespace, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+            .ToDictionary(group => group.Key, group => group.Select(package => package.PackageId).ToArray(), StringComparer.Ordinal);
         var archives = await db.NamespaceArchives
             .Where(archive => archive.PackageCount > 0)
             .OrderBy(archive => archive.Namespace)
-            .Select(archive => new { archive.Namespace, archive.GeneratedAt })
+            .Select(archive => new { archive.Namespace, archive.GeneratedAt, archive.Digest })
             .ToListAsync(cancellationToken);
         var publishers = await db.Publishers.ToDictionaryAsync(publisher => publisher.Namespace, cancellationToken);
         var baseUrl = server.Value.PublicBaseUrl.TrimEnd('/');
@@ -93,8 +104,10 @@ public sealed class CatalogService(
                     url = $"{baseUrl}/api/sources/{archive.Namespace}/archive",
                     sourceId = archive.Namespace,
                     publisher = displayName,
-                    packageCount = visible[archive.Namespace],
+                    packageCount = visible[archive.Namespace].Length,
                     updatedAt = archive.GeneratedAt,
+                    // What the archive endpoint's ETag will be for this caller, so an unchanged source needs no request.
+                    digest = AccessService.ArchiveDigest(archive.Digest, visible[archive.Namespace], liveCounts.GetValueOrDefault(archive.Namespace)),
                 };
             }).ToArray(),
         };
@@ -108,7 +121,7 @@ public sealed class CatalogService(
             .Include(package => package.Versions.Where(version => !version.Yanked))
             .ToListAsync(cancellationToken);
         var publishers = await db.Publishers.ToDictionaryAsync(publisher => publisher.Namespace, cancellationToken);
-        var stats = await StatsAsync(cancellationToken);
+        var stats = await events.CountsAsync(cancellationToken);
         var rules = await access.RulesAsync(cancellationToken);
         var entries = new List<IndexPackage>(packages.Count);
         foreach (var package in packages.OrderBy(package => package.Namespace, StringComparer.Ordinal).ThenBy(package => package.PackageId, StringComparer.Ordinal))
@@ -136,7 +149,11 @@ public sealed class CatalogService(
                 installs,
                 installedBase,
                 AccessService.Effective(rules, package.Namespace, package.PackageId).Private,
-                AccessService.SharedWith(rules, identity, package.Namespace, package.PackageId)));
+                AccessService.SharedWith(rules, identity, package.Namespace, package.PackageId),
+                package.CreatedAt,
+                latest.Changelog,
+                latest.ComponentKinds.Contains(PublishService.McpServerKind) ? package.McpApprovedBy is not null : null,
+                McpServerSummary.FromJson(latest.McpServersJson).Select(server => server.Transport).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()));
         }
 
         var visible = entries.Select(entry => entry.Id).ToHashSet(StringComparer.Ordinal);
@@ -158,47 +175,23 @@ public sealed class CatalogService(
                 AccessService.SharedWith(rules, identity, pair.bundle.Namespace, pair.bundle.BundleId)))
             .ToList();
 
-        // Someone who lost access still gets the removal for what their PC reported installed.
-        var installed = await db.Heartbeats.AsNoTracking().Where(heartbeat => heartbeat.Account == identity.Account).Select(heartbeat => heartbeat.Installed).SingleOrDefaultAsync(cancellationToken) ?? [];
+        // Someone who lost access still gets the removal for what any of their PCs reported installed.
+        var installed = (await db.Heartbeats.AsNoTracking().Where(heartbeat => heartbeat.Account == identity.Account).Select(heartbeat => heartbeat.Installed).ToListAsync(cancellationToken))
+            .SelectMany(ids => ids)
+            .ToHashSet(StringComparer.Ordinal);
         var revoked = packages
             .Where(package => package.RevokedAt is not null
                 && (installed.Contains(package.CanonicalId) || AccessService.IsVisible(rules, identity, package.Namespace, package.PackageId)))
             .Select(package => package.CanonicalId)
             .Order(StringComparer.Ordinal)
             .ToList();
-        return new IndexDocument(timeProvider.GetUtcNow().UtcDateTime, entries, bundles, revoked);
+        var changed = packages.SelectMany(package => new[] { package.UpdatedAt, package.CreatedAt, package.RevokedAt ?? default })
+            .Concat(bundles.Select(bundle => bundle.UpdatedAt))
+            .DefaultIfEmpty()
+            .Max();
+        return new IndexDocument(DateTime.SpecifyKind(changed, DateTimeKind.Utc), entries, bundles, revoked);
     }
 
     private static IndexPublisher Publisher(string ns, Publisher? publisher) =>
         new(publisher?.Account ?? ns, publisher?.DisplayName ?? ns);
-
-    /// <summary>Install events over all time and the installed base from heartbeats in the last 30 days.</summary>
-    public async Task<Dictionary<string, (int Installs, int InstalledBase)>> StatsAsync(CancellationToken cancellationToken)
-    {
-        var installs = await db.Events
-            .Where(clientEvent => clientEvent.Kind == "install" && clientEvent.PackageId != null)
-            .GroupBy(clientEvent => clientEvent.PackageId!)
-            .Select(group => new { PackageId = group.Key, Count = group.Count() })
-            .ToListAsync(cancellationToken);
-        var since = timeProvider.GetUtcNow().UtcDateTime - InstalledBaseWindow;
-        // Installed is de-duplicated on ingest, so each heartbeat counts once per package.
-        var installedBase = await db.Heartbeats
-            .Where(heartbeat => heartbeat.OccurredAt >= since)
-            .SelectMany(heartbeat => heartbeat.Installed)
-            .GroupBy(id => id)
-            .Select(group => new { PackageId = group.Key, Count = group.Count() })
-            .ToListAsync(cancellationToken);
-        var result = new Dictionary<string, (int, int)>(StringComparer.Ordinal);
-        foreach (var install in installs)
-        {
-            result[install.PackageId] = (install.Count, 0);
-        }
-
-        foreach (var installed in installedBase)
-        {
-            result[installed.PackageId] = (result.GetValueOrDefault(installed.PackageId).Item1, installed.Count);
-        }
-
-        return result;
-    }
 }

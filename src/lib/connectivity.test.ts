@@ -22,11 +22,11 @@ describe("offlineBanner", () => {
   });
 
   it("shows when the packages on screen are as of the last good check", () => {
-    expect(offlineBanner(offline, false)).toBe(`Offline — showing packages as of ${formatEpoch(1790000000)}. Agent Plugins will retry automatically.`);
+    expect(offlineBanner(offline, false)).toBe(`Offline — showing skills as of ${formatEpoch(1790000000)}. Agent Plugins will retry automatically.`);
   });
 
   it("shows when an action just failed for lack of a connection", () => {
-    expect(offlineBanner(online, true)).toContain("Offline — showing packages as of");
+    expect(offlineBanner(online, true)).toContain("Offline — showing skills as of");
   });
 
   it("stays hidden while some servers answer; the unreachable sources carry their own badge", () => {
@@ -77,9 +77,9 @@ describe("catalogBody", () => {
 
 describe("noMatchesText", () => {
   it("names the search, the local-changes filter, or both", () => {
-    expect(noMatchesText(" sql ", false, 0)).toBe("No packages match “sql”.");
-    expect(noMatchesText("", true, 0)).toBe("No packages have local changes.");
-    expect(noMatchesText("sql", true, 0)).toBe("No packages with local changes match “sql”.");
+    expect(noMatchesText(" sql ", false, 0)).toBe("No skills match “sql”.");
+    expect(noMatchesText("", true, 0)).toBe("No skills have local changes.");
+    expect(noMatchesText("sql", true, 0)).toBe("No skills with local changes match “sql”.");
   });
 
   it("says nothing while something matches or no filter is on", () => {

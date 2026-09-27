@@ -5,7 +5,7 @@
 
   @if (detail.hasValue()) {
     @let item = detail.value();
-    <app-package-header [item]="item" [entry]="entry()" [kinds]="kinds()" />
+    <app-package-header [item]="item" [kinds]="kinds()" />
 
     @if (ownerStatus(); as status) {
       <app-owner-panel
@@ -15,18 +15,31 @@
         [spaceName]="space().spaceName"
         [owners]="space().owners"
         [revoked]="item.revoked"
+        [revokedByAdmin]="item.revokedByAdmin"
+        [admin]="session.isAdmin()"
+        [editable]="editable()"
         [status]="status"
-        (changed)="detail.reload(); listing.reload()"
+        (changed)="detail.reload()"
       />
     }
 
     <div class="columns">
       <mat-tab-group mat-stretch-tabs="false" animationDuration="0ms" class="main">
-        <mat-tab label="Files">
+        <mat-tab label="What it does">
           <app-version-files [ns]="ns()" [pkg]="pkg()" [versions]="versions()" [owner]="owner()" [(shown)]="shown" />
         </mat-tab>
         <mat-tab label="Versions">
-          <app-version-list [ns]="ns()" [pkg]="pkg()" [versions]="versions()" [liveVersion]="item.liveVersion" [owner]="owner()" (withdraw)="withdraw($event)" (restore)="restore($event)" />
+          <app-version-list
+            [ns]="ns()"
+            [pkg]="pkg()"
+            [versions]="versions()"
+            [liveVersion]="item.liveVersion"
+            [owner]="owner()"
+            [admin]="session.isAdmin()"
+            (withdraw)="withdraw($event)"
+            (restore)="restore($event)"
+            (purge)="purge($event)"
+          />
         </mat-tab>
         @if (owner() || suggestionRows().length > 0) {
           <mat-tab [label]="waiting() > 0 ? 'Suggestions (' + waiting() + ')' : 'Suggestions'">
@@ -38,6 +51,11 @@
             </div>
           </mat-tab>
         }
+        @if (owner()) {
+          <mat-tab label="Reports">
+            <app-package-reports [ns]="ns()" [pkg]="pkg()" (changed)="session.refreshMe()" />
+          </mat-tab>
+        }
         @if (usage(); as stats) {
           <mat-tab label="Usage">
             <app-package-usage [stats]="stats" />
@@ -45,7 +63,7 @@
         }
       </mat-tab-group>
 
-      <app-package-side [item]="item" [entry]="entry()" [version]="shownVersion()" [skills]="packSkills()" [canReport]="canReport()" [canSuggest]="canSuggest()" (report)="report()" />
+      <app-package-side [item]="item" [version]="shownVersion()" [skills]="packSkills()" [canReport]="canReport()" [canSuggest]="canSuggest()" (report)="report($event)" />
     </div>
   } @else if (loadProblem(); as problem) {
     <div class="card">
