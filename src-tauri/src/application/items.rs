@@ -371,14 +371,11 @@ pub(crate) async fn set_excluded_apps(
 pub(crate) async fn save_connector_settings(
     values: std::collections::BTreeMap<String, String>,
 ) -> Result<(), String> {
-    // All or nothing: a bad value must not leave the ones before it saved.
-    for (name, value) in &values {
-        crate::startup::check_user_variable(name, value.trim())?;
-    }
-    for (name, value) in values {
-        crate::startup::save_user_variable(&name, value.trim())?;
-    }
-    Ok(())
+    let values = values
+        .into_iter()
+        .map(|(name, value)| (name, value.trim().to_string()))
+        .collect::<Vec<_>>();
+    crate::startup::save_user_variables(&values)
 }
 
 pub(crate) async fn bulk_plan(

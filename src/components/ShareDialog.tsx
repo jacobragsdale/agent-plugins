@@ -9,6 +9,7 @@ import type { Share } from "../ipc/schemas";
 import { DirectorySearch } from "./DirectorySearch";
 import type { DirectoryPick } from "./DirectorySearch";
 import { ErrorMessage } from "./Notice";
+import { returnFocus } from "../lib/returnFocus";
 
 /** What the Share dialog is about: a space (`ns`) or one package or bundle (`ns/id`). */
 export type ShareTarget = Readonly<{ target: string; label: string }>;
@@ -129,7 +130,7 @@ export function ShareDialog({ request, onClose, onSaved }: Readonly<{ request: S
         }
       }}
     >
-      <Dialog.Content maxWidth="560px">
+      <Dialog.Content maxWidth="560px" {...returnFocus}>
         <Dialog.Title>Share “{label}”</Dialog.Title>
         <Dialog.Description size="2">Choose who can find and install it. Sharing never lets anyone change it.</Dialog.Description>
         {error === null ? null : (

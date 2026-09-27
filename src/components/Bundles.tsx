@@ -9,6 +9,7 @@ import { bundleSummary, cardDomId, ID_PATTERN, ownsSpace, spaceLabel, suggestId 
 import type { BundleSummary } from "../lib/marketplace";
 import { ItemCard } from "./ItemCard";
 import { ErrorMessage } from "./Notice";
+import { returnFocus } from "../lib/returnFocus";
 
 const MAX_MEMBERS = 50;
 
@@ -248,7 +249,7 @@ export function BundleDialog({
         }
       }}
     >
-      <Dialog.Content maxWidth="640px">
+      <Dialog.Content maxWidth="640px" {...returnFocus}>
         <Dialog.Title>{editing === null ? "New bundle" : `Edit ${editing.name}`}</Dialog.Title>
         <Dialog.Description size="2">A bundle lets people install several skills at once. Anyone can still install each one on its own.</Dialog.Description>
         {error === null ? null : (

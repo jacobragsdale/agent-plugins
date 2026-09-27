@@ -162,7 +162,15 @@ pub(crate) fn recover(paths: &SystemPaths) -> Result<(), String> {
                 "An earlier change {UNDO_PENDING}: {error} Close any app that is using these files. Agent Plugins tries again the next time it checks for updates."
             )
         })?;
-        remove_journal(paths);
+        // A journal left behind would be rolled back again at every read, over
+        // whatever changed since, so nothing may change until it is gone.
+        remove_journal(paths).map_err(|error| {
+            format!(
+                "An earlier change {UNDO_PENDING}: Could not remove {}: {} Close any app that is using it. Agent Plugins tries again the next time it checks for updates.",
+                paths.app_data().join(JOURNAL_FILE).display(),
+                fs_retry::plain(&error)
+            )
+        })?;
     }
     sweep_parked_cleanups(paths);
     Ok(())
@@ -181,20 +189,21 @@ pub(super) fn finish_committed(paths: &SystemPaths, journal: &TransactionJournal
         if fs_retry::rename(&journal_path, &parked).is_err() {
             return;
         }
-    } else {
-        remove_journal(paths);
+    } else if let Err(error) = remove_journal(paths) {
+        eprintln!(
+            "Could not remove {}: {error}",
+            paths.app_data().join(JOURNAL_FILE).display()
+        );
     }
     if let Err(error) = sync_directory(&paths.app_data()) {
         eprintln!("{error}");
     }
 }
 
-fn remove_journal(paths: &SystemPaths) {
-    let journal_path = paths.app_data().join(JOURNAL_FILE);
-    if let Err(error) = fs_retry::remove_file(&journal_path) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("Could not remove {}: {error}", journal_path.display());
-        }
+fn remove_journal(paths: &SystemPaths) -> std::io::Result<()> {
+    match fs_retry::remove_file(&paths.app_data().join(JOURNAL_FILE)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
     }
 }
 

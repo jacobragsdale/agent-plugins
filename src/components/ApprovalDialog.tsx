@@ -3,6 +3,7 @@ import type { JSX } from "react";
 import { Badge, Button, Code, Dialog, Text, TextField } from "@radix-ui/themes";
 import type { CatalogItem, Connector } from "../ipc/schemas";
 import { listPhrase } from "../lib/marketplace";
+import { returnFocus } from "../lib/returnFocus";
 
 /** A package (or one part of it) whose connectors the person is asked about. */
 export type ApprovalEntry = Readonly<{ item: CatalogItem; componentId: string | null }>;
@@ -45,7 +46,7 @@ export function ApprovalDialog({ request, onResolve }: Readonly<{ request: Appro
         }
       }}
     >
-      <Dialog.Content maxWidth="600px">
+      <Dialog.Content maxWidth="600px" {...returnFocus}>
         <Dialog.Title>{install ? "Allow connector?" : "Connector settings"}</Dialog.Title>
         <Dialog.Description size="2">
           {install

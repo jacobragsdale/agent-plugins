@@ -95,7 +95,9 @@ fn apply_launch_at_login_default<R: Runtime>(app: &App<R>) {
         _ => Ok(()),
     };
     if let Err(error) = result {
+        // Not applied, so not remembered: the next start tries again.
         eprintln!("Could not set Launch at Login: {error}");
+        return;
     }
     if policy.is_none() {
         let _ = std::fs::create_dir_all(paths.app_data());

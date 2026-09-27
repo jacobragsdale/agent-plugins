@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { JSX } from "react";
 import { Button, Checkbox, Dialog, Text } from "@radix-ui/themes";
 import type { AgentProfile, CatalogItem } from "../ipc/schemas";
+import { returnFocus } from "../lib/returnFocus";
 
 /** One connector whose apps the person is choosing. */
 export type AppsRequest = Readonly<{ item: CatalogItem; componentId: string }>;
@@ -49,7 +50,7 @@ export function AppsDialog({
         }
       }}
     >
-      <Dialog.Content maxWidth="440px">
+      <Dialog.Content maxWidth="440px" {...returnFocus}>
         <Dialog.Title>Which apps use it?</Dialog.Title>
         <Dialog.Description size="2">Agent Plugins keeps this connector out of the apps you clear, and leaves it there on later updates.</Dialog.Description>
         <div className="manage-section">
@@ -87,7 +88,11 @@ export function AppsDialog({
           <Button
             disabled={request === null || chosen.size === 0}
             onClick={() => {
-              if (request !== null) {
+              // Nothing changed means nothing to write, and nothing to restart.
+              const unchanged = excluded.length === excludedNow.length && excluded.every((target) => excludedNow.includes(target));
+              if (unchanged) {
+                onClose();
+              } else if (request !== null) {
                 onSave(
                   request,
                   excluded,

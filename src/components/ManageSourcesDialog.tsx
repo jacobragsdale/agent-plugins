@@ -6,6 +6,7 @@ import type { AppState, ListedSource, RepositoryState, SourceState } from "../ip
 import { ErrorMessage } from "./Notice";
 import { FreshnessBadge } from "./SourceGroup";
 import type { SourceAction } from "./SourceGroup";
+import { returnFocus } from "../lib/returnFocus";
 
 function ListedSourceCard({ name, description, children }: Readonly<{ name: string; description: string; children: ReactNode }>): JSX.Element {
   return (
@@ -64,7 +65,7 @@ export function ManageSourcesDialog({
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content maxWidth="720px">
+      <Dialog.Content maxWidth="720px" {...returnFocus}>
         <Dialog.Title>Manage sources</Dialog.Title>
         <Dialog.Description>Adding a source makes its packages available. Nothing is installed until you choose it.</Dialog.Description>
         {error === null ? null : (

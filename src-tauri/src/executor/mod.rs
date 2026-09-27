@@ -791,6 +791,9 @@ pub(crate) fn reset_app(
     sources: &[(ConfiguredSource, Option<SourceSnapshot>)],
 ) -> Result<OperationOutcome, String> {
     let _lock = TransactionLock::acquire(paths)?;
+    // An undo still pending holds the person's originals beside their files;
+    // wiping its journal would leave them hidden there for good.
+    recover(paths)?;
     let mut backup_paths = Vec::new();
     // Reset is the way out of a damaged or newer ledger, so without a usable
     // one it removes what it can find and leaves the rest to the state wipe.
@@ -1744,6 +1747,101 @@ mod tests {
             }
             assert!(!paths.app_data().join(JOURNAL_FILE).exists());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_journal_that_cannot_be_removed_refuses_changes_until_it_can() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        fs::create_dir_all(&paths.home).expect("home");
+        let target = paths.home.join("skill.txt");
+        let staging = paths.home.join("skill-stage.txt");
+        let backup = paths.home.join("skill-backup.txt");
+        fs::write(&target, "old").expect("target");
+        fs::write(&staging, "new").expect("staging");
+        let journal = TransactionJournal {
+            version: 1,
+            transaction_id: "tx-killed".to_string(),
+            mutations: vec![JournalMutation {
+                target: target.display().to_string(),
+                staging: Some(staging.display().to_string()),
+                backup: Some(backup.display().to_string()),
+                persistent_backup: false,
+                target_existed: true,
+                original_digest: Some(ledger::bytes_digest(b"old")),
+            }],
+        };
+        super::journal::write_journal(&paths, &journal).expect("journal");
+        fs::rename(&target, &backup).expect("backup");
+        fs::rename(&staging, &target).expect("activate");
+
+        // The journal's folder can't be changed, so the journal can't be removed.
+        let app_data = paths.app_data();
+        fs::set_permissions(&app_data, fs::Permissions::from_mode(0o555)).expect("read-only");
+        let refused = recover(&paths);
+        fs::set_permissions(&app_data, fs::Permissions::from_mode(0o755)).expect("writable");
+        assert!(refused.expect_err("refused").contains(UNDO_PENDING));
+        assert_eq!(
+            fs::read_to_string(&target).expect("target"),
+            "old",
+            "rolled back"
+        );
+
+        fs::write(&target, "changed since").expect("a later change");
+        recover(&paths).expect("recovered");
+        assert_eq!(
+            fs::read_to_string(&target).expect("target"),
+            "changed since",
+            "not rolled back twice"
+        );
+        assert!(!app_data.join(JOURNAL_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_finishes_a_pending_undo_or_refuses() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let skills = paths.home.join("skills");
+        fs::create_dir_all(&skills).expect("skills");
+        let target = skills.join("skill.txt");
+        let staging = skills.join("skill-stage.txt");
+        let backup = skills.join(".resource-previous-skill.txt");
+        fs::write(&target, "original").expect("target");
+        fs::write(&staging, "new").expect("staging");
+        let journal = TransactionJournal {
+            version: 1,
+            transaction_id: "tx-undo-pending".to_string(),
+            mutations: vec![JournalMutation {
+                target: target.display().to_string(),
+                staging: Some(staging.display().to_string()),
+                backup: Some(backup.display().to_string()),
+                persistent_backup: false,
+                target_existed: true,
+                original_digest: Some(ledger::bytes_digest(b"original")),
+            }],
+        };
+        super::journal::write_journal(&paths, &journal).expect("journal");
+        fs::rename(&target, &backup).expect("backup");
+        fs::rename(&staging, &target).expect("activate");
+
+        // The folder can't change yet, so the undo can't run.
+        fs::set_permissions(&skills, fs::Permissions::from_mode(0o555)).expect("read-only");
+        let refused = reset_app(&paths, &[]);
+        fs::set_permissions(&skills, fs::Permissions::from_mode(0o755)).expect("writable");
+        assert!(refused.expect_err("refused").contains(UNDO_PENDING));
+        assert!(
+            paths.app_data().join(JOURNAL_FILE).exists(),
+            "the undo is still owed"
+        );
+
+        reset_app(&paths, &[]).expect("reset");
+        assert_eq!(fs::read_to_string(&target).expect("target"), "original");
+        assert!(!backup.exists());
+        assert!(!paths.app_data().join(JOURNAL_FILE).exists());
     }
 
     #[test]

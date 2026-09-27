@@ -431,7 +431,7 @@ pub(crate) fn is_connector_setting(name: &str) -> bool {
         && !matches!(name, "PATH" | "HOME" | "USERPROFILE" | "APPDATA")
 }
 
-/// Whether `save_user_variable` would take this name and value; checked for every
+/// Whether `save_user_variables` would take this name and value; checked for every
 /// setting before any is saved, so a bad one doesn't leave the others half written.
 pub(crate) fn check_user_variable(name: &str, value: &str) -> Result<(), String> {
     if !is_connector_setting(name) {
@@ -446,15 +446,25 @@ pub(crate) fn check_user_variable(name: &str, value: &str) -> Result<(), String>
 /// Saves a connector setting, such as an API key, where the person's apps
 /// read environment variables, and in this process so the window sees it at
 /// once. The value is never logged or recorded anywhere else.
-pub(crate) fn save_user_variable(name: &str, value: &str) -> Result<(), String> {
-    check_user_variable(name, value)?;
-    if !cfg!(any(windows, target_os = "macos")) {
+/// Saves settings all or nothing: every value is checked first, and running
+/// apps are told once at the end, since each notice can wait on a slow window.
+pub(crate) fn save_user_variables(values: &[(String, String)]) -> Result<(), String> {
+    for (name, value) in values {
+        check_user_variable(name, value)?;
+    }
+    if let (false, Some((name, _))) = (cfg!(any(windows, target_os = "macos")), values.first()) {
         return Err(format!(
             "Set {name} in your shell profile; Agent Plugins saves settings only on Windows and macOS."
         ));
     }
-    persist_session_env(name, OsStr::new(value))?;
-    std::env::set_var(name, value);
+    for (name, value) in values {
+        write_session_env(name, OsStr::new(value))?;
+        std::env::set_var(name, value);
+    }
+    #[cfg(windows)]
+    if !values.is_empty() {
+        broadcast_environment_change();
+    }
     Ok(())
 }
 
@@ -1643,7 +1653,20 @@ fn persist_session_env(key: &str, value: &OsStr) -> Result<(), String> {
 
 #[cfg(windows)]
 fn persist_session_env(key: &str, value: &OsStr) -> Result<(), String> {
-    persist_windows_user_env(key, value)
+    write_windows_user_env(key, value)?;
+    broadcast_environment_change();
+    Ok(())
+}
+
+/// Saves one setting without telling running apps; the caller does once.
+#[cfg(windows)]
+fn write_session_env(key: &str, value: &OsStr) -> Result<(), String> {
+    write_windows_user_env(key, value)
+}
+
+#[cfg(not(windows))]
+fn write_session_env(key: &str, value: &OsStr) -> Result<(), String> {
+    persist_session_env(key, value)
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -1652,7 +1675,7 @@ fn persist_session_env(_key: &str, _value: &OsStr) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn persist_windows_user_env(key: &str, value: &OsStr) -> Result<(), String> {
+fn write_windows_user_env(key: &str, value: &OsStr) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_EXPAND_SZ};
     use winreg::RegValue;
@@ -1686,7 +1709,6 @@ fn persist_windows_user_env(key: &str, value: &OsStr) -> Result<(), String> {
             .set_value(name, &text.as_ref())
             .map_err(|error| format!("Could not write user environment {name}: {error}"))?;
     }
-    broadcast_environment_change();
     Ok(())
 }
 

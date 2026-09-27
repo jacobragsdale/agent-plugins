@@ -10,6 +10,7 @@ import { NAMESPACE_PATTERN, suggestNamespace } from "../lib/marketplace";
 import { DirectorySearch } from "./DirectorySearch";
 import { ErrorMessage } from "./Notice";
 import { EntryRow } from "./ShareDialog";
+import { returnFocus } from "../lib/returnFocus";
 
 type View = Readonly<{ kind: "list" }> | Readonly<{ kind: "team"; namespace: string }> | Readonly<{ kind: "create" }>;
 
@@ -51,7 +52,7 @@ export function TeamsDialog({
         onOpenChange(next);
       }}
     >
-      <Dialog.Content maxWidth="640px">
+      <Dialog.Content maxWidth="640px" {...returnFocus}>
         <Dialog.Title>Teams</Dialog.Title>
         <Dialog.Description size="2">Everyone in a team can publish skills to it and see its private skills.</Dialog.Description>
         {error === null ? null : (

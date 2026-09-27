@@ -9,6 +9,7 @@ import { appsFor, appsPhrase, bundleSummary, linkAction, listPhrase, partCounts,
 import type { LinkTarget } from "../lib/marketplace";
 import { statusColor, statusLabel } from "../lib/status";
 import { ErrorMessage } from "./Notice";
+import { returnFocus } from "../lib/returnFocus";
 
 /** Pasting a team invite or a share link someone sent: see what it is, then join or get it. */
 export function OpenLinkDialog({ open, onOpenChange, onRedeemed }: Readonly<{ open: boolean; onOpenChange: (open: boolean) => void; onRedeemed: (result: LinkResult) => void }>): JSX.Element {
@@ -66,7 +67,7 @@ export function OpenLinkDialog({ open, onOpenChange, onRedeemed }: Readonly<{ op
         onOpenChange(next);
       }}
     >
-      <Dialog.Content maxWidth="520px">
+      <Dialog.Content maxWidth="520px" {...returnFocus}>
         <Dialog.Title>Open a link</Dialog.Title>
         <Dialog.Description size="2">Paste a team invite or a share link someone sent you.</Dialog.Description>
         {error === null ? null : (
@@ -158,7 +159,7 @@ export function LinkInstallDialog({
         }
       }}
     >
-      <Dialog.Content maxWidth="520px">
+      <Dialog.Content maxWidth="520px" {...returnFocus}>
         {request === null ? null : request.target.kind === "item" ? (
           <ItemRequest target={request.target} item={request.target.item} apps={appsPhrase(appsFor(request.target.item, profiles, request.target.componentId))} onInstall={onInstall} onShow={onShow} />
         ) : (

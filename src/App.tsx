@@ -143,6 +143,8 @@ export default function App(): JSX.Element {
   const [error, setError] = useState<ShownError | null>(null);
   const [info, setInfo] = useState<InfoNotice | null>(null);
   const [dismissedReport, setDismissedReport] = useState<string | null>(null);
+  /** The newest background report, kept until dismissed: states from later actions don't carry it. */
+  const [lastReport, setLastReport] = useState<ReportNotice | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [adding, setAdding] = useState<string | null>(null);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
@@ -177,8 +179,12 @@ export default function App(): JSX.Element {
   }, [state]);
 
   const applyState = useCallback((next: AppState): void => {
+    const fresh = reportNotice(next);
     startTransition(() => {
       setState(next);
+      if (fresh !== null) {
+        setLastReport(fresh);
+      }
     });
   }, []);
 
@@ -928,7 +934,7 @@ export default function App(): JSX.Element {
   const matchCount = [...itemsBySource.values()].reduce((total, items) => total + items.length, 0);
   // With nothing loaded yet, a failure replaces the spinner instead of sitting above it forever.
   const loadFailed = state === null && error !== null && !syncing;
-  const report = visibleReport(state, dismissedReport);
+  const report = visibleReport(lastReport, dismissedReport);
   const { items, profiles } = catalogLists(state);
   return (
     <main className="app-shell">
@@ -1332,8 +1338,7 @@ function skillCreatorProfile(state: AppState | null): AgentProfile | null {
 }
 
 /** The background-update report, unless the person already dismissed this exact one. */
-function visibleReport(state: AppState | null, dismissed: string | null): ReportNotice | null {
-  const report = state === null ? null : reportNotice(state);
+function visibleReport(report: ReportNotice | null, dismissed: string | null): ReportNotice | null {
   return report === null || report.text === dismissed ? null : report;
 }
 

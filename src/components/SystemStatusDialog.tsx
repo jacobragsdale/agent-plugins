@@ -2,6 +2,7 @@ import type { JSX, ReactNode } from "react";
 import { Button, Dialog, Text } from "@radix-ui/themes";
 import type { AgentProfile, AppIdentity, CheckStatus, PreflightCheck, PreflightReport } from "../ipc/schemas";
 import { detectionUnsure } from "../lib/status";
+import { returnFocus } from "../lib/returnFocus";
 
 const GROUP_TITLES: Readonly<Record<string, string>> = { host: "Windows host", auth: "Authentication", server: "Marketplace server", agents: "Agents", dependencies: "Dependencies" };
 
@@ -283,7 +284,7 @@ export function SystemStatusDialog({
   const ran = report === null ? "not run yet" : new Date(report.startedAtEpochSeconds * 1000).toLocaleString();
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content maxWidth="640px">
+      <Dialog.Content maxWidth="640px" {...returnFocus}>
         <Dialog.Title>System status</Dialog.Title>
         <Dialog.Description size="2">{headline(report, seriousProblems(report))}</Dialog.Description>
         <StatusSummary report={report} identity={identity} marketplaceUrl={marketplaceUrl} profiles={profiles} onAction={onAction} />
