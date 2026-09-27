@@ -1615,7 +1615,12 @@ fn sync(args: &[String]) -> Result<(), String> {
         && report.still_pulled.is_empty()
         && report.failed_items.is_empty()
     {
-        println!("Everything is up to date.");
+        if app.connectivity == crate::app_state::Connectivity::Degraded {
+            // A Wi-Fi sign-in page, or a server answering errors: nothing new was learned.
+            println!("Some sources couldn't be refreshed, so their saved copies are in use. Agent Plugins tries again soon.");
+        } else {
+            println!("Everything is up to date.");
+        }
     }
     if report.failed_items.is_empty() {
         Ok(())

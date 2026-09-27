@@ -300,7 +300,7 @@ Removes a package, or one skill or connector of it, from every agent. A package 
 
 ## `sync`
 
-Runs a full sync, as **Refresh** in the window does, and prints what it changed in the lines [`install`](#install-target) uses, or `Everything is up to date.` It fails when any package could not be updated.
+Runs a full sync, as **Refresh** in the window does, and prints what it changed in the lines [`install`](#install-target) uses, or `Everything is up to date.` When servers answered but nothing usable came back (a Wi-Fi sign-in page, or errors), it prints `Some sources couldn't be refreshed, so their saved copies are in use. Agent Plugins tries again soon.` instead. It fails when any package could not be updated.
 
 ## `withdraw <ns>/<package> <version>`
 
