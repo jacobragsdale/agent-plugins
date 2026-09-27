@@ -87,6 +87,8 @@ pub(crate) struct Notification {
     /// A portal path such as `/p/ns/id`.
     #[serde(default)]
     pub(crate) link: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub(crate) read: bool,
 }
 
 #[derive(Deserialize)]
@@ -97,32 +99,59 @@ struct NotificationPage {
 
 const NOTIFICATIONS_SEEN_FILE: &str = "notifications-seen";
 
+/// Where this process last left the news, so a cursor file that can't be written doesn't
+/// bring the same news back every pass.
+// ponytail: in memory, so a restart shows it once more; fine for a file someone locked.
+static SEEN_FLOOR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Marketplace news newer than what this PC already showed. The first look
 /// only remembers where the news stands, so nobody gets a backlog at once.
 pub(crate) fn new_notifications(cache_base: &Path) -> Result<Vec<Notification>, String> {
+    use std::sync::atomic::Ordering;
     let seen_file = cache_base.join(NOTIFICATIONS_SEEN_FILE);
-    let seen = std::fs::read_to_string(&seen_file)
-        .ok()
-        .and_then(|text| text.trim().parse::<u64>().ok());
+    let saved = std::fs::read_to_string(&seen_file).ok();
+    let floor = Some(SEEN_FLOOR.load(Ordering::Relaxed)).filter(|floor| *floor > 0);
+    let seen = saved
+        .as_deref()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .max(floor);
     let path = match seen {
         Some(seen) => format!("notifications?after={seen}&limit=50"),
+        // A saved place that can't be read is lost: what is unread stands in for what is new.
+        None if saved.is_some() => "notifications?limit=50".to_string(),
         None => "notifications?limit=1".to_string(),
     };
     let page = api_json::<NotificationPage>(reqwest::Method::GET, &path, None)?;
-    let newest = page
-        .items
-        .iter()
-        .map(|item| item.id)
-        .max()
-        .or(seen)
-        .unwrap_or(0);
+    let (newest, news) = match seen {
+        Some(seen) => after_seen(seen, page.items),
+        None => {
+            let newest = page.items.iter().map(|item| item.id).max().unwrap_or(0);
+            let unread = page.items.into_iter().filter(|item| !item.read);
+            (
+                newest,
+                if saved.is_some() {
+                    unread.collect()
+                } else {
+                    Vec::new()
+                },
+            )
+        }
+    };
+    SEEN_FLOOR.fetch_max(newest, Ordering::Relaxed);
     let _ = std::fs::create_dir_all(cache_base);
     let _ = crate::fs_retry::replace_file(&seen_file, newest.to_string().as_bytes());
-    Ok(if seen.is_some() {
-        page.items
-    } else {
-        Vec::new()
-    })
+    Ok(news)
+}
+
+/// What a page adds after `seen`, whatever the server sent: only newer items, and
+/// a place that never moves back.
+fn after_seen(seen: u64, items: Vec<Notification>) -> (u64, Vec<Notification>) {
+    let news = items
+        .into_iter()
+        .filter(|item| item.id > seen)
+        .collect::<Vec<_>>();
+    let newest = news.iter().map(|item| item.id).max().unwrap_or(seen);
+    (newest, news)
 }
 
 /// A team the caller belongs to, as `/api/me` lists it.
@@ -820,6 +849,19 @@ fn deliver_with_outbox(
     queue.retain(|queued| now.saturating_sub(queued.queued_at) <= OUTBOX_MAX_AGE_SECONDS);
     let excess = queue.len().saturating_sub(OUTBOX_MAX_EVENTS);
     queue.drain(..excess);
+    let save = |queue: &[QueuedEvent]| {
+        if queue.is_empty() {
+            let _ = std::fs::remove_file(outbox);
+        } else if let Ok(json) = serde_json::to_vec(queue) {
+            if let Some(parent) = outbox.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = crate::fs_retry::replace_file(outbox, &json);
+        }
+    };
+    // On disk before the post, so a process killed while posting loses nothing;
+    // the server drops a duplicate if the post got through.
+    save(&queue);
     let mut result = Ok(());
     while !queue.is_empty() {
         let batch = queue
@@ -833,14 +875,7 @@ fn deliver_with_outbox(
         }
         queue.drain(..batch.len());
     }
-    if queue.is_empty() {
-        let _ = std::fs::remove_file(outbox);
-    } else if let Ok(json) = serde_json::to_vec(&queue) {
-        if let Some(parent) = outbox.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = crate::fs_retry::replace_file(outbox, &json);
-    }
+    save(&queue);
     result
 }
 
@@ -955,6 +990,12 @@ fn certificate_reason(reason: &rustls::CertificateError) -> String {
             "it was issued for a different server".to_string()
         }
         Revoked => "it has been revoked".to_string(),
+        // Windows' verifier says why in its own words, which the wrapper would print as code.
+        Other(other) => {
+            let text = other.0.to_string();
+            let plain = text.split(" (os error").next().unwrap_or(&text).trim();
+            format!("it could not be verified: {plain}")
+        }
         other => format!("it could not be verified: {other}"),
     }
 }
@@ -1128,6 +1169,40 @@ mod tests {
     const UNTRUSTED_KEY: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgVn0geI0c5K0ur9wiOznRIE+iSyRmDlk4mwQFBtIv7kShRANCAARE7SSKUxTn0A8dvGU1K/qf/T9G72d0wm/uJv87lytJL0gPpV6hPx0tU5GDQCV0Oz2EHwYx1HQbYoODY/6ar6nb";
 
     #[test]
+    fn news_is_only_what_came_after_the_saved_place() {
+        let item = |id| Notification {
+            id,
+            kind: String::new(),
+            text: format!("news {id}"),
+            link: None,
+            read: false,
+        };
+        // A server that ignores `after` sends the newest page, older items included.
+        let (newest, news) = after_seen(40, vec![item(42), item(41), item(40), item(39)]);
+        assert_eq!(newest, 42);
+        assert_eq!(
+            news.iter().map(|item| item.id).collect::<Vec<_>>(),
+            [42, 41]
+        );
+        // One that sends only older items never moves the place back.
+        let (newest, news) = after_seen(40, vec![item(39), item(30)]);
+        assert_eq!((newest, news.len()), (40, 0));
+    }
+
+    #[test]
+    fn a_platform_verifier_reason_reads_as_words() {
+        let windows = std::io::Error::other(
+            "The signature of the certificate cannot be verified. (os error -2146869244)",
+        );
+        assert_eq!(
+            certificate_reason(&rustls::CertificateError::Other(rustls::OtherError(
+                std::sync::Arc::new(windows)
+            ))),
+            "it could not be verified: The signature of the certificate cannot be verified."
+        );
+    }
+
+    #[test]
     fn an_untrusted_certificate_is_explained_not_reported_as_offline() {
         use base64::Engine as _;
         use std::io::{Read, Write};
@@ -1236,6 +1311,24 @@ mod tests {
             ["uninstall", "heartbeat", "install"],
             "queued events go first, and only the newest heartbeat is kept"
         );
+        assert!(!outbox.exists());
+    }
+
+    #[test]
+    fn events_being_posted_are_already_in_the_outbox() {
+        let dir = tempfile::tempdir().expect("dir");
+        let outbox = dir.path().join(OUTBOX_FILE);
+        deliver_with_outbox(
+            &outbox,
+            vec![ClientEvent::install("acme/tools", None, Vec::new())],
+            |_| {
+                // The process could be killed here, mid-post.
+                let queued = std::fs::read_to_string(&outbox).expect("queued before the post");
+                assert!(queued.contains("acme/tools"));
+                Ok(())
+            },
+        )
+        .expect("delivered");
         assert!(!outbox.exists());
     }
 

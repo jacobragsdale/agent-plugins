@@ -567,15 +567,14 @@ fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), Strin
             problems.join(" ")
         ));
     }
-    let installed_keys = crate::executor::read_ledger(&paths)
-        .map(|ledger| {
-            ledger
-                .items
-                .values()
-                .map(|record| record.source_key.clone())
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
+    // None when the ledger can't be read: any source might have installs, so none is retired.
+    let installed_keys = crate::executor::read_ledger(&paths).ok().map(|ledger| {
+        ledger
+            .items
+            .values()
+            .map(|record| record.source_key.clone())
+            .collect::<BTreeSet<_>>()
+    });
     let (repositories, loaded_repositories, retired_repositories) = apply_repositories(
         &cache,
         &mut health,
@@ -589,7 +588,7 @@ fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), Strin
         now,
         config.sources,
         fetched_sources,
-        &installed_keys,
+        installed_keys.as_ref(),
     );
     messages.extend(retired_message(&retired_repositories, &retired_sources));
     sources.sort_by(|left, right| {
@@ -692,7 +691,9 @@ fn remove_revoked(paths: &SystemPaths, loaded: &[LoadedSource], revoked: &[Strin
     };
     let mut removed = Vec::new();
     for (id, record) in &ledger.items {
-        if !revoked.contains(id) {
+        // A test install from a folder (`install --local`) is this computer's own:
+        // a revoked `local/<id>` in the marketplace names something else.
+        if !revoked.contains(id) || record.source_url.starts_with("file:") {
             continue;
         }
         let source = super::project::record_source(loaded, record);
@@ -1052,7 +1053,7 @@ fn apply_sources(
     now: u64,
     definitions: Vec<ConfiguredSource>,
     mut fetched: Vec<(ConfiguredSource, Fetch<SourceCandidate>)>,
-    installed_keys: &BTreeSet<String>,
+    installed_keys: Option<&BTreeSet<String>>,
 ) -> (Vec<ConfiguredSource>, Vec<LoadedSource>, Vec<String>) {
     let mut claimed = definitions
         .iter()
@@ -1125,7 +1126,7 @@ fn apply_sources(
                             definition.name
                         );
                     }
-                    if !installed_keys.contains(&definition.source_key) {
+                    if installed_keys.is_some_and(|keys| !keys.contains(&definition.source_key)) {
                         retired.push(definition.name.clone());
                         continue;
                     }
@@ -1403,7 +1404,7 @@ mod retire_tests {
         health: &mut SyncHealth,
         now: u64,
         definitions: Vec<ConfiguredSource>,
-        installed: &BTreeSet<String>,
+        installed: Option<&BTreeSet<String>>,
     ) -> (Vec<ConfiguredSource>, Vec<LoadedSource>, Vec<String>) {
         let hosts = DeadHosts::default();
         let fetched = definitions
@@ -1505,7 +1506,7 @@ mod retire_tests {
                 &mut health,
                 now,
                 vec![definition.clone()],
-                &none,
+                Some(&none),
             );
             assert_eq!(
                 updated.len(),
@@ -1520,12 +1521,24 @@ mod retire_tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("not found on the server")));
         }
+        // An unreadable ledger can't say nothing is installed from it, so it stays.
         let (updated, _, retired) = refresh_sources(
             cache.path(),
             &mut health,
             4 * DAY,
             vec![definition.clone()],
-            &none,
+            None,
+        );
+        assert_eq!(updated.len(), 1, "kept while the ledger can't be read");
+        assert!(retired.is_empty());
+        cache_snapshot(cache.path(), &definition);
+
+        let (updated, _, retired) = refresh_sources(
+            cache.path(),
+            &mut health,
+            4 * DAY,
+            vec![definition.clone()],
+            Some(&none),
         );
         assert!(updated.is_empty());
         assert_eq!(retired, vec!["Retired".to_string()]);
@@ -1537,7 +1550,7 @@ mod retire_tests {
             &mut health,
             5 * DAY,
             vec![definition],
-            &installed,
+            Some(&installed),
         );
         assert_eq!(updated.len(), 1, "installed packages keep the definition");
         assert!(retired.is_empty());
@@ -1837,6 +1850,33 @@ mod tests {
                 .is_empty(),
             "a restored package installed again starts without the hold"
         );
+    }
+
+    #[test]
+    fn a_revoked_id_never_removes_a_test_install_from_a_folder() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(
+            &paths,
+            crate::agent_profiles::TargetId::ClaudeCode,
+            true,
+        )
+        .expect("enable Claude");
+        let (source, snapshot) = snapshot(root.path(), "Guidance", 'a');
+        let item = &snapshot.catalog.items["python-standards"];
+        crate::executor::install(&paths, &source, &snapshot, item, false, false).expect("install");
+        // What `install --local` records: a folder on this computer, not the marketplace.
+        let ledger_path = paths.app_data().join("installations.json");
+        let ledger = fs::read_to_string(&ledger_path).expect("ledger");
+        fs::write(
+            &ledger_path,
+            ledger.replace(source.url(), "file:///C:/Users/me/src/skillbook"),
+        )
+        .expect("local");
+
+        assert!(remove_revoked(&paths, &[], std::slice::from_ref(&item.id)).is_empty());
+        let ledger = crate::executor::read_ledger(&paths).expect("ledger");
+        assert!(ledger.items.contains_key(&item.id));
     }
 
     #[test]

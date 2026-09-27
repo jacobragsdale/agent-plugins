@@ -746,6 +746,7 @@ mod tests {
                 kind: text("suggestion.created"),
                 text: text("Dana suggested a change to SQL helper."),
                 link: Some(text("/suggestions/12")),
+                read: false,
             }],
             log_path: Some(text("C:\\Users\\sam\\AppData\\Local\\agent-plugins\\agent-plugins.log")),
         }

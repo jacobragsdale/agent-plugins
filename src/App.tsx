@@ -58,7 +58,7 @@ import type {
   RepositoryState,
   SourceState
 } from "./ipc/schemas";
-import { catalogBody, headerProblems, isChecking, isOffline, lastCheckedLabel, noMatchesText, offlineBanner } from "./lib/connectivity";
+import { catalogBody, headerProblems, isChecking, isOffline, lastCheckedLabel, missingLinkText, noMatchesText, offlineBanner } from "./lib/connectivity";
 import { bundleMembers, cardDomId, matchesAllWords, ownsSpace, portalUrl, resolveLink } from "./lib/marketplace";
 import type { LinkTarget } from "./lib/marketplace";
 import {
@@ -250,17 +250,18 @@ export default function App(): JSX.Element {
       linkSeq.current += 1;
       const seq = linkSeq.current;
       const current = stateRef.current;
+      let latest = current;
       let target: LinkTarget | null = current === null || fresh ? null : resolveLink(link, current);
       if (target === null) {
-        const next = await invokeParsed("sync_manifest_state", appStateSchema);
-        applySynced(next);
-        target = resolveLink(link, next);
+        latest = await invokeParsed("sync_manifest_state", appStateSchema);
+        applySynced(latest);
+        target = resolveLink(link, latest);
       }
       if (seq !== linkSeq.current) {
         return;
       }
       if (target === null) {
-        setInfo(infoText("That isn't available to you. Ask whoever sent it to check that it's shared with you."));
+        setInfo(infoText(missingLinkText(latest, false)));
       } else if (link.kind === "open") {
         reveal(`${link.namespace}/${link.id}`);
       } else {

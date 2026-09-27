@@ -34,6 +34,13 @@ function hasPackages(state: AppState): boolean {
  * a source that alone could not be reached says so with its own grey badge,
  * and the next check retries it without anyone doing anything.
  */
+/** Why an `agent-plugins://` link found nothing: offline, nothing new could be checked, so access isn't the reason. */
+export function missingLinkText(state: AppState | null, offlineHint: boolean): string {
+  return isOffline(state, offlineHint)
+    ? "Agent Plugins can't reach the marketplace, so it can't open that link now. Try it again once you're back online."
+    : "That isn't available to you. Ask whoever sent it to check that it's shared with you.";
+}
+
 export function offlineBanner(state: AppState | null, offlineHint: boolean): string | null {
   if (state === null || !hasPackages(state) || !isOffline(state, offlineHint)) {
     return null;

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import fixture from "../ipc/fixtures/app-state.json";
 import { appStateSchema } from "../ipc/schemas";
 import type { AppState, PreflightCheck } from "../ipc/schemas";
-import { catalogBody, formatEpoch, headerProblems, lastCheckedLabel, noMatchesText, NOTHING_PUBLISHED, OFFLINE_EMPTY, offlineBanner, savedCopyLabel } from "./connectivity";
+import { catalogBody, formatEpoch, headerProblems, lastCheckedLabel, missingLinkText, noMatchesText, NOTHING_PUBLISHED, OFFLINE_EMPTY, offlineBanner, savedCopyLabel } from "./connectivity";
 
 const base = appStateSchema.parse(fixture);
 const online: AppState = {
@@ -98,5 +98,13 @@ describe("time labels", () => {
   it("dates a saved copy when it knows when it loaded", () => {
     expect(savedCopyLabel(null)).toBe("Saved copy");
     expect(savedCopyLabel(1790000000)).toBe(`Saved copy from ${formatEpoch(1790000000)}`);
+  });
+});
+
+describe("missingLinkText", () => {
+  it("blames the connection, not access, when the check could not reach the marketplace", () => {
+    expect(missingLinkText(offline, false)).toMatch(/can't reach the marketplace/);
+    expect(missingLinkText(online, true)).toMatch(/can't reach the marketplace/);
+    expect(missingLinkText(online, false)).toMatch(/isn't available to you/);
   });
 });
