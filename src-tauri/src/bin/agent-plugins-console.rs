@@ -10,8 +10,10 @@ use std::process::{exit, Command};
 
 fn main() {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    // The installer also ships this program as `agent-plugins-console.exe`, so
+    // name the app itself: that name with `.exe` would start this program again.
     let app = match std::env::current_exe() {
-        Ok(exe) => exe.with_extension("exe"),
+        Ok(exe) => exe.with_file_name(format!("agent-plugins{}", std::env::consts::EXE_SUFFIX)),
         Err(error) => fail(&format!("Could not find Agent Plugins: {error}")),
     };
     let mut command = Command::new(&app);

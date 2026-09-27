@@ -871,16 +871,21 @@ fn enrich_with_marketplace(mut state: AppState, check: MarketplaceCheck) -> AppS
         installed_versions,
         checks,
     )];
+    let ledger = crate::executor::read_ledger(&check.paths).ok();
     for (id, from_version) in check.updates {
         let version = index
             .as_ref()
             .and_then(|index| index.package(&id))
             .map(|package| package.version.clone());
+        let agents = ledger.as_ref().map_or_else(
+            || check.agents.clone(),
+            |ledger| super::items::installed_agent_ids(ledger, &id),
+        );
         events.push(crate::marketplace::ClientEvent::update(
             &id,
             from_version,
             version,
-            check.agents.clone(),
+            agents,
         ));
     }
     crate::marketplace::send_events_background(events);

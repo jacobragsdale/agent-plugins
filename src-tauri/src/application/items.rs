@@ -20,6 +20,24 @@ pub(super) fn enabled_agent_ids(paths: &SystemPaths) -> Vec<String> {
         .collect()
 }
 
+/// Target IDs the ledger binds `canonical_id` to, for usage events.
+pub(super) fn installed_agent_ids(
+    ledger: &crate::ledger::InstallationLedger,
+    canonical_id: &str,
+) -> Vec<String> {
+    let Some(record) = ledger.items.get(canonical_id) else {
+        return Vec::new();
+    };
+    record
+        .binding_ids
+        .iter()
+        .filter_map(|id| ledger.bindings.get(id))
+        .map(|binding| binding.target_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// Statuses that mean the package is on this machine, for the installed set.
 pub(super) fn counts_as_installed(status: ItemStatus) -> bool {
     matches!(
@@ -48,11 +66,18 @@ fn report_operation(kind: BulkAction, canonical_ids: &[String]) {
         return;
     };
     let agents = enabled_agent_ids(&paths);
+    let ledger = crate::executor::read_ledger(&paths).ok();
     let events = canonical_ids
         .iter()
         .map(|id| match kind {
             BulkAction::Install | BulkAction::Replace => {
-                ClientEvent::install(id, marketplace_version(id), agents.clone())
+                // The apps the package went to, not every app detected: a
+                // skill never reaches Claude Desktop, and a connector can be
+                // kept out of an app.
+                let agents = ledger
+                    .as_ref()
+                    .map_or_else(|| agents.clone(), |ledger| installed_agent_ids(ledger, id));
+                ClientEvent::install(id, marketplace_version(id), agents)
             }
             BulkAction::Uninstall => ClientEvent::uninstall(id, agents.clone()),
         })
@@ -1093,6 +1118,32 @@ mod tests {
         );
         assert!(!claude.exists());
         assert!(shared.is_dir());
+    }
+
+    #[test]
+    fn usage_events_name_the_apps_a_package_went_to() {
+        use crate::agent_profiles::{set_enabled, TargetId};
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        for target in [
+            TargetId::Cursor,
+            TargetId::ClaudeCode,
+            TargetId::ClaudeDesktop,
+        ] {
+            set_enabled(&paths, target, true).expect("detected");
+        }
+        let (source, snapshot) = skill_source(root.path());
+        let item = snapshot.catalog.items["review"].clone();
+        install::install_item_components_approved(&paths, &source, &snapshot, &item, false, None)
+            .expect("install");
+        let ledger = crate::executor::read_ledger(&paths).expect("ledger");
+
+        // Claude Desktop is detected but takes no skills.
+        assert_eq!(
+            installed_agent_ids(&ledger, &item.id),
+            ["claude-code", "cursor"]
+        );
+        assert!(installed_agent_ids(&ledger, "acme/other").is_empty());
     }
 
     #[test]
