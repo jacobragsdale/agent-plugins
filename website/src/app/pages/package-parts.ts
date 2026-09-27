@@ -140,7 +140,7 @@ export class OwnerPanel {
       title: `Delete ${this.name()}?`,
       message: this.admin()
         ? "Every version and its files are deleted, and the name can be used again. PCs that have it lose it at their next check."
-        : "Every version is deleted and the name can be used again. This only works while nobody has installed it; otherwise, remove it from every PC instead.",
+        : "Every version is deleted and the name can be used again. This only works while nobody has installed it and no problem report is open; otherwise, remove it from every PC instead.",
       confirm: "Delete",
       danger: true
     });

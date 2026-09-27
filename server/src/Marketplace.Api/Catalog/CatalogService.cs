@@ -179,10 +179,20 @@ public sealed class CatalogService(
         var installed = (await db.Heartbeats.AsNoTracking().Where(heartbeat => heartbeat.Account.ToLower() == identity.Account.ToLower()).Select(heartbeat => heartbeat.Installed).ToListAsync(cancellationToken))
             .SelectMany(ids => ids)
             .ToHashSet(StringComparer.Ordinal);
+        // Owners delete only what nobody installed, so an install of an id that is gone means an admin deleted it:
+        // that person's PCs remove it too. A new package under the id starts over (PublishService drops the events).
+        var ids = packages.Select(package => package.CanonicalId).ToHashSet(StringComparer.Ordinal);
+        var deleted = (await db.Events.AsNoTracking()
+                .Where(item => item.Account.ToLower() == identity.Account.ToLower() && item.Kind == "install")
+                .Select(item => item.PackageId!)
+                .Distinct()
+                .ToListAsync(cancellationToken))
+            .Where(id => !ids.Contains(id));
         var revoked = packages
             .Where(package => package.RevokedAt is not null
                 && (installed.Contains(package.CanonicalId) || AccessService.IsVisible(rules, identity, package.Namespace, package.PackageId, WasGated(package))))
             .Select(package => package.CanonicalId)
+            .Concat(deleted)
             .Order(StringComparer.Ordinal)
             .ToList();
         var changed = packages.SelectMany(package => new[] { package.UpdatedAt, package.CreatedAt, package.RevokedAt ?? default })

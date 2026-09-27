@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Marketplace.Api.Access;
+using Marketplace.Api.Auth;
 using Marketplace.Api.Data;
 using Microsoft.EntityFrameworkCore;
 
@@ -53,7 +55,7 @@ public sealed record AdminSummary(
     IReadOnlyDictionary<string, int> PreflightFailures,
     int OpenReports);
 
-public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProvider)
+public sealed class EventsService(MarketplaceDbContext db, AccessService access, TimeProvider timeProvider)
 {
     public const int MaxBatch = 500;
     private static readonly HashSet<string> Kinds = ["heartbeat", "install", "update", "uninstall"];
@@ -63,8 +65,9 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
     /// <summary>An app not heard from for this long is treated as gone.</summary>
     private static readonly TimeSpan AppWindow = TimeSpan.FromDays(30);
 
-    public async Task<EventsAccepted> RecordAsync(string account, EventsBatch batch, CancellationToken cancellationToken)
+    public async Task<EventsAccepted> RecordAsync(MarketplaceIdentity identity, EventsBatch batch, CancellationToken cancellationToken)
     {
+        var account = identity.Account;
         if (batch.Events.Length > MaxBatch)
         {
             throw new ProblemException(422, $"A batch holds at most {MaxBatch} events; this one has {batch.Events.Length}.");
@@ -81,6 +84,11 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
         var named = batch.Events.Select(dto => dto?.PackageId).OfType<string>().Distinct(StringComparer.Ordinal).ToArray();
         var known = (await db.Packages.Select(package => package.Namespace + "/" + package.PackageId).Where(id => named.Contains(id)).ToListAsync(cancellationToken))
             .ToHashSet(StringComparer.Ordinal);
+        // An install or update counts toward the package's installs, which keep its owners from deleting it, so it
+        // must name a package the caller can see. Uninstalls stay open to people who lost access since.
+        var installable = batch.Events.Any(dto => dto?.Kind is "install" or "update")
+            ? (await access.VisiblePackagesAsync(identity, null, cancellationToken)).Select(package => package.Namespace + "/" + package.PackageId).ToHashSet(StringComparer.Ordinal)
+            : [];
 
         foreach (var dto in batch.Events)
         {
@@ -143,7 +151,8 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
                 continue;
             }
 
-            if (!known.Contains(dto.PackageId))
+            // The same words for a package the caller can't see, so the answer doesn't tell them it exists.
+            if (!known.Contains(dto.PackageId) || (dto.Kind != "uninstall" && !installable.Contains(dto.PackageId)))
             {
                 problems.Add($"{dto.Kind} names {dto.PackageId}, which the marketplace has never had.");
                 continue;
@@ -189,6 +198,14 @@ public sealed class EventsService(MarketplaceDbContext db, TimeProvider timeProv
                 db.Events.Add(item);
                 accepted++;
             }
+        }
+
+        if (heartbeats.Keys.Any(device => device.Length > 0))
+        {
+            // ponytail: a device-less row is an app from before devices were reported, most likely this same PC, so it
+            // counted the PC twice. A second PC still on such an old app drops out until it reports again.
+            await db.Heartbeats.Where(candidate => candidate.Account.ToLower() == account.ToLower() && candidate.Device == string.Empty).ExecuteDeleteAsync(cancellationToken);
+            heartbeats.Remove(string.Empty);
         }
 
         foreach (var heartbeat in heartbeats.Values)

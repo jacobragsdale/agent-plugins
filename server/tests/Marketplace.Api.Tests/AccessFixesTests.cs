@@ -111,7 +111,7 @@ public sealed partial class MarketplaceApiTests
             await PublishLiveAsync(owner, "requeuer", "db", form);
         }
 
-        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/requeuer/db", new { decision = "approve" }, Json, ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/requeuer/db", new { decision = "approve", version = "1.0.0" }, Json, ct)).StatusCode);
         await AssertVisible(viewer, "requeuer", "db");
         using (var form = SamplePackages.PublishForm(SamplePackages.SkillAndMcpPackage("requeuer", "db", "Python server.", command: "python"), "1.1.0"))
         {
@@ -122,7 +122,7 @@ public sealed partial class MarketplaceApiTests
 
         // Withdrawn, the approved node version is live; the admin approves it again.
         Assert.Equal(HttpStatusCode.NoContent, (await owner.PutAsync("/api/packages/requeuer/db/versions/1.1.0/yank", null, ct)).StatusCode);
-        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/requeuer/db", new { decision = "approve" }, Json, ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/requeuer/db", new { decision = "approve", version = "1.0.0" }, Json, ct)).StatusCode);
         await AssertVisible(viewer, "requeuer", "db");
 
         // Restoring the python version makes something unreviewed live again.
@@ -136,7 +136,7 @@ public sealed partial class MarketplaceApiTests
             await PublishLiveAsync(owner, "requeuer", "db", form);
         }
 
-        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/requeuer/db", new { decision = "approve" }, Json, ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/requeuer/db", new { decision = "approve", version = "1.2.0" }, Json, ct)).StatusCode);
         await AssertVisible(viewer, "requeuer", "db");
         Assert.Equal(HttpStatusCode.NoContent, (await admin.DeleteAsync("/api/admin/packages/requeuer/db/versions/1.2.0", ct)).StatusCode);
         await AssertHidden(viewer, "requeuer", "db");
@@ -278,7 +278,7 @@ public sealed partial class MarketplaceApiTests
             Assert.True((await PublishLiveAsync(owner, "longspec", "big", form)).GetProperty("waitingForPublicReview").GetBoolean());
         }
 
-        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/longspec/big", new { decision = "approve" }, Json, ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/longspec/big", new { decision = "approve", version = "1.0.0" }, Json, ct)).StatusCode);
         await AssertVisible(stranger, "longspec", "big");
         using (var form = SamplePackages.PublishForm(Package("a"), "1.0.1"))
         {

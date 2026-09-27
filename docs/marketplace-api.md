@@ -21,9 +21,11 @@ Group claims come from LDAP when `Auth:LdapDomain` is configured; the claim valu
 
 An `Auth:AdminAccounts` or `Auth:OfficialPublishers` entry with a domain (`CORP\jane`, `jane@corp.example`) matches that account only; a bare `jane` matches any account whose username is `jane`.
 
+Domains are compared by their first label, because Kerberos names the caller `jane@CORP.EXAMPLE.COM` while people write `CORP\jane`: `CORP\jane` matches `jane@corp.example.com`, and also `jane@corp.other.example`. The marketplace has no map from NetBIOS names to realms, so where two domains share a first label, an entry matches the same username in both. The same rule applies to team members and blocks.
+
 ### Blocked accounts
 
-An admin can [block](#admin-blocks) an account. A blocked account may still read, report its heartbeat, and mark notifications read, but every other `POST`, `PUT`, or `DELETE` answers `403` ("Your account is blocked from changing anything in the marketplace. Contact the marketplace admins."). Its personal namespace is hidden from everyone but admins and itself, so it leaves the catalog of every other PC.
+An admin can [block](#admin-blocks) an account. A blocked account may still read, report its heartbeat, and mark notifications read, but every other `POST`, `PUT`, or `DELETE` answers `403` ("Your account is blocked from changing anything in the marketplace. Contact the marketplace admins."). Its personal namespace is hidden from everyone but admins and itself, so it leaves the catalog of every other PC. Admins can't be blocked.
 
 ### Client versions and rate limits
 
@@ -48,7 +50,7 @@ Two accounts can derive the same name: `christopher.johnson` and `christopher.jo
 
 ### Teams
 
-Anyone can create a team: a namespace whose **members** publish, withdraw, share, revoke, and edit bundles there. **Owners** also add and remove members, hand out and reset the invite link (joining makes someone a publisher), rename the team, set who sees the team's space, and delete a team that never published. The last owner cannot leave, be removed, or be demoted. Admins can do what owners can, and also delete a team that has published: its packages are revoked so every PC removes them, and the namespace stays reserved.
+Anyone can create a team: a namespace whose **members** publish, withdraw, share, revoke, and edit bundles there. **Owners** also add and remove members, create and reset the invite link (joining makes someone a publisher; members see a link an owner created, so they can pass it on), rename the team, set who sees the team's space, and delete a team that never published. The last owner cannot leave, be removed, or be demoted. Admins can do what owners can, and also delete a team that has published: its packages are revoked so every PC removes them, and the namespace stays reserved.
 
 A team member entry with a domain (`CORP\jane`, `jane@corp.example`) matches that account only; a bare `jane` matches any account whose username is `jane`. People join through the team's invite link or are added by an owner.
 
@@ -191,7 +193,7 @@ Per-package and per-bundle marketplace metadata joined by canonical ID. Served w
 
 `generatedAt` is when the listed content last changed, so the same content is the same bytes and `ETag`. Only packages and bundles the caller may see are listed. `lane` is `official`, `team`, or `personal`. `publisher.account` is the account that claimed a personal namespace, and the namespace itself for the other lanes. `restricted` is true when the effective visibility is private; `sharedWithYou` when the caller sees it only because a share list names them. `installs` counts accounts that ever installed it; `installedBase` counts accounts with a PC whose heartbeat in the last 30 days includes the package. `createdAt` is when the package was first published, and `changelog` the live version's. `mcpApproved` is `null` when the live version has no MCP server, and otherwise whether an admin approved it for the public. `mcpTransports` lists the live version's MCP transports (`stdio`, `streamable-http`, `sse`), empty when it has none or was published before they were recorded.
 
-A bundle's `members` are the ones the caller can see; a bundle with none is left out. `revoked` lists revoked packages the caller could see, plus any in the caller's latest heartbeat, so a client that lost access still uninstalls them.
+A bundle's `members` are the ones the caller can see; a bundle with none is left out. `revoked` lists revoked packages the caller could see, plus any in the caller's latest heartbeat, so a client that lost access still uninstalls them. It also lists ids an admin deleted that the caller reported installing, until a new package takes the id.
 
 ### `GET /api/packages/{namespace}/{packageId}`
 
@@ -330,7 +332,7 @@ With `dryRun=true` the answer is `200` and nothing is stored or claimed:
 
 ### `DELETE /api/packages/{namespace}/{packageId}`
 
-Deletes the package, its versions, suggestions, reports, access rule, and share link, takes it out of bundles, and frees its id. Owners may while nobody ever installed it; otherwise `409` ("People have installed Review workflow, so it can't be deleted. Use Remove from every PC instead."). Admins always may. `204`. The stored archives are deleted last, best effort.
+Deletes the package, its versions, suggestions, reports, access rule, and share link, takes it out of bundles (deleting a bundle it was the last member of), and frees its id. Owners may while nobody ever installed it; otherwise `409` ("People have installed Review workflow, so it can't be deleted. Use Remove from every PC instead."). Owners may not while a `problem` report on it is open, since only admins close those (`409`). Admins always may; PCs that reported installing it get its id in the index's `revoked` list. A package published later under the freed id starts with no installs. `204`. The stored archives are deleted last, best effort.
 
 ### Suggestions
 
@@ -382,7 +384,7 @@ Batched client events. Each event carries `kind`, `occurredAt`, `clientVersion`,
 | `update`    | `packageId`, `fromVersion`, `toVersion`, `agents`                                                                                                                                               |
 | `uninstall` | `packageId`, `agents`                                                                                                                                                                           |
 
-Returns `202` with `{ accepted, duplicates, rejected, problems[] }`. The server deduplicates by `(principal, kind, occurredAt, packageId)`. A null event, a null string in an array, or an install, update, or uninstall of a package id the marketplace never had counts as `rejected`. A batch holds at most 500 events (`422`). The server keeps the latest heartbeat per account and `device`, so one person's laptop and virtual desktop are both listed.
+Returns `202` with `{ accepted, duplicates, rejected, problems[] }`. The server deduplicates by `(principal, kind, occurredAt, packageId)`. A null event, a null string in an array, or an install, update, or uninstall of a package id the marketplace never had counts as `rejected`. So does an install or update of a package the caller can't see, with the same problem text, so the answer doesn't tell them it exists; an uninstall of one is accepted. A batch holds at most 500 events (`422`). The server keeps the latest heartbeat per account and `device`, so one person's laptop and virtual desktop are both listed. A heartbeat with a `device` replaces the account's heartbeat without one, from an app too old to name its PC, so an updated PC is counted once.
 
 ### `GET /api/stats/packages/{namespace}/{packageId}`
 
@@ -390,10 +392,10 @@ Publisher-facing statistics: installs by day for 90 days, installed base, and ag
 
 ### Notifications
 
-| Endpoint                       | Does                                                                                                                                                                                                                       |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/notifications`       | `{ "items": [{ "id", "kind", "text", "link", "createdAt", "read" }] }`, newest first. `?after={id}` returns only newer ones, oldest first, for a client that remembers the last it showed. `?limit=` is 1–200, default 50. |
-| `POST /api/notifications/read` | Body `{ "upTo": 42 }` marks every notification up to that id read. `204`.                                                                                                                                                  |
+| Endpoint                       | Does                                                                                                                                                                                                                                                                           |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /api/notifications`       | `{ "items": [{ "id", "kind", "text", "link", "createdAt", "read" }] }`, newest first. `?before={id}` pages back from an id already shown. `?after={id}` returns only newer ones, oldest first, for a client that remembers the last it showed. `?limit=` is 1–200, default 50. |
+| `POST /api/notifications/read` | Body `{ "from": 12, "upTo": 42 }` marks the notifications with ids from `from` to `upTo` read, the ones a page showed; without `from`, every one up to `upTo`. `204`.                                                                                                          |
 
 `kind` is `suggestion.created`, `suggestion.decided`, `review.decided`, `report.created`, `report.resolved`, `team.added`, `share.added`, or `package.revoked`. `text` is one sentence to show as it is. `link` is a portal path such as `/p/jacob/review`, `/suggestions/12`, or `/teams/data-team`, or `null`.
 
@@ -446,7 +448,7 @@ A team document:
 }
 ```
 
-`role` is the caller's: `owner`, `member`, or `admin` for an admin who is not a member. `invite` is `null` until someone asks for it.
+`role` is the caller's: `owner`, `member`, or `admin` for an admin who is not a member. `invite` is `null` until an owner creates it; members see it too, so they can pass it on.
 
 | Endpoint                                   | Who                                      | Does                                                                                                                                                                                                                                                                                                 |
 | ------------------------------------------ | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -506,12 +508,12 @@ A bundle document:
 
 A report document: `{ "id", "account", "packageId", "kind", "reason", "createdAt", "resolvedAt", "resolvedBy", "note" }`. `kind` is `problem` or `feedback`; `note` is what whoever resolved it told the reporter.
 
-| Endpoint                                      | Who                            | Does                                                                                                                                                                                            |
-| --------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /api/packages/{ns}/{packageId}/reports` | Anyone who can see the package | Body `{ "reason": "…", "kind": "problem" }`; `reason` is 1 to 2,048 characters and `kind` defaults to `problem`. `202`. Both kinds reach the package's owners; a `problem` also reaches admins. |
-| `GET /api/packages/{ns}/{packageId}/reports`  | The package's owners, admins   | Its latest 200 reports, open first, newest first. `403` for anyone else who can see the package.                                                                                                |
-| `GET /api/reports/mine`                       | Anyone                         | The caller's own latest 200, newest first, with the resolution.                                                                                                                                 |
-| `POST /api/reports/{id}/resolve`              | The package's owners, admins   | Optional body `{ "note": "…" }` (at most 2,048 characters), which the reporter sees. `204`; `403` for an owner on a `problem`, which only admins close; `404` for anyone else.                  |
+| Endpoint                                      | Who                            | Does                                                                                                                                                                                                                                                                                           |
+| --------------------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /api/packages/{ns}/{packageId}/reports` | Anyone who can see the package | Body `{ "reason": "…", "kind": "problem" }`; `reason` is 1 to 2,048 characters and `kind` defaults to `problem`. `202`. Both kinds reach the package's owners; a `problem` also reaches admins. The same report from the same account within a minute, while the first is open, is filed once. |
+| `GET /api/packages/{ns}/{packageId}/reports`  | The package's owners, admins   | Its latest 200 reports, open first, newest first. `403` for anyone else who can see the package.                                                                                                                                                                                               |
+| `GET /api/reports/mine`                       | Anyone                         | The caller's own latest 200, newest first, with the resolution.                                                                                                                                                                                                                                |
+| `POST /api/reports/{id}/resolve`              | The package's owners, admins   | Optional body `{ "note": "…" }` (at most 2,048 characters), which the reporter sees. `204`; `403` for an owner on a `problem`, which only admins close; `404` for anyone else.                                                                                                                 |
 
 ### `GET /api/admin/summary`
 
@@ -523,7 +525,7 @@ Admins only. The packages whose [MCP server waits for an admin](#public-mcp-serv
 
 ### `POST /api/admin/reviews/{namespace}/{packageId}`
 
-Admins only. Body `{ "decision": "approve" | "decline", "note": "…" }`; a decline needs a note (at most 2,048 characters), which the owners see. Approval lets everyone the package is shared with see it, and covers later versions that launch the same servers. The owners are notified either way. `204`; `404` when the package has no live version with an MCP server.
+Admins only. Body `{ "decision": "approve" | "decline", "note": "…", "version": "1.2.0" }`; a decline needs a note (at most 2,048 characters), which the owners see. An approval needs `version`, the live version the admin reviewed: `422` without it, and `409` when another version went live since, so the admin looks again. Approval lets everyone the package is shared with see it, and covers later versions that launch the same servers. The owners are notified either way. `204`; `404` when the package has no live version with an MCP server.
 
 ### `GET /api/admin/reports` and `POST /api/admin/reports/{id}/resolve`
 
@@ -539,11 +541,11 @@ Admins only. Who changed what, newest first: `[{ "id", "at", "actor", "action", 
 
 ### Admin blocks
 
-| Endpoint                             | Does                                                                                                                                                  |
-| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/admin/blocks`              | `[{ "account", "blockedBy", "blockedAt", "reason" }]`.                                                                                                |
-| `PUT /api/admin/blocks/{account}`    | Optional body `{ "reason": "…" }` (up to 1,024 characters). [Blocks](#blocked-accounts) the account; URL-encode the backslash (`CORP%5Cjane`). `204`. |
-| `DELETE /api/admin/blocks/{account}` | Lifts the block. `204`; `404` when there is none.                                                                                                     |
+| Endpoint                             | Does                                                                                                                                                                                                                                                            |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/admin/blocks`              | `[{ "account", "blockedBy", "blockedAt", "reason" }]`.                                                                                                                                                                                                          |
+| `PUT /api/admin/blocks/{account}`    | Optional body `{ "reason": "…" }` (up to 1,024 characters). [Blocks](#blocked-accounts) the account; URL-encode the backslash (`CORP%5Cjane`). `204`; `422` for an entry that names the caller or an `Auth:AdminAccounts` entry, since admins can't be blocked. |
+| `DELETE /api/admin/blocks/{account}` | Lifts the block. `204`; `404` when there is none.                                                                                                                                                                                                               |
 
 An entry with a domain matches that account only; a bare username matches it in any domain.
 

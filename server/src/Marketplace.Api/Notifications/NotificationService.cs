@@ -10,7 +10,8 @@ public sealed record NotificationView(long Id, string Kind, string Text, string?
 
 public sealed record NotificationsView(NotificationView[] Items);
 
-public sealed record ReadRequest(long? UpTo);
+/// <summary>Marks the caller's notifications from <see cref="From"/> to <see cref="UpTo"/> read; either end open when left out.</summary>
+public sealed record ReadRequest(long? UpTo, long? From = null);
 
 /// <summary>
 /// What people hear about: suggestions, review decisions, reports, being added to a team or a share list,
@@ -64,23 +65,23 @@ public sealed class NotificationService(
             : publisher is null ? [] : [publisher.Account];
     }
 
-    public async Task<NotificationsView> ListAsync(MarketplaceIdentity identity, long? after, int? limit, CancellationToken cancellationToken)
+    public async Task<NotificationsView> ListAsync(MarketplaceIdentity identity, long? after, long? before, int? limit, CancellationToken cancellationToken)
     {
         var take = Math.Clamp(limit ?? 50, 1, MaxLimit);
         var query = await MineAsync(identity, cancellationToken);
         var items = after is { } since
             ? query.Where(notification => notification.Id > since).OrderBy(notification => notification.Id)
-            : query.OrderByDescending(notification => notification.Id);
+            : query.Where(notification => before == null || notification.Id < before).OrderByDescending(notification => notification.Id);
         return new NotificationsView(await items.Take(take)
             .Select(notification => new NotificationView(notification.Id, notification.Kind, notification.Text, notification.Link, notification.CreatedAt, notification.ReadAt != null))
             .ToArrayAsync(cancellationToken));
     }
 
-    public async Task ReadAsync(MarketplaceIdentity identity, long upTo, CancellationToken cancellationToken)
+    public async Task ReadAsync(MarketplaceIdentity identity, long from, long upTo, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;
         await (await MineAsync(identity, cancellationToken))
-            .Where(notification => notification.Id <= upTo && notification.ReadAt == null)
+            .Where(notification => notification.Id >= from && notification.Id <= upTo && notification.ReadAt == null)
             .ExecuteUpdateAsync(setters => setters.SetProperty(notification => notification.ReadAt, now), cancellationToken);
     }
 

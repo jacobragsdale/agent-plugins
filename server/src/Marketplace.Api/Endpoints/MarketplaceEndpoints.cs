@@ -262,17 +262,28 @@ public static class MarketplaceEndpoints
 
             var identity = context.MarketplaceIdentity();
             var package = await access.VisiblePackageAsync(identity, ns, packageId, cancellationToken);
+            var now = time.GetUtcNow().UtcDateTime;
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            await db.LockNamespaceAsync(ns, cancellationToken);
+            // A double click, or a retry of a report that went through, files it once.
+            var account = identity.Account.ToLower();
+            if (await db.Reports.AnyAsync(report => report.Account.ToLower() == account && report.PackageId == package.CanonicalId && report.Kind == kind && report.Reason == reason && report.ResolvedAt == null && report.CreatedAt >= now.AddMinutes(-1), cancellationToken))
+            {
+                return TypedResults.Accepted((string?)null);
+            }
+
             db.Reports.Add(new PackageReport
             {
                 Account = identity.Account,
                 PackageId = package.CanonicalId,
                 Kind = kind,
                 Reason = reason,
-                CreatedAt = time.GetUtcNow().UtcDateTime,
+                CreatedAt = now,
             });
             var what = kind == PackageReport.Problem ? "reported a problem with" : "left feedback on";
             notifications.Notify(await notifications.OwnersAsync(ns, cancellationToken), identity.Account, "report.created", $"{identity.DisplayName} {what} {package.Name}: {reason}", $"/p/{ns}/{packageId}");
             await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
             if (kind == PackageReport.Problem)
             {
                 notifications.Webhook($"{identity.DisplayName} reported a problem with {package.Name} ({package.CanonicalId}): {reason}", "/admin");
@@ -372,16 +383,16 @@ public static class MarketplaceEndpoints
                 throw new ProblemException(422, "The body has no events array.");
             }
 
-            var accepted = await events.RecordAsync(context.MarketplaceIdentity().Account, batch, cancellationToken);
+            var accepted = await events.RecordAsync(context.MarketplaceIdentity(), batch, cancellationToken);
             return TypedResults.Accepted((string?)null, accepted);
         }).WithName("Events").ProducesProblem(400).ProducesProblem(422);
 
-        authenticated.MapGet("/notifications", async (long? after, int? limit, HttpContext context, NotificationService notifications, CancellationToken cancellationToken) =>
-            TypedResults.Ok(await notifications.ListAsync(context.MarketplaceIdentity(), after, limit, cancellationToken))).WithName("Notifications");
+        authenticated.MapGet("/notifications", async (long? after, long? before, int? limit, HttpContext context, NotificationService notifications, CancellationToken cancellationToken) =>
+            TypedResults.Ok(await notifications.ListAsync(context.MarketplaceIdentity(), after, before, limit, cancellationToken))).WithName("Notifications");
 
         authenticated.MapPost("/notifications/read", async Task<NoContent> (ReadRequest request, HttpContext context, NotificationService notifications, CancellationToken cancellationToken) =>
         {
-            await notifications.ReadAsync(context.MarketplaceIdentity(), request.UpTo ?? long.MaxValue, cancellationToken);
+            await notifications.ReadAsync(context.MarketplaceIdentity(), request.From ?? 0, request.UpTo ?? long.MaxValue, cancellationToken);
             return TypedResults.NoContent();
         }).WithName("ReadNotifications");
 
@@ -519,7 +530,7 @@ public static class MarketplaceEndpoints
                 .ToListAsync(cancellationToken)))
             .WithName("Blocks");
 
-        admin.MapPut("/blocks/{account}", async Task<NoContent> (string account, HttpContext context, MarketplaceDbContext db, TimeProvider time, CancellationToken cancellationToken) =>
+        admin.MapPut("/blocks/{account}", async Task<NoContent> (string account, HttpContext context, MarketplaceDbContext db, IOptions<AuthOptions> auth, TimeProvider time, CancellationToken cancellationToken) =>
         {
             account = account.Trim();
             var reason = context.Request.HasJsonContentType() ? (await context.Request.ReadFromJsonAsync<BlockRequest>(cancellationToken))?.Reason?.Trim() : null;
@@ -529,6 +540,13 @@ public static class MarketplaceEndpoints
             }
 
             var identity = context.MarketplaceIdentity();
+            // A block never stops an admin from writing and would only hide their space, so it is refused. An admin
+            // through Auth:AdminGroup is known only when they sign in, so this catches the caller and the listed ones.
+            if (auth.Value.AdminAccounts.Append(identity.Account).Any(admin => IdentityResolver.EntryMatches(account, admin.Trim()) || IdentityResolver.EntryMatches(admin.Trim(), account)))
+            {
+                throw new ProblemException(422, $"{account} is a marketplace admin, and admins can't be blocked. Take them off Auth:AdminAccounts first.");
+            }
+
             var now = time.GetUtcNow().UtcDateTime;
             // Accounts match without case (EntryMatches), so one row per account whatever its spelling.
             // An existing row in any case is updated; a new one is an upsert, so two admins blocking at once
@@ -590,9 +608,9 @@ public static class MarketplaceEndpoints
                 throw new ProblemException(422, "The decision is approve or decline.");
             }
 
-            await publish.DecidePublicAsync(context.MarketplaceIdentity(), ns, packageId, review.Decision == "approve", review.Note, cancellationToken);
+            await publish.DecidePublicAsync(context.MarketplaceIdentity(), ns, packageId, review.Decision == "approve", review.Note, review.Version, cancellationToken);
             return TypedResults.NoContent();
-        }).WithName("Review").ProducesProblem(404).ProducesProblem(422);
+        }).WithName("Review").ProducesProblem(404).ProducesProblem(409).ProducesProblem(422);
 
         return app;
     }
@@ -631,8 +649,11 @@ public static class MarketplaceEndpoints
 
     public sealed record BlockRequest(string? Reason);
 
-    /// <summary>An admin's verdict on letting the public see a package's MCP server: <c>approve</c>, or <c>decline</c> with a note.</summary>
-    public sealed record ReviewRequest(string Decision, string? Note);
+    /// <summary>
+    /// An admin's verdict on letting the public see a package's MCP server: <c>approve</c> with the <see cref="Version"/>
+    /// reviewed, or <c>decline</c> with a note.
+    /// </summary>
+    public sealed record ReviewRequest(string Decision, string? Note, string? Version = null);
 
     public sealed record LinkRequest(bool? Reset);
 

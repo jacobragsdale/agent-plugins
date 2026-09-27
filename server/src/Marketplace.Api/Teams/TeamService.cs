@@ -178,7 +178,10 @@ public sealed class TeamService(MarketplaceDbContext db, AccessService access, P
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    /// <summary>The invite link, which makes whoever opens it a publisher: only owners get, create, or reset it.</summary>
+    /// <summary>
+    /// The invite link, which makes whoever opens it a publisher: only owners create or reset it. Members see a
+    /// link that exists on the team, so they can pass it on.
+    /// </summary>
     public async Task<InviteView> InviteAsync(MarketplaceIdentity identity, string ns, bool reset, CancellationToken cancellationToken)
     {
         if (!identity.InTeam(ns) && !identity.IsAdmin)

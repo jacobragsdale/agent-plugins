@@ -85,7 +85,7 @@ export class AdminPage {
   private async decide(review: PublicReview, decision: "approve" | "decline", note: string): Promise<void> {
     this.busy.set(true);
     try {
-      await this.api.review(review.namespace, review.packageId, decision, note);
+      await this.api.review(review.namespace, review.packageId, decision, note, review.version);
       this.snackBar.open(decision === "approve" ? `Everyone can see ${review.name} now.` : `${review.name} stays with the people who have it.`, undefined, { duration: 4000 });
     } catch (error) {
       this.snackBar.open(ApiError.from(error).message, "Dismiss");

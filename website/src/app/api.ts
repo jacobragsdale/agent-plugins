@@ -646,13 +646,15 @@ export class Api {
     });
   }
 
-  public async notifications(): Promise<readonly Notification[]> {
-    return (await this.get("/api/notifications", notificationsSchema)).items;
+  /** Newest first, one page; `before` pages back from an id already shown. */
+  public async notifications(before?: number): Promise<readonly Notification[]> {
+    return (await this.get(before === undefined ? "/api/notifications" : `/api/notifications?before=${String(before)}`, notificationsSchema)).items;
   }
 
-  public markNotificationsRead(upTo: number): Promise<void> {
+  /** Marks the notifications with ids from `from` to `upTo` read, the ones a page showed. */
+  public markNotificationsRead(from: number, upTo: number): Promise<void> {
     return this.request(async () => {
-      await firstValueFrom(this.http.post("/api/notifications/read", { upTo }));
+      await firstValueFrom(this.http.post("/api/notifications/read", { from, upTo }));
     });
   }
 
@@ -758,9 +760,10 @@ export class Api {
     return this.get("/api/admin/reviews", reviewListSchema);
   }
 
-  public review(ns: string, packageId: string, decision: "approve" | "decline", note: string): Promise<void> {
+  /** `version` is the one the admin looked at; an approval of anything else answers 409. */
+  public review(ns: string, packageId: string, decision: "approve" | "decline", note: string, version: string): Promise<void> {
     return this.request(async () => {
-      await firstValueFrom(this.http.post(`/api/admin/reviews/${segment(ns)}/${segment(packageId)}`, { decision, note }));
+      await firstValueFrom(this.http.post(`/api/admin/reviews/${segment(ns)}/${segment(packageId)}`, { decision, note, version }));
       this.forgetIndex();
     });
   }

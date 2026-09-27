@@ -234,6 +234,13 @@ public sealed partial class PublishService(
         var publisher = await ClaimPublisherAsync(identity, ns, now, cancellationToken);
         var stored = dryRun ? new StoredArtifact(storagePath, digest, archive.Length) : await StoreAsync(storagePath, archive, $"{ns}/{packageId} {semver}", cancellationToken);
         var isNew = package is null;
+        if (isNew)
+        {
+            // A freed id starts over: installs of a package an admin deleted under this id aren't this one's.
+            var canonicalId = $"{ns}/{packageId}";
+            await db.Events.Where(item => item.PackageId == canonicalId).ExecuteDeleteAsync(cancellationToken);
+        }
+
         package ??= db.Packages.Add(new Package
         {
             Namespace = ns,
@@ -407,8 +414,11 @@ public sealed partial class PublishService(
             .ToList();
     }
 
-    /// <summary>Lets the public see a package's MCP server, or keeps it from them with a note the owners see.</summary>
-    public async Task DecidePublicAsync(MarketplaceIdentity identity, string ns, string packageId, bool approve, string? note, CancellationToken cancellationToken)
+    /// <summary>
+    /// Lets the public see a package's MCP server, or keeps it from them with a note the owners see. An approval
+    /// names the <paramref name="version"/> the admin reviewed, so it never covers one published after they looked.
+    /// </summary>
+    public async Task DecidePublicAsync(MarketplaceIdentity identity, string ns, string packageId, bool approve, string? note, string? version, CancellationToken cancellationToken)
     {
         note = string.IsNullOrWhiteSpace(note) ? null : note.Trim();
         if (!approve && note is null)
@@ -421,17 +431,31 @@ public sealed partial class PublishService(
             throw new ProblemException(422, $"A review note is at most {MaxReviewNote:N0} characters; this one has {note.Length:N0}.");
         }
 
+        if (approve && string.IsNullOrWhiteSpace(version))
+        {
+            throw new ProblemException(422, "Say which version you reviewed, so the approval covers only what you saw.");
+        }
+
+        // A publish takes the same lock, so the version checked here is the one approved.
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await db.LockNamespaceAsync(ns, cancellationToken);
         var package = await db.Packages.Include(candidate => candidate.Versions)
             .SingleOrDefaultAsync(candidate => candidate.Namespace == ns && candidate.PackageId == packageId, cancellationToken);
-        if (package is null || LatestVersion(package)?.ComponentKinds.Contains(McpServerKind) != true)
+        var live = package is null ? null : LatestVersion(package);
+        if (package is null || live?.ComponentKinds.Contains(McpServerKind) != true)
         {
             throw ProblemException.NotFound($"An MCP server in {ns}/{packageId}");
+        }
+
+        if (approve && live.Version != version)
+        {
+            throw new ProblemException(409, $"{package.Name} {live.Version} is live now, not the {version} you reviewed. Look at {live.Version} before approving it.");
         }
 
         var now = timeProvider.GetUtcNow().UtcDateTime;
         package.McpApprovedBy = approve ? identity.Account : null;
         package.McpApprovedAt = approve ? now : null;
-        package.McpApprovedSpec = approve ? McpServerSummary.LaunchSpec(LatestVersion(package)!.McpServersJson) : null;
+        package.McpApprovedSpec = approve ? McpServerSummary.LaunchSpec(live.McpServersJson) : null;
         package.McpDeclineNote = approve ? null : note;
         db.Audit(identity.Account, approve ? "review.approve" : "review.decline", package.CanonicalId, note, now);
         notifications.Notify(
@@ -441,6 +465,7 @@ public sealed partial class PublishService(
             approve ? $"An admin approved the MCP server in {package.Name}. Everyone who can see the package can install it now." : $"An admin kept {package.Name} from the public: {note}",
             $"/p/{ns}/{packageId}");
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         logger.LogInformation("{Account} {Decision} the MCP server in {Package} for everyone.", identity.Account, approve ? "approved" : "declined", package.CanonicalId);
     }
 
@@ -647,6 +672,13 @@ public sealed partial class PublishService(
             throw new ProblemException(409, $"People have installed {package.Name}, so it can't be deleted. Use Remove from every PC instead.");
         }
 
+        // Deleting takes its reports along, and a problem report is the admins' to close.
+        if (!identity.IsAdmin && await db.Reports.AnyAsync(report => report.PackageId == target && report.Kind == PackageReport.Problem && report.ResolvedAt == null, cancellationToken))
+        {
+            throw new ProblemException(409, $"Someone reported a problem with {package.Name} that the marketplace admins haven't closed yet, so it can't be deleted. Ask the admins to look at the report.");
+        }
+
+        var now = timeProvider.GetUtcNow().UtcDateTime;
         var paths = package.Versions.Select(version => version.StoragePath)
             .Concat(await db.Suggestions.Where(suggestion => suggestion.PackageId == package.Id && suggestion.StoragePath != "").Select(suggestion => suggestion.StoragePath).ToListAsync(cancellationToken))
             .ToArray();
@@ -657,9 +689,18 @@ public sealed partial class PublishService(
         foreach (var bundle in await db.Bundles.Where(bundle => bundle.Members.Contains(target)).ToListAsync(cancellationToken))
         {
             bundle.Members = bundle.Members.Where(member => member != target).ToArray();
+            if (bundle.Members.Length == 0)
+            {
+                // A bundle holds at least one package, so its last one takes it along.
+                var bundleId = bundle.CanonicalId;
+                db.Bundles.Remove(bundle);
+                await db.AccessRules.Where(rule => rule.Target == bundleId).ExecuteDeleteAsync(cancellationToken);
+                await db.Links.Where(link => link.Target == bundleId).ExecuteDeleteAsync(cancellationToken);
+                db.Audit(identity.Account, "bundle.delete", bundleId, $"its last package, {target}, was deleted", now);
+            }
         }
 
-        db.Audit(identity.Account, "delete", target, $"{package.Versions.Count} versions", timeProvider.GetUtcNow().UtcDateTime);
+        db.Audit(identity.Account, "delete", target, $"{package.Versions.Count} versions", now);
         await db.SaveChangesAsync(cancellationToken);
         await RegenerateNamespaceAsync(ns, new Dictionary<string, ReadOnlyMemory<byte>>(), cancellationToken);
         await transaction.CommitAsync(cancellationToken);

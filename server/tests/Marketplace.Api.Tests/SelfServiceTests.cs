@@ -237,7 +237,7 @@ public sealed partial class MarketplaceApiTests
         }
 
         Assert.Equal("waiting", (await PublicReview(owner, "gated/db")).GetProperty("state").GetString());
-        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/gated/db", new { decision = "approve" }, Json, ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/gated/db", new { decision = "approve", version = "1.1.0" }, Json, ct)).StatusCode);
         await AssertVisible(stranger, "gated", "db");
         using (var form = SamplePackages.PublishForm(SamplePackages.SkillAndMcpPackage("gated", "db", "Still the database."), "1.2.0"))
         {

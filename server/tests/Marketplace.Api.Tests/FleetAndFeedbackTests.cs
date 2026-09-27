@@ -286,7 +286,7 @@ public sealed partial class MarketplaceApiTests
         await ShareLink(owner, "gatewide/db", reset: false);
         await AssertHidden(listed, "gatewide", "db");
 
-        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/gatewide/db", new { decision = "approve" }, Json, ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/gatewide/db", new { decision = "approve", version = "1.0.0" }, Json, ct)).StatusCode);
         await AssertVisible(listed, "gatewide", "db");
         Assert.Contains("review.decided", (await Notifications(owner)).Select(item => item.GetProperty("kind").GetString()));
 
