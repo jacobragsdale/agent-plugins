@@ -39,6 +39,19 @@ public sealed class ArtifactKeeperStoreTests
         Assert.Equal(1, handler.Logins);
     }
 
+    [Fact]
+    public async Task A_stored_archive_is_downloaded_once_until_it_is_deleted()
+    {
+        var handler = new ScriptedHandler(HttpStatusCode.OK, HttpStatusCode.NoContent, HttpStatusCode.OK);
+        var store = Store(handler);
+        await store.GetAsync("a/b.zip", TestContext.Current.CancellationToken);
+        await store.GetAsync("a/b.zip", TestContext.Current.CancellationToken);
+        Assert.Equal(1, handler.Downloads);
+        await store.DeleteAsync("a/b.zip", TestContext.Current.CancellationToken);
+        await store.GetAsync("a/b.zip", TestContext.Current.CancellationToken);
+        Assert.Equal(3, handler.Downloads);
+    }
+
     private static ArtifactKeeperStore Store(HttpMessageHandler handler) => new(
         new HttpClient(handler) { BaseAddress = new Uri("http://keeper.test/") },
         Options.Create(new ArtifactKeeperOptions { Username = "svc", Password = "secret" }),

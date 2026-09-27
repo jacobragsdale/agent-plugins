@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Marketplace.Api.Configuration;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 
 namespace Marketplace.Api.Storage;
@@ -23,6 +24,12 @@ public sealed class ArtifactKeeperStore(
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(1);
 
     private readonly SemaphoreSlim _loginLock = new(1, 1);
+
+    // Stored archives never change, and every write in a namespace rebuilds it from each live one: keep recent
+    // downloads so rebuilds and file views don't spend Artifact Keeper's rate limit (it answered 429 within a
+    // dozen writes to a seven-package namespace). ponytail: per instance, capped at 256 MB; share it if several
+    // API instances run.
+    private readonly MemoryCache _downloads = new(new MemoryCacheOptions { SizeLimit = 256L * 1024 * 1024 });
     private string? _token;
     private DateTimeOffset _tokenExpiresAt = DateTimeOffset.MinValue;
 
@@ -63,6 +70,11 @@ public sealed class ArtifactKeeperStore(
     public async Task<byte[]> GetAsync(string path, CancellationToken cancellationToken)
     {
         var full = FullPath(path);
+        if (_downloads.TryGetValue(full, out byte[]? cached) && cached is not null)
+        {
+            return cached;
+        }
+
         using var response = await SendAsync(
             () => new HttpRequestMessage(HttpMethod.Get, $"api/v1/repositories/{options.Value.Repository}/download/{full}"),
             cancellationToken);
@@ -76,12 +88,15 @@ public sealed class ArtifactKeeperStore(
             throw Unavailable($"Artifact Keeper download of {full} failed with HTTP {(int)response.StatusCode}.");
         }
 
-        return await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        _downloads.Set(full, bytes, new MemoryCacheEntryOptions { Size = bytes.Length });
+        return bytes;
     }
 
     public async Task DeleteAsync(string path, CancellationToken cancellationToken)
     {
         var full = FullPath(path);
+        _downloads.Remove(full);
         using var response = await SendAsync(
             () => new HttpRequestMessage(HttpMethod.Delete, $"api/v1/repositories/{options.Value.Repository}/artifacts/{full}"),
             cancellationToken);
