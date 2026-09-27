@@ -255,4 +255,39 @@ public sealed partial class MarketplaceApiTests
             Assert.All(statuses, response => Assert.Equal(HttpStatusCode.NoContent, response.StatusCode));
         }
     }
+
+    [Fact]
+    public async Task A_server_too_long_for_the_approval_column_can_still_be_approved()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var owner = factory.ClientFor("TEST\\longspec");
+        using var stranger = factory.ClientFor("TEST\\longwatcher");
+        using var admin = factory.ClientFor("TEST\\admin");
+        static byte[] Package(string note)
+        {
+            var args = string.Join(", ", Enumerable.Range(0, 10).Select(index => $"\"--{index}={new string('x', 1000)}{note}\""));
+            return SamplePackages.Zip(new Dictionary<string, string>
+            {
+                ["agent-plugins.json"] = """{ "version": 2, "source": { "id": "longspec", "name": "longspec", "description": "Test." }, "packages": [ { "id": "big", "name": "Big", "description": "A long launch spec.", "components": [ { "kind": "mcpServer", "id": "big", "path": "mcp/big.json" } ] } ] }""",
+                ["mcp/big.json"] = $$"""{ "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "mcpServers": { "big": { "type": "stdio", "command": "node", "args": [{{args}}] } } }""",
+            });
+        }
+
+        using (var form = SamplePackages.PublishForm(Package("a"), "1.0.0"))
+        {
+            Assert.True((await PublishLiveAsync(owner, "longspec", "big", form)).GetProperty("waitingForPublicReview").GetBoolean());
+        }
+
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/longspec/big", new { decision = "approve" }, Json, ct)).StatusCode);
+        await AssertVisible(stranger, "longspec", "big");
+        using (var form = SamplePackages.PublishForm(Package("a"), "1.0.1"))
+        {
+            Assert.False((await PublishLiveAsync(owner, "longspec", "big", form)).GetProperty("waitingForPublicReview").GetBoolean());
+        }
+
+        using (var form = SamplePackages.PublishForm(Package("b"), "1.0.2"))
+        {
+            Assert.True((await PublishLiveAsync(owner, "longspec", "big", form)).GetProperty("waitingForPublicReview").GetBoolean());
+        }
+    }
 }

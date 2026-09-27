@@ -126,7 +126,7 @@ public sealed class MarketplaceDbContext(DbContextOptions<MarketplaceDbContext> 
             entity.Property(package => package.Description).HasMaxLength(1024);
             entity.Property(package => package.RevokedBy).HasMaxLength(256);
             entity.Property(package => package.McpApprovedBy).HasMaxLength(256);
-            entity.Property(package => package.McpApprovedSpec).HasMaxLength(8192);
+            entity.Property(package => package.McpApprovedSpec).HasMaxLength(Marketplace.Api.Packages.McpServerSummary.MaxLaunchSpec);
             entity.Property(package => package.McpDeclineNote).HasMaxLength(2048);
             entity.HasIndex(package => new { package.Namespace, package.PackageId }).IsUnique();
             entity.Ignore(package => package.CanonicalId);

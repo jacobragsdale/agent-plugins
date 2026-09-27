@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -24,9 +25,23 @@ public sealed record McpServerSummary(string Name, string Transport, string? Com
     public static McpServerSummary[] FromJson(string? json) =>
         json is null ? [] : JsonSerializer.Deserialize<McpServerSummary[]>(json, Web) ?? [];
 
-    /// <summary>What an admin approves: each server's name, transport, command, arguments, and URL. Null when unknown.</summary>
-    public static string? LaunchSpec(string? json) =>
-        json is null ? null : JsonSerializer.Serialize(FromJson(json).OrderBy(server => server.Name, StringComparer.Ordinal).Select(server => new { server.Name, server.Transport, server.Command, server.Args, server.Url }), Web);
+    /// <summary>The longest launch spec stored as written; a longer one is stored as its digest.</summary>
+    public const int MaxLaunchSpec = 8192;
+
+    /// <summary>
+    /// What an admin approves: each server's name, transport, command, arguments, and URL. Null when unknown.
+    /// One too long for its column is its SHA-256 instead, so it still compares equal only to itself.
+    /// </summary>
+    public static string? LaunchSpec(string? json)
+    {
+        if (json is null)
+        {
+            return null;
+        }
+
+        var spec = JsonSerializer.Serialize(FromJson(json).OrderBy(server => server.Name, StringComparer.Ordinal).Select(server => new { server.Name, server.Transport, server.Command, server.Args, server.Url }), Web);
+        return spec.Length <= MaxLaunchSpec ? spec : "sha256:" + Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(spec)));
+    }
 }
 
 /// <summary>
