@@ -90,10 +90,13 @@ pub(crate) async fn install_item(
     source_id: &str,
     local_id: &str,
     trust_approved: bool,
+    shown: Option<&Shown>,
     component_id: Option<&str>,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
     let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
+    check_shown(&item, trust_approved, shown)?;
+    refuse_if_gone(&paths, &cache_base_dir()?, &source, &item)?;
     let ids = requested_component_ids(&item, component_id)?;
     let outcome = install::install_item_components_approved(
         &paths,
@@ -112,10 +115,13 @@ pub(crate) async fn replace_item(
     source_id: &str,
     local_id: &str,
     trust_approved: bool,
+    shown: Option<&Shown>,
     component_id: Option<&str>,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
     let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
+    check_shown(&item, trust_approved, shown)?;
+    refuse_if_gone(&paths, &cache_base_dir()?, &source, &item)?;
     let ids = requested_component_ids(&item, component_id)?;
     let outcome = install::replace_item_components_approved(
         &paths,
@@ -314,9 +320,11 @@ pub(crate) async fn set_excluded_apps(
     component_id: &str,
     excluded: Vec<String>,
     trust_approved: bool,
+    shown: Option<&Shown>,
 ) -> Result<OperationOutcome, String> {
     let _guard = runtime.operation_lock.lock().await;
     let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
+    check_shown(&item, trust_approved, shown)?;
     planner::validate_component_id(&item, component_id)?;
     // Skills share one folder across apps, so only a connector can be kept out of some (ADR 0008).
     if item.components.iter().any(|component| {
@@ -535,6 +543,7 @@ pub(crate) async fn bulk_run(
     source_id: &str,
     action: BulkAction,
     trust_approved: bool,
+    shown: Option<&Shown>,
 ) -> Result<BulkResult, String> {
     let ids = bulk_plan(runtime, source_id, action)
         .await?
@@ -542,7 +551,7 @@ pub(crate) async fn bulk_run(
         .into_iter()
         .map(|entry| entry.id)
         .collect::<Vec<_>>();
-    run_items(runtime, &ids, action, trust_approved).await
+    run_items(runtime, &ids, action, trust_approved, shown).await
 }
 
 /// Applies `action` to every package in `ids` that it would change.
@@ -551,6 +560,7 @@ pub(crate) async fn run_items(
     ids: &[String],
     action: BulkAction,
     trust_approved: bool,
+    shown: Option<&Shown>,
 ) -> Result<BulkResult, String> {
     let plan = plan_items(runtime, ids, action).await?;
     let _guard = runtime.operation_lock.lock().await;
@@ -582,9 +592,15 @@ pub(crate) async fn run_items(
             continue;
         };
         let outcome = match action {
-            BulkAction::Install | BulkAction::Replace => {
-                bulk_install(&paths, source, snapshot, &entry, action, trust_approved)
-            }
+            BulkAction::Install | BulkAction::Replace => bulk_install(
+                &paths,
+                source,
+                snapshot,
+                &entry,
+                action,
+                trust_approved,
+                shown,
+            ),
             BulkAction::Uninstall => {
                 install::uninstall_item_components(&paths, source, &entry.id, None, false)
             }
@@ -604,6 +620,54 @@ pub(crate) async fn run_items(
     Ok(result)
 }
 
+/// What the window's approval dialog showed: the digest of each package in it.
+pub(crate) type Shown = std::collections::BTreeMap<String, String>;
+
+/// An approval covers the package as the dialog showed it. One with a
+/// connector that changed since (a sync brought a new version while the dialog
+/// was open) is asked about again instead. The CLI's `--approve-mcp` shows
+/// nothing, so it has nothing to compare.
+fn check_shown(
+    item: &CatalogItem,
+    trust_approved: bool,
+    shown: Option<&Shown>,
+) -> Result<(), String> {
+    let has_connector = item
+        .components
+        .iter()
+        .any(|component| component.kind == CatalogComponentKind::McpServer);
+    match shown {
+        Some(shown) if trust_approved && has_connector && shown.get(&item.id) != Some(&item.digest) => {
+            Err(format!(
+                "{} changed while you were deciding. Look at what it runs now, then allow it again.",
+                item.name
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The saved copy of a source the server no longer finds is not installed
+/// from: it was unpublished, or it is no longer shared with this person. An
+/// installed package still updates, repairs, and uninstalls from it.
+pub(super) fn refuse_if_gone(
+    paths: &SystemPaths,
+    cache: &std::path::Path,
+    source: &ConfiguredSource,
+    item: &CatalogItem,
+) -> Result<(), String> {
+    let installed = crate::executor::read_ledger(paths)?
+        .items
+        .contains_key(&item.id);
+    if !installed && super::sync::source_gone(cache, &source.source_key) {
+        return Err(format!(
+            "{} was not found on the server: it was unpublished, or it is no longer shared with you. The saved copy on this computer can't be installed.",
+            item.id
+        ));
+    }
+    Ok(())
+}
+
 fn bulk_install(
     paths: &SystemPaths,
     source: &ConfiguredSource,
@@ -611,12 +675,15 @@ fn bulk_install(
     entry: &BulkPlanEntry,
     action: BulkAction,
     trust_approved: bool,
+    shown: Option<&Shown>,
 ) -> Result<OperationOutcome, String> {
     let item = snapshot
         .catalog
         .items
         .get(&entry.local_id)
         .ok_or_else(|| format!("Unknown catalog item: {}", entry.id))?;
+    check_shown(item, trust_approved, shown)?;
+    refuse_if_gone(paths, &cache_base_dir()?, source, item)?;
     let selected = crate::executor::read_ledger(paths)?
         .items
         .get(&item.id)
@@ -919,23 +986,51 @@ pub(crate) fn forget_missing_if_restored() -> Result<(), String> {
     Ok(())
 }
 
+/// The restored list is one change behind the files: a package uninstalled
+/// since is forgotten, and one updated since, whose files are exactly the saved
+/// copy's version, is taken as installed at that version.
 fn forget_missing_after_restore(
     paths: &SystemPaths,
     sources: &[(ConfiguredSource, SourceSnapshot)],
     ledger: &crate::ledger::InstallationLedger,
 ) {
     for (id, record) in &ledger.items {
-        if crate::executor::installation_state(paths, ledger, id, None) != ContentState::Missing {
-            continue;
-        }
-        let Some((source, _)) = sources
+        let Some((source, snapshot)) = sources
             .iter()
             .find(|(source, _)| source.source_key == record.source_key)
         else {
             continue;
         };
-        if let Err(error) = install::uninstall_item_components(paths, source, id, None, false) {
-            eprintln!("Could not forget {id} after restoring the package list: {error}");
+        match crate::executor::installation_state(paths, ledger, id, None) {
+            ContentState::Missing => {
+                if let Err(error) =
+                    install::uninstall_item_components(paths, source, id, None, false)
+                {
+                    eprintln!("Could not forget {id} after restoring the package list: {error}");
+                }
+            }
+            ContentState::Modified => {
+                let Some(item) = snapshot.catalog.items.get(&record.local_id) else {
+                    continue;
+                };
+                let selected = planner::selected_component_ids(record, item);
+                let current = planner::plan(paths, snapshot, item, None, Some(&selected))
+                    .is_ok_and(|plan| crate::executor::disk_matches_plan(&plan));
+                if !current {
+                    continue;
+                }
+                if let Err(error) = install::replace_item_components_approved(
+                    paths,
+                    source,
+                    snapshot,
+                    item,
+                    false,
+                    Some(&selected),
+                ) {
+                    eprintln!("Could not adopt {id} after restoring the package list: {error}");
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -946,22 +1041,36 @@ fn forget_missing_after_restore(
 /// package that skipped an agent whose settings file was unreadable or
 /// locked. The sync calls it while it holds the operation lock. Returns the
 /// names of the packages it changed.
-pub(crate) fn extend_installs_to_new_agents() -> Result<Vec<String>, String> {
+/// Display names of installed packages a sync added to newly found apps, and
+/// of those it took out of apps no longer found or kept out.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct AgentChanges {
+    pub(crate) added: Vec<String>,
+    pub(crate) released: Vec<String>,
+}
+
+/// Follows the detected apps, except for packages being pulled (`revoked`),
+/// which only ever leave apps.
+pub(crate) fn extend_installs_to_new_agents(revoked: &[String]) -> Result<AgentChanges, String> {
     let (paths, sources) = cached_sources()?;
-    extend_in(&paths, &sources)
+    extend_in(&paths, &sources, revoked)
 }
 
 fn extend_in(
     paths: &SystemPaths,
     sources: &[(ConfiguredSource, SourceSnapshot)],
-) -> Result<Vec<String>, String> {
-    let mut extended = Vec::new();
+    revoked: &[String],
+) -> Result<AgentChanges, String> {
+    let mut changes = AgentChanges::default();
     let mut ledger = crate::executor::read_ledger(paths)?;
     for (source, snapshot) in sources {
         for item in snapshot.catalog.items.values() {
             let Some(record) = ledger.items.get(&item.id) else {
                 continue;
             };
+            if revoked.contains(&item.id) {
+                continue;
+            }
             if record.source_key != source.source_key
                 || crate::executor::installation_state(paths, &ledger, &item.id, None)
                     .is_protected()
@@ -970,7 +1079,7 @@ fn extend_in(
             {
                 continue;
             }
-            let retry = crate::executor::take_skipped_agent(&item.id);
+            let retry = crate::executor::take_skipped_agent(paths, &item.id);
             let selected = planner::selected_component_ids(record, item);
             let is_mcp = |id: &str| {
                 item.components.iter().any(|component| {
@@ -1004,12 +1113,19 @@ fn extend_in(
                         .is_some_and(|binding| ids.contains(&binding.component_id))
                 })
                 .collect::<BTreeSet<_>>();
+            let planned = plan.bindings.keys().collect::<BTreeSet<_>>();
             if ids.is_empty()
-                || (current == plan.bindings.keys().collect()
+                || (current == planned
                     && crate::executor::plan_satisfied(&ledger, &plan).unwrap_or(true))
             {
                 continue;
             }
+            let releases = current
+                .iter()
+                .any(|binding_id| !planned.contains(binding_id));
+            let adds = planned
+                .iter()
+                .any(|binding_id| !current.contains(binding_id));
             match install::install_item_components_approved(
                 paths,
                 source,
@@ -1020,7 +1136,12 @@ fn extend_in(
             ) {
                 Ok(outcome) => {
                     if outcome.warnings.is_empty() {
-                        extended.push(item.name.clone());
+                        if releases {
+                            changes.released.push(item.name.clone());
+                        }
+                        if adds || !releases {
+                            changes.added.push(item.name.clone());
+                        }
                     }
                     ledger = crate::executor::read_ledger(paths)?;
                 }
@@ -1028,7 +1149,7 @@ fn extend_in(
             }
         }
     }
-    Ok(extended)
+    Ok(changes)
 }
 
 /// Whether the selected components are the published ones for the agents they
@@ -1144,16 +1265,23 @@ mod tests {
 
         set_enabled(&paths, TargetId::ClaudeCode, true).expect("claude");
         assert_eq!(
-            extend_in(&paths, &sources).expect("extend"),
+            extend_in(&paths, &sources, &[]).expect("extend").added,
             std::slice::from_ref(&item.name)
         );
         assert!(claude.join("SKILL.md").is_file());
-        assert!(extend_in(&paths, &sources).expect("noop").is_empty());
+        assert_eq!(
+            extend_in(&paths, &sources, &[]).expect("noop"),
+            AgentChanges::default()
+        );
 
         set_enabled(&paths, TargetId::ClaudeCode, false).expect("claude gone");
         assert_eq!(
-            extend_in(&paths, &sources).expect("release"),
-            std::slice::from_ref(&item.name)
+            extend_in(&paths, &sources, &[]).expect("release"),
+            AgentChanges {
+                added: Vec::new(),
+                released: vec![item.name.clone()],
+            },
+            "leaving an app is not reported as adding one"
         );
         assert!(!claude.exists());
         assert!(shared.is_dir());
@@ -1204,7 +1332,7 @@ mod tests {
         let sources = vec![(source, snapshot)];
 
         assert_eq!(
-            extend_in(&paths, &sources).expect("release"),
+            extend_in(&paths, &sources, &[]).expect("release").released,
             std::slice::from_ref(&item.name)
         );
         assert!(!paths.home.join(".claude/skills/acme-review").exists());
@@ -1230,7 +1358,7 @@ mod tests {
         fs::remove_dir_all(&insiders).expect("uninstall insiders");
         let sources = vec![(source, snapshot)];
         repair_in(&paths, &sources).expect("repair");
-        extend_in(&paths, &sources).expect("extend");
+        extend_in(&paths, &sources, &[]).expect("extend");
 
         assert!(!insiders.exists());
         assert!(paths.config.join("Code/User/mcp.json").is_file());
@@ -1256,6 +1384,33 @@ mod tests {
     }
 
     #[test]
+    fn an_approval_covers_only_the_connector_the_dialog_showed() {
+        let root = tempfile::tempdir().expect("root");
+        let (_, skills) = skill_source(root.path());
+        let (_, snapshot) = mcp_source(&root.path().join("mcp-root"));
+        let item = &snapshot.catalog.items["review"];
+        let shown = |digest: &str| Shown::from([(item.id.clone(), digest.to_string())]);
+
+        assert!(check_shown(item, true, Some(&shown(&item.digest))).is_ok());
+        let changed = check_shown(item, true, Some(&shown("an older digest")))
+            .expect_err("changed while the dialog was open");
+        assert!(changed.contains("changed while you were deciding"));
+        assert!(
+            check_shown(item, true, None).is_ok(),
+            "the CLI's --approve-mcp shows nothing"
+        );
+        assert!(
+            check_shown(item, false, Some(&shown("x"))).is_ok(),
+            "nothing approved"
+        );
+        let skill_only = &skills.catalog.items["review"];
+        assert!(
+            check_shown(skill_only, true, Some(&Shown::new())).is_ok(),
+            "no connector to approve"
+        );
+    }
+
+    #[test]
     fn an_approved_mcp_server_follows_its_agents_new_files_but_not_new_agents() {
         use crate::agent_profiles::{set_enabled, TargetId};
         let root = tempfile::tempdir().expect("root");
@@ -1266,12 +1421,15 @@ mod tests {
         install::install_item_components_approved(&paths, &source, &snapshot, &item, true, None)
             .expect("install");
         let sources = vec![(source, snapshot)];
-        assert!(extend_in(&paths, &sources).expect("noop").is_empty());
+        assert_eq!(
+            extend_in(&paths, &sources, &[]).expect("noop"),
+            AgentChanges::default()
+        );
 
         // VS Code starts for the first time: Copilot's server goes to its file too.
         fs::create_dir_all(paths.config.join("Code/User")).expect("vscode");
         assert_eq!(
-            extend_in(&paths, &sources).expect("vscode"),
+            extend_in(&paths, &sources, &[]).expect("vscode").added,
             std::slice::from_ref(&item.name)
         );
         let vscode = fs::read_to_string(paths.config.join("Code/User/mcp.json")).expect("mcp.json");
@@ -1279,7 +1437,7 @@ mod tests {
 
         // A newly detected agent gets the skill, never the server, without asking.
         set_enabled(&paths, TargetId::ClaudeCode, true).expect("claude");
-        extend_in(&paths, &sources).expect("claude");
+        extend_in(&paths, &sources, &[]).expect("claude");
         assert!(paths.home.join(".claude/skills/acme-review").is_dir());
         assert!(!paths.home.join(".claude.json").exists());
     }
@@ -1347,7 +1505,7 @@ mod tests {
         let sources = vec![(source.clone(), snapshot.clone())];
         set_enabled(&paths, TargetId::ClaudeCode, true).expect("claude");
         assert_eq!(
-            extend_in(&paths, &sources).expect("extend"),
+            extend_in(&paths, &sources, &[]).expect("extend").added,
             std::slice::from_ref(&item.name)
         );
         assert!(paths
@@ -1398,6 +1556,64 @@ mod tests {
         assert!(!shared.exists(), "an uninstalled package is not put back");
         let ledger = crate::executor::read_ledger(&paths).expect("ledger");
         assert!(!ledger.items.contains_key(&item.id));
+    }
+
+    #[test]
+    fn a_restored_package_list_adopts_an_update_made_after_the_backup() {
+        use crate::agent_profiles::{set_enabled, TargetId};
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        set_enabled(&paths, TargetId::Cursor, true).expect("cursor");
+        let (source, snapshot) = skill_source(root.path());
+        let item = snapshot.catalog.items["review"].clone();
+        install::install_item_components_approved(&paths, &source, &snapshot, &item, false, None)
+            .expect("install");
+        // A second source whose only change is the skill's text: the update.
+        let updated_root = root.path().join("updated");
+        fs::create_dir_all(updated_root.join("skills/review")).expect("dir");
+        fs::copy(
+            snapshot.path.join("agent-plugins.json"),
+            updated_root.join("agent-plugins.json"),
+        )
+        .expect("manifest");
+        fs::write(
+            updated_root.join("skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review code\n---\nBody, updated\n",
+        )
+        .expect("skill");
+        let updated = SourceSnapshot {
+            catalog: crate::catalog::read_manifest_catalog(&updated_root, source::TEST_SOURCE_KEY)
+                .expect("catalog"),
+            path: updated_root,
+            commit: "b".repeat(40),
+            ..snapshot.clone()
+        };
+        let new_item = updated.catalog.items["review"].clone();
+        install::install_item_components_approved(
+            &paths, &source, &updated, &new_item, false, None,
+        )
+        .expect("update");
+        // The live list is damaged, so the next read falls back to the one before the update.
+        fs::write(paths.app_data().join("installations.json"), "{").expect("damage");
+        let ledger = crate::executor::read_ledger(&paths).expect("restored");
+        assert_eq!(
+            crate::executor::installation_state(&paths, &ledger, &item.id, None),
+            ContentState::Modified
+        );
+        let sources = vec![(source, updated)];
+
+        repair_in(&paths, &sources).expect("repair");
+
+        let ledger = crate::executor::read_ledger(&paths).expect("ledger");
+        assert_eq!(
+            crate::executor::installation_state(&paths, &ledger, &item.id, None),
+            ContentState::Match
+        );
+        assert_eq!(ledger.items[&item.id].item_digest, new_item.digest);
+        assert!(
+            !paths.home.join(".agents/.agent-plugins-backups").exists(),
+            "nothing to back up"
+        );
     }
 
     #[test]

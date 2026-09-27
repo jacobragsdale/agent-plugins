@@ -123,7 +123,12 @@ fn stage_into(
                 .find(|resource| resource.identity == identity)
             {
                 None => replace_unmanaged,
-                Some(old) => force_modified && resource_state(paths, old).is_protected(),
+                // A changed copy that already equals what replaces it loses nothing.
+                Some(old) => {
+                    force_modified
+                        && resource_state(paths, old).is_protected()
+                        && !identical_to_desired(desired, &target)
+                }
             };
         let original_digest = existing_path_digest(&target);
         let staging = stage_path(desired, &target)?;

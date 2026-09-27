@@ -79,6 +79,7 @@ describe("noMatchesText", () => {
   it("names the search, the local-changes filter, or both", () => {
     expect(noMatchesText(" sql ", false, 0)).toBe("No skills match “sql”.");
     expect(noMatchesText("", true, 0)).toBe("No skills have local changes.");
+    expect(noMatchesText("", false, 0, true)).toBe("No skills match what Show is set to.");
     expect(noMatchesText("sql", true, 0)).toBe("No skills with local changes match “sql”.");
   });
 

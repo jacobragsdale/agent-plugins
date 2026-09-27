@@ -74,6 +74,7 @@ pub(crate) async fn install_item(
     source_id: &str,
     local_id: &str,
     trust_approved: bool,
+    shown: Option<application::Shown>,
     component_id: Option<String>,
 ) -> Result<OperationOutcome, IpcError> {
     application::install_item(
@@ -81,6 +82,7 @@ pub(crate) async fn install_item(
         source_id,
         local_id,
         trust_approved,
+        shown.as_ref(),
         component_id.as_deref(),
     )
     .await
@@ -93,6 +95,7 @@ pub(crate) async fn replace_item(
     source_id: &str,
     local_id: &str,
     trust_approved: bool,
+    shown: Option<application::Shown>,
     component_id: Option<String>,
 ) -> Result<OperationOutcome, IpcError> {
     application::replace_item(
@@ -100,6 +103,7 @@ pub(crate) async fn replace_item(
         source_id,
         local_id,
         trust_approved,
+        shown.as_ref(),
         component_id.as_deref(),
     )
     .await
@@ -175,6 +179,7 @@ pub(crate) async fn set_excluded_apps(
     component_id: &str,
     excluded: Vec<String>,
     trust_approved: bool,
+    shown: Option<application::Shown>,
 ) -> Result<OperationOutcome, IpcError> {
     application::set_excluded_apps(
         runtime.inner(),
@@ -183,6 +188,7 @@ pub(crate) async fn set_excluded_apps(
         component_id,
         excluded,
         trust_approved,
+        shown.as_ref(),
     )
     .await
     .map_err(IpcError::from)
@@ -214,10 +220,17 @@ pub(crate) async fn run_bulk_items(
     source_id: &str,
     action: BulkAction,
     trust_approved: bool,
+    shown: Option<application::Shown>,
 ) -> Result<BulkResult, IpcError> {
-    application::bulk_run(runtime.inner(), source_id, action, trust_approved)
-        .await
-        .map_err(IpcError::from)
+    application::bulk_run(
+        runtime.inner(),
+        source_id,
+        action,
+        trust_approved,
+        shown.as_ref(),
+    )
+    .await
+    .map_err(IpcError::from)
 }
 
 #[tauri::command]
@@ -454,8 +467,15 @@ pub(crate) async fn run_items(
     ids: Vec<String>,
     action: BulkAction,
     trust_approved: bool,
+    shown: Option<application::Shown>,
 ) -> Result<BulkResult, IpcError> {
-    application::run_items(runtime.inner(), &ids, action, trust_approved)
-        .await
-        .map_err(IpcError::from)
+    application::run_items(
+        runtime.inner(),
+        &ids,
+        action,
+        trust_approved,
+        shown.as_ref(),
+    )
+    .await
+    .map_err(IpcError::from)
 }

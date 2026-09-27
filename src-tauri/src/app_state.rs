@@ -56,6 +56,9 @@ pub(crate) struct CatalogItemState {
     pub(crate) risk_details: Vec<String>,
     /// What each MCP server does, in plain words, for the approval prompt.
     pub(crate) connectors: Vec<ConnectorState>,
+    /// The package's content digest. An approval sends back the one its
+    /// dialog showed, so a package that changed meanwhile is asked about again.
+    pub(crate) digest: String,
     /// The person holds this package's updates.
     pub(crate) held: bool,
     /// Marketplace index metadata, when the package is listed there.
@@ -245,6 +248,12 @@ pub(crate) struct AutoUpdateReport {
     pub(crate) repaired_items: Vec<String>,
     /// Display names of installed packages the sync added to newly found agents.
     pub(crate) extended_items: Vec<String>,
+    /// Display names of installed packages the sync took out of agents no
+    /// longer found, or kept out.
+    pub(crate) released_items: Vec<String>,
+    /// A pulled package still in an app whose settings file was busy or
+    /// damaged: why, one line each. The next sync tries again.
+    pub(crate) still_pulled: Vec<String>,
     /// Display names of packages the sync uninstalled because their publisher
     /// or an admin pulled them from every PC.
     pub(crate) removed_items: Vec<String>,
@@ -442,6 +451,7 @@ mod tests {
             requires_approval: false,
             risk_details: Vec::new(),
             connectors: Vec::new(),
+            digest: String::new(),
             held: false,
             marketplace: None,
         }
@@ -586,6 +596,8 @@ mod tests {
                 }],
                 repaired_items: vec![text("Meeting notes")],
                 extended_items: vec![text("Publish")],
+                released_items: Vec::new(),
+                still_pulled: Vec::new(),
                 removed_items: Vec::new(),
             },
             catalog_message: None,
@@ -831,6 +843,7 @@ mod tests {
                 requires_approval: false,
                 risk_details: Vec::new(),
                 connectors: Vec::new(),
+                digest: String::new(),
                 held: false,
                 marketplace: None,
             }],

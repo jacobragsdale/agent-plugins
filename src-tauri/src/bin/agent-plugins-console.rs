@@ -22,13 +22,51 @@ fn main() {
     let result = if args.iter().all(|arg| arg == "--background") {
         command.spawn().map(|_| 0)
     } else {
-        command.status().map(|status| status.code().unwrap_or(1))
+        command.spawn().and_then(|mut child| {
+            end_with_this_process(&child);
+            child.wait().map(|status| status.code().unwrap_or(1))
+        })
     };
     match result {
         Ok(code) => exit(code),
         Err(error) => fail(&format!("Could not start {}: {error}", app.display())),
     }
 }
+
+/// A command stopped with Ctrl+Break or by closing its terminal kills this
+/// program; the app it started goes with it instead of finishing a change
+/// nobody is waiting for. Its journal is rolled back at the next start.
+#[cfg(windows)]
+fn end_with_this_process(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    // SAFETY: plain Win32 calls on a job handle this process owns and never
+    // closes; Windows closes it, killing the job, when this process ends.
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return;
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let set = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&limits).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if set != 0 {
+            AssignProcessToJobObject(job, child.as_raw_handle());
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn end_with_this_process(_child: &std::process::Child) {}
 
 fn fail(message: &str) -> ! {
     eprintln!("error: {message}");

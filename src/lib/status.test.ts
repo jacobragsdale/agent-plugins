@@ -18,7 +18,8 @@ import {
   reviewSourceRemoval,
   statusColor,
   statusLabel,
-  supportsBulkAction
+  supportsBulkAction,
+  uninstalledNotice
 } from "./status";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ confirm: vi.fn(() => Promise.resolve(true)) }));
@@ -101,23 +102,37 @@ describe("names instead of ids", () => {
       failedItems: [{ id: "team-data/sql-helper", message: "The process cannot access the file because it is being used by another process. (os error 32)" }],
       repairedItems: [],
       extendedItems: [],
-      removedItems: []
+      removedItems: [],
+      releasedItems: [],
+      stillPulled: []
     };
     expect(reportNotice({ ...state, notifications: [], autoUpdateReport })).toEqual({ text: "Updated Publish to 1.4.0. Details shows what changed." });
   });
 
   it("says why a package was removed from this PC", () => {
-    const report = { updatedItems: [], failedItems: [], repairedItems: [], extendedItems: [], removedItems: ["Old helper"] };
+    const report = { updatedItems: [], failedItems: [], repairedItems: [], extendedItems: [], removedItems: ["Old helper"], releasedItems: [], stillPulled: [] };
     expect(reportNotice({ ...state, notifications: [], autoUpdateReport: report })).toEqual({ text: "Removed Old helper: its publisher or an admin pulled it from every PC." });
     const both = { ...report, updatedItems: [{ id: "official/publish", sourceId: "official", localId: "publish" }], removedItems: ["A", "B"] };
     expect(reportNotice({ ...state, autoUpdateReport: both })?.text).toBe(
       "Updated Publish. Details shows what changed. Removed A, B: their publishers or an admin pulled them from every PC. Dana suggested a change to SQL helper."
     );
+    const stuck = { ...report, removedItems: [], stillPulled: ["Probe was pulled from every PC and removed from the other apps. Cursor uses a settings file …"] };
+    expect(reportNotice({ ...state, notifications: [], autoUpdateReport: stuck })?.text).toBe(stuck.stillPulled[0]);
   });
 
   it("stays quiet about repairs and updates the next sync retries", () => {
-    expect(reportNotice({ ...state, notifications: [], autoUpdateReport: { updatedItems: [], failedItems: [], repairedItems: [], extendedItems: [], removedItems: [] } })).toBeNull();
-    const quiet = { updatedItems: [], failedItems: [{ id: "team-data/sql-helper", message: "locked" }], repairedItems: ["Publish"], extendedItems: ["SQL helper"], removedItems: [] };
+    expect(
+      reportNotice({ ...state, notifications: [], autoUpdateReport: { updatedItems: [], failedItems: [], repairedItems: [], extendedItems: [], removedItems: [], releasedItems: [], stillPulled: [] } })
+    ).toBeNull();
+    const quiet = {
+      updatedItems: [],
+      failedItems: [{ id: "team-data/sql-helper", message: "locked" }],
+      repairedItems: ["Publish"],
+      extendedItems: ["SQL helper"],
+      removedItems: [],
+      releasedItems: ["Review"],
+      stillPulled: []
+    };
     expect(reportNotice({ ...state, notifications: [], autoUpdateReport: quiet })).toBeNull();
   });
 
@@ -125,6 +140,31 @@ describe("names instead of ids", () => {
     const error = failuresError("uninstall", [{ id: "team-data/sql-helper", message: "Access is denied. (os error 5)" }], state.items, "Data team");
     expect(error.summary).toBe("Couldn't uninstall 1 package from Data team: SQL helper.");
     expect(error.detail).toBe("team-data/sql-helper: Access is denied. (os error 5)");
+  });
+});
+
+describe("uninstalledNotice", () => {
+  it("says which connector settings stay saved", () => {
+    const connector = {
+      componentId: "db",
+      name: "Database",
+      summary: "Starts uvx.",
+      detail: "uvx db",
+      environment: ["DB_TOKEN", "DB_URL"],
+      missingEnvironment: ["DB_URL"],
+      missingProgram: null,
+      apps: [],
+      changed: false
+    };
+    const [first] = state.items;
+    if (first === undefined) {
+      throw new Error("the fixture lists items");
+    }
+    const item = { ...first, connectors: [connector] };
+    expect(uninstalledNotice(item, undefined, "Backed up to", { backupPaths: [], warnings: [] })?.text).toBe(
+      "DB_TOKEN stays saved for your Windows account, in case you install it again. Remove it in Edit environment variables for your account if you no longer need it."
+    );
+    expect(uninstalledNotice({ ...item, connectors: [] }, undefined, "Backed up to", { backupPaths: [], warnings: [] })).toBeNull();
   });
 });
 

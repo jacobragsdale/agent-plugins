@@ -75,12 +75,18 @@ pub(super) fn build_app_state(
             continue;
         }
         let definition = record_source(loaded, record);
+        // A configured source with no saved copy (never fetched, or its cache
+        // was deleted) proves nothing about what it still publishes.
+        let unread = loaded.iter().any(|source| {
+            source.snapshot.is_none() && source.definition.source_key == record.source_key
+        });
         items.push(removed_item_state(
             paths,
             &ledger_state,
             &definition,
             id,
             record,
+            unread,
         ));
     }
     items.sort_by(|left, right| left.id.cmp(&right.id));
@@ -367,6 +373,7 @@ pub(super) fn current_item_state(
         requires_approval: approval.0,
         risk_details: approval.1,
         connectors,
+        digest: item.digest.clone(),
         held: choices.held.contains(&item.id),
         marketplace: None,
     }
@@ -484,7 +491,17 @@ pub(super) fn removed_item_state(
     source: &ConfiguredSource,
     id: &str,
     record: &InstallationRecord,
+    unread: bool,
 ) -> CatalogItemState {
+    let status = match super::status::item_status(paths, ledger_state, None, id) {
+        crate::install::ItemStatus::Removed if unread => crate::install::ItemStatus::Installed,
+        status => status,
+    };
+    let note = if unread {
+        "Its source has no saved copy on this computer, so the next sync checks it."
+    } else {
+        "This install is no longer published by its source."
+    };
     CatalogItemState {
         id: id.to_string(),
         local_id: record.local_id.clone(),
@@ -493,10 +510,7 @@ pub(super) fn removed_item_state(
         source_name: source.name.clone(),
         source_url: record.source_url.clone(),
         name: record.name.clone(),
-        description: format!(
-            "{} This install is no longer published by its source.",
-            record.description
-        ),
+        description: format!("{} {note}", record.description),
         manual_invocation: record.disable_model_invocation,
         source: record.source.clone(),
         source_is_directory: false,
@@ -506,17 +520,18 @@ pub(super) fn removed_item_state(
             kind: record.component_kind.clone(),
             description: record.description.clone(),
             manual_invocation: record.disable_model_invocation,
-            status: super::status::item_status(paths, ledger_state, None, id),
+            status,
             requires_approval: false,
             excluded_apps: Vec::new(),
         }],
         compatibility: Vec::new(),
         destination: destination(paths, record),
-        status: super::status::item_status(paths, ledger_state, None, id),
+        status,
         // An uninstall never needs the Tier 3 approval.
         requires_approval: false,
         risk_details: Vec::new(),
         connectors: Vec::new(),
+        digest: record.item_digest.clone(),
         held: false,
         marketplace: None,
     }
@@ -652,6 +667,7 @@ mod tests {
             requires_approval: false,
             risk_details: Vec::new(),
             connectors: Vec::new(),
+            digest: String::new(),
             held: false,
             marketplace: None,
         }

@@ -36,7 +36,7 @@ The window says which apps an item goes to, and why none can take it when that i
 
 An approval covers the MCP entries the ledger records. An update whose entries are all unchanged installs like any other, so a skill fix reaches everyone. A new or changed entry waits for the person, and the dialog marks the connector as changed.
 
-When a newer app spells an entry differently, a sync rewrites the approved entries for the apps that already have them, without asking. A connector never spreads to a newly detected app without approval.
+When a newer app spells an entry differently, a sync rewrites the approved entries for the apps that already have them, without asking. A connector never spreads to a newly detected app without approval. An approval is per app, not per settings file: when an approved app gains another settings file (a second VS Code edition for GitHub Copilot, say), the connector goes there too without asking, because the person already allowed it for that app. "A new or changed entry" above means a new or changed connector, not a new file of an app that already has it.
 
 ### A person may keep a connector out of an app
 
@@ -44,7 +44,7 @@ Detection still decides which apps exist, but a person may keep one connector ou
 
 ### Settings a connector needs
 
-The approval dialog lists every environment variable a connector reads and saves what the person types to their user environment (`HKCU\Environment` on Windows), the way **Edit environment variables for your account** would. The value never goes to the ledger, the log, or the marketplace. Connectors in the portal and the app say whether an admin checked them.
+The approval dialog lists every environment variable a connector reads and saves what the person types to their user environment (`HKCU\Environment` on Windows), the way **Edit environment variables for your account** would. The value never goes to the ledger, the log, or the marketplace. Uninstalling the connector leaves its settings in place, as if the person had set them (another connector, or a reinstall, may read them), and the uninstall result says which ones stayed. Connectors in the portal and the app say whether an admin checked them.
 
 ### Writing a skill in the portal
 

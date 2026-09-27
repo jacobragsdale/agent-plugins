@@ -171,6 +171,11 @@ impl<C> Fetch<C> {
         }
     }
 
+    /// The server gave a usable answer: the archive, or that it is gone.
+    fn answered(&self) -> bool {
+        matches!(self, Self::Ready(_) | Self::Gone)
+    }
+
     fn from_result(result: Result<C, String>) -> Self {
         match result {
             Ok(candidate) => Self::Ready(candidate),
@@ -240,28 +245,47 @@ struct Fetched {
 }
 
 impl Fetched {
-    /// Online when every fetch reached its server, offline when none did. A
-    /// server that answered with an error was reached: its sources show their
-    /// saved copy and the pass counts as failed, but this machine is online.
-    fn connectivity(&self) -> Connectivity {
-        let failures = self
-            .default_catalog
+    /// Each fetch as (answered usably, why it could not be reached).
+    fn outcomes(&self) -> Vec<(bool, Option<&str>)> {
+        self.default_catalog
             .iter()
             .chain(self.repositories.iter().map(|(_, fetch)| fetch))
-            .map(Fetch::failure)
-            .chain(self.subscribed.iter().map(|(_, fetch)| fetch.failure()))
-            .chain(self.sources.iter().map(|(_, fetch)| fetch.failure()))
-            .collect::<Vec<_>>();
-        if failures.iter().all(Option::is_none) {
+            .map(|fetch| (fetch.answered(), fetch.failure()))
+            .chain(
+                self.subscribed
+                    .iter()
+                    .map(|(_, fetch)| (fetch.answered(), fetch.failure())),
+            )
+            .chain(
+                self.sources
+                    .iter()
+                    .map(|(_, fetch)| (fetch.answered(), fetch.failure())),
+            )
+            .collect()
+    }
+
+    /// Online when every fetch got a usable answer, offline when none reached
+    /// its server. A server that answered with an error or something unusable
+    /// (a Wi-Fi sign-in page) was reached, so that pass is degraded: its
+    /// sources show their saved copy and the next sync comes sooner.
+    fn connectivity(&self) -> Connectivity {
+        let outcomes = self.outcomes();
+        if outcomes.iter().all(|(answered, _)| *answered) {
             Connectivity::Online
-        } else if failures
+        } else if outcomes
             .iter()
-            .all(|failure| failure.is_some_and(|message| !artifact::server_busy(message)))
+            .all(|(_, failure)| failure.is_some_and(|message| !artifact::server_busy(message)))
         {
             Connectivity::Offline
         } else {
             Connectivity::Degraded
         }
+    }
+
+    /// "Last checked" moves only when some server gave a usable answer.
+    fn reached(&self) -> bool {
+        let outcomes = self.outcomes();
+        outcomes.is_empty() || outcomes.iter().any(|(answered, _)| *answered)
     }
 }
 
@@ -517,6 +541,7 @@ fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), Strin
     let cache = fetched.cache.clone();
     let now = current_epoch_seconds();
     let connectivity = fetched.connectivity();
+    let reached = fetched.reached();
     let marketplace_unreachable =
         crate::locator::marketplace_base_url().is_some_and(|url| fetched.dead_hosts.contains(url));
     let mut health = read_health(&cache);
@@ -622,15 +647,17 @@ fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), Strin
         eprintln!("Could not check a restored list of installed packages: {error}");
     }
     let mut report = reconcile_installed_items(&paths, &loaded_sources)?;
-    if let Some(index) = &index {
-        report.removed_items = remove_revoked(&paths, &loaded_sources, &index.revoked);
-    }
+    let revoked = index.as_ref().map_or(&[][..], |index| &index.revoked[..]);
+    (report.removed_items, report.still_pulled) = remove_revoked(&paths, revoked);
     match repair_missing_installs() {
         Ok(names) => report.repaired_items = names,
         Err(error) => eprintln!("Could not check installed packages for missing files: {error}"),
     }
-    match extend_installs_to_new_agents() {
-        Ok(names) => report.extended_items = names,
+    match extend_installs_to_new_agents(revoked) {
+        Ok(changes) => {
+            report.extended_items = changes.added;
+            report.released_items = changes.released;
+        }
         Err(error) => eprintln!("Could not add installed packages to newly found agents: {error}"),
     }
     let version = |index: &Option<crate::marketplace::Index>, id: &str| {
@@ -651,8 +678,8 @@ fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), Strin
         .iter()
         .map(|item| (item.id.clone(), item.from_version.clone()))
         .collect();
-    // "Last checked" is the last pass that reached the servers.
-    let checked = if connectivity == Connectivity::Offline {
+    // "Last checked" is the last pass that got a usable answer from a server.
+    let checked = if !reached {
         read_last_sync(&cache).unwrap_or(0)
     } else {
         write_last_sync(&cache, now);
@@ -681,34 +708,40 @@ fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), Strin
 }
 
 /// Uninstalls every installed package the marketplace revoked, even one whose
-/// source is gone, backing up any copy someone edited. Returns their names.
-fn remove_revoked(paths: &SystemPaths, loaded: &[LoadedSource], revoked: &[String]) -> Vec<String> {
+/// source is gone, backing up any copy someone edited. Returns their names,
+/// and why any is still in an app whose settings could not be changed.
+fn remove_revoked(paths: &SystemPaths, revoked: &[String]) -> (Vec<String>, Vec<String>) {
+    let (mut removed, mut stuck) = (Vec::new(), Vec::new());
     if revoked.is_empty() {
-        return Vec::new();
+        return (removed, stuck);
     }
     let Ok(ledger) = crate::executor::read_ledger(paths) else {
-        return Vec::new();
+        return (removed, stuck);
     };
-    let mut removed = Vec::new();
     for (id, record) in &ledger.items {
         // A test install from a folder (`install --local`) is this computer's own:
         // a revoked `local/<id>` in the marketplace names something else.
         if !revoked.contains(id) || record.source_url.starts_with("file:") {
             continue;
         }
-        let source = super::project::record_source(loaded, record);
-        match install::uninstall_item_components(paths, &source, id, None, true) {
-            Ok(_) => {
+        match crate::executor::uninstall_pulled(paths, id) {
+            Ok(outcome) if outcome.warnings.is_empty() => {
                 // Like an uninstall: a restored package installed again starts without the old hold.
                 super::items::forget_hold(paths, id);
                 removed.push(record.name.clone());
             }
-            Err(error) => eprintln!(
-                "Could not remove {id}, which was pulled from the marketplace; the next sync tries again: {error}"
-            ),
+            Ok(outcome) => stuck.push(format!(
+                "{} was pulled from every PC and removed from the other apps. {}",
+                record.name,
+                outcome.warnings.join(" ")
+            )),
+            Err(error) => stuck.push(format!(
+                "{} was pulled from every PC but is still installed: {error}",
+                record.name
+            )),
         }
     }
-    removed
+    (removed, stuck)
 }
 
 const LAST_SYNC_FILE: &str = "last-sync.json";
@@ -761,6 +794,15 @@ pub(super) struct HealthEntry {
     gone_since: Option<u64>,
     #[serde(default)]
     gone_count: u32,
+}
+
+/// Whether the syncs since the last good fetch found this source gone from
+/// the server (unpublished, or no longer shared with this person).
+pub(super) fn source_gone(cache: &Path, source_key: &str) -> bool {
+    read_health(cache)
+        .entries
+        .get(source_key)
+        .is_some_and(|entry| entry.gone_since.is_some())
 }
 
 impl HealthEntry {
@@ -865,21 +907,14 @@ fn enrich_with_marketplace(mut state: AppState, check: MarketplaceCheck) -> AppS
         .iter()
         .filter(|item| super::items::counts_as_installed(item.status))
         .collect::<Vec<_>>();
-    let installed_versions = installed
-        .iter()
-        .filter(|item| item.status == crate::install::ItemStatus::Installed)
-        .filter_map(|item| {
-            let meta = item.marketplace.as_ref()?;
-            Some((item.id.clone(), meta.version.clone()))
-        })
-        .collect();
+    let ledger = crate::executor::read_ledger(&check.paths).ok();
+    let installed_versions = installed_versions(&check.cache, ledger.as_ref(), &installed);
     let mut events = vec![crate::marketplace::ClientEvent::heartbeat(
         check.agents.clone(),
         installed.iter().map(|item| item.id.clone()).collect(),
         installed_versions,
         checks,
     )];
-    let ledger = crate::executor::read_ledger(&check.paths).ok();
     for (id, from_version) in check.updates {
         let version = index
             .as_ref()
@@ -898,6 +933,46 @@ fn enrich_with_marketplace(mut state: AppState, check: MarketplaceCheck) -> AppS
     }
     crate::marketplace::send_events_background(events);
     state
+}
+
+const INSTALLED_VERSIONS_FILE: &str = "installed-versions.json";
+
+/// The marketplace version on disk for each installed package. A package is
+/// remembered at the version it was current at, keyed by the digest of what
+/// was installed, so one whose updates are held still reports the version it
+/// holds rather than none.
+fn installed_versions(
+    cache: &Path,
+    ledger: Option<&crate::ledger::InstallationLedger>,
+    installed: &[&crate::app_state::CatalogItemState],
+) -> BTreeMap<String, String> {
+    let path = cache.join(INSTALLED_VERSIONS_FILE);
+    let mut known = std::fs::read(&path)
+        .ok()
+        .and_then(|contents| {
+            serde_json::from_slice::<BTreeMap<String, (String, String)>>(&contents).ok()
+        })
+        .unwrap_or_default();
+    let mut versions = BTreeMap::new();
+    for item in installed {
+        let Some(digest) = ledger
+            .and_then(|ledger| ledger.items.get(&item.id))
+            .map(|record| &record.item_digest)
+        else {
+            continue;
+        };
+        if let (ItemStatus::Installed, Some(meta)) = (item.status, &item.marketplace) {
+            known.insert(item.id.clone(), (digest.clone(), meta.version.clone()));
+        }
+        if let Some((_, version)) = known.get(&item.id).filter(|(known, _)| known == digest) {
+            versions.insert(item.id.clone(), version.clone());
+        }
+    }
+    known.retain(|id, _| installed.iter().any(|item| item.id == *id));
+    if let Ok(contents) = serde_json::to_vec(&known) {
+        let _ = crate::fs_retry::replace_file(&path, &contents);
+    }
+    versions
 }
 
 /// One line naming what sync retired because it no longer exists upstream.
@@ -1664,6 +1739,27 @@ mod tests {
             Connectivity::Offline
         );
     }
+
+    #[test]
+    fn a_sign_in_page_for_every_fetch_is_degraded_and_keeps_last_checked() {
+        let fetched = |fetch: Fetch<SourceCandidate>| Fetched {
+            cache: std::path::PathBuf::new(),
+            catalog_message: None,
+            default_catalog: None,
+            repositories: Vec::new(),
+            subscribed: vec![("a".to_string(), fetch)],
+            sources: Vec::new(),
+            dead_hosts: DeadHosts::default(),
+            index: None,
+            previous_index: None,
+        };
+        let portal = fetched(Fetch::Failed("The archive is not a zip file".to_string()));
+        assert_eq!(portal.connectivity(), Connectivity::Degraded);
+        assert!(!portal.reached());
+        let gone = fetched(Fetch::Gone);
+        assert_eq!(gone.connectivity(), Connectivity::Online);
+        assert!(gone.reached());
+    }
     use crate::catalog::read_manifest_catalog;
     use crate::source::{ConfiguredSource, SourceSnapshot, TEST_SOURCE_KEY};
     use std::fs;
@@ -1834,9 +1930,10 @@ mod tests {
             .insert("skillbook/python-standards".to_string());
         crate::choices::write(&paths, &choices).expect("hold");
 
-        let removed = remove_revoked(&paths, &[], &["skillbook/python-standards".to_string()]);
+        let (removed, stuck) = remove_revoked(&paths, &["skillbook/python-standards".to_string()]);
 
         assert_eq!(removed, vec!["skillbook-python-standards".to_string()]);
+        assert!(stuck.is_empty());
         let ledger = crate::executor::read_ledger(&paths).expect("ledger");
         assert!(!ledger.items.contains_key("skillbook/python-standards"));
         assert!(
@@ -1850,6 +1947,163 @@ mod tests {
                 .is_empty(),
             "a restored package installed again starts without the hold"
         );
+    }
+
+    #[test]
+    fn an_install_whose_source_has_no_saved_copy_is_not_called_removed() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(
+            &paths,
+            crate::agent_profiles::TargetId::ClaudeCode,
+            true,
+        )
+        .expect("enable Claude");
+        let (source, snapshot) = snapshot(root.path(), "Guidance", 'a');
+        crate::executor::install(
+            &paths,
+            &source,
+            &snapshot,
+            &snapshot.catalog.items["python-standards"],
+            false,
+            false,
+        )
+        .expect("install");
+        let loaded = |snapshot: Option<SourceSnapshot>| LoadedSource {
+            definition: source.clone(),
+            snapshot,
+            status: SourceStatus::Cached,
+            refresh_failed: false,
+            message: None,
+            last_success_at: None,
+        };
+        let status = |loaded: &[LoadedSource]| {
+            super::super::project::build_app_state(
+                &paths,
+                &[],
+                loaded,
+                0,
+                AutoUpdateReport::default(),
+                None,
+            )
+            .expect("state")
+            .items
+            .into_iter()
+            .find(|item| item.id == "skillbook/python-standards")
+            .expect("item")
+            .status
+        };
+
+        assert_eq!(
+            status(&[loaded(None)]),
+            ItemStatus::Installed,
+            "no saved copy proves nothing"
+        );
+        assert_eq!(
+            status(&[]),
+            ItemStatus::Removed,
+            "a source no longer configured"
+        );
+    }
+
+    #[test]
+    fn a_held_package_reports_the_version_it_holds() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let cache = root.path().join("cache-base");
+        fs::create_dir_all(&cache).expect("cache");
+        crate::agent_profiles::set_enabled(
+            &paths,
+            crate::agent_profiles::TargetId::ClaudeCode,
+            true,
+        )
+        .expect("enable Claude");
+        let (source, snapshot) = snapshot(root.path(), "Guidance", 'a');
+        let item = &snapshot.catalog.items["python-standards"];
+        crate::executor::install(&paths, &source, &snapshot, item, false, false).expect("install");
+        let ledger = crate::executor::read_ledger(&paths).expect("ledger");
+        let loaded = [LoadedSource {
+            definition: source.clone(),
+            snapshot: Some(snapshot.clone()),
+            status: SourceStatus::Cached,
+            refresh_failed: false,
+            message: None,
+            last_success_at: None,
+        }];
+        let mut state = super::super::project::build_app_state(
+            &paths,
+            &[],
+            &loaded,
+            0,
+            AutoUpdateReport::default(),
+            None,
+        )
+        .expect("state");
+        let mut state_item = state
+            .items
+            .drain(..)
+            .find(|candidate| candidate.id == item.id)
+            .expect("item");
+        let meta = |version: &str| {
+            crate::app_state::MarketplaceMeta::from_index(
+                &serde_json::from_value(serde_json::json!({
+                    "id": item.id, "namespace": "skillbook", "packageId": "python-standards",
+                    "name": "Python", "description": "", "version": version,
+                    "publisher": {"account": "x", "displayName": "X"}, "lane": "community",
+                    "publishedAt": "2026-09-27T00:00:00Z"
+                }))
+                .expect("index package"),
+            )
+        };
+        state_item.marketplace = Some(meta("1.0.0"));
+        let versions = |state_item: &crate::app_state::CatalogItemState| {
+            installed_versions(&cache, Some(&ledger), &[state_item])
+        };
+        assert_eq!(
+            versions(&state_item).get(&item.id).map(String::as_str),
+            Some("1.0.0")
+        );
+
+        // 1.0.1 is live, and this computer holds 1.0.0.
+        state_item.status = ItemStatus::UpdateAvailable;
+        state_item.marketplace = Some(meta("1.0.1"));
+        assert_eq!(
+            versions(&state_item).get(&item.id).map(String::as_str),
+            Some("1.0.0")
+        );
+    }
+
+    #[test]
+    fn a_source_the_server_no_longer_finds_is_not_installed_from_its_saved_copy() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let cache = root.path().join("cache-base");
+        crate::agent_profiles::set_enabled(
+            &paths,
+            crate::agent_profiles::TargetId::ClaudeCode,
+            true,
+        )
+        .expect("enable Claude");
+        let (source, snapshot) = snapshot(root.path(), "Guidance", 'a');
+        let item = &snapshot.catalog.items["python-standards"];
+        let mut health = SyncHealth::default();
+        health
+            .entries
+            .entry(source.source_key.clone())
+            .or_default()
+            .gone(1_000);
+        write_health(&cache, &health);
+
+        let refused =
+            super::super::items::refuse_if_gone(&paths, &cache, &source, item).expect_err("gone");
+        assert!(
+            refused.contains("was not found"),
+            "exit 4 in the CLI: {refused}"
+        );
+
+        crate::executor::install(&paths, &source, &snapshot, item, false, false).expect("install");
+        super::super::items::refuse_if_gone(&paths, &cache, &source, item)
+            .expect("an installed package still updates from it");
     }
 
     #[test]
@@ -1874,7 +2128,10 @@ mod tests {
         )
         .expect("local");
 
-        assert!(remove_revoked(&paths, &[], std::slice::from_ref(&item.id)).is_empty());
+        assert_eq!(
+            remove_revoked(&paths, std::slice::from_ref(&item.id)),
+            (Vec::new(), Vec::new())
+        );
         let ledger = crate::executor::read_ledger(&paths).expect("ledger");
         assert!(ledger.items.contains_key(&item.id));
     }

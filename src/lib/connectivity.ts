@@ -65,14 +65,14 @@ export function headerProblems(problems: readonly PreflightCheck[], offline: boo
 export const OFFLINE_EMPTY = "You're offline, and no skills are saved on this computer yet. They'll appear here once Agent Plugins can reach the server. It will keep trying on its own.";
 export const NOTHING_PUBLISHED = "No skills published yet.";
 
-/** Why a search or the local-changes filter shows nothing, or null when it shows something (or no filter is on). */
-export function noMatchesText(query: string, driftOnly: boolean, shown: number): string | null {
+/** Why a search, the local-changes filter, or the Show filter shows nothing, or null when it shows something (or no filter is on). */
+export function noMatchesText(query: string, driftOnly: boolean, shown: number, showFiltered = false): string | null {
   const needle = query.trim();
-  if (shown > 0 || (needle.length === 0 && !driftOnly)) {
+  if (shown > 0 || (needle.length === 0 && !driftOnly && !showFiltered)) {
     return null;
   }
   if (needle.length === 0) {
-    return "No skills have local changes.";
+    return driftOnly ? "No skills have local changes." : "No skills match what Show is set to.";
   }
   return driftOnly ? `No skills with local changes match “${needle}”.` : `No skills match “${needle}”.`;
 }

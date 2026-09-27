@@ -7,6 +7,8 @@
     "failedItems": [{ "id": "team-data/sql-helper", "message": "Could not replace C:\\Users\\sam\\.claude\\skills\\sql-helper: another app is using it. Close that app, then try again." }],
     "repairedItems": ["Meeting notes"],
     "extendedItems": ["Publish"],
+    "releasedItems": [],
+    "stillPulled": [],
     "removedItems": []
   },
   "catalogMessage": null,
@@ -92,6 +94,7 @@
       "requiresApproval": false,
       "riskDetails": [],
       "connectors": [],
+      "digest": "",
       "held": false,
       "marketplace": {
         "publisher": "Platform team",
@@ -131,6 +134,7 @@
       "requiresApproval": true,
       "riskDetails": ["warehouse runs: uvx warehouse-mcp --read-only"],
       "connectors": [],
+      "digest": "",
       "held": false,
       "marketplace": null
     },
@@ -154,6 +158,7 @@
       "requiresApproval": false,
       "riskDetails": [],
       "connectors": [],
+      "digest": "",
       "held": false,
       "marketplace": null
     },
@@ -177,6 +182,7 @@
       "requiresApproval": false,
       "riskDetails": [],
       "connectors": [],
+      "digest": "",
       "held": false,
       "marketplace": null
     },
@@ -202,6 +208,7 @@
       "requiresApproval": false,
       "riskDetails": [],
       "connectors": [],
+      "digest": "",
       "held": false,
       "marketplace": null
     },
@@ -227,6 +234,7 @@
       "requiresApproval": false,
       "riskDetails": [],
       "connectors": [],
+      "digest": "",
       "held": false,
       "marketplace": null
     },
@@ -250,6 +258,7 @@
       "requiresApproval": false,
       "riskDetails": [],
       "connectors": [],
+      "digest": "",
       "held": false,
       "marketplace": null
     },
@@ -275,6 +284,7 @@
       "requiresApproval": false,
       "riskDetails": [],
       "connectors": [],
+      "digest": "",
       "held": false,
       "marketplace": null
     },
@@ -300,6 +310,7 @@
       "requiresApproval": false,
       "riskDetails": [],
       "connectors": [],
+      "digest": "",
       "held": false,
       "marketplace": null
     }

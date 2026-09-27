@@ -78,7 +78,9 @@ import {
   reviewBundleUninstall,
   reviewReset,
   reviewSourceRemoval,
-  reviewTutorial
+  reviewTutorial,
+  shownDigests,
+  uninstalledNotice
 } from "./lib/status";
 import type { ReportNotice } from "./lib/status";
 import "./App.css";
@@ -168,6 +170,8 @@ export default function App(): JSX.Element {
   const [busyBundles, setBusyBundles] = useState<ReadonlyMap<string, SourceAction>>(new Map());
   const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
   const approvalAnswer = useRef<((settings: ConnectorSettings | null) => void) | null>(null);
+  /** A link that arrived while a connector was being asked about, shown once that is answered. */
+  const heldLink = useRef<LinkTarget | null>(null);
   const [appsRequest, setAppsRequest] = useState<AppsRequest | null>(null);
   const [catalogFilter, setCatalogFilter] = useState<CatalogFilter>("all");
   const [catalogSort, setCatalogSort] = useState<CatalogSort>("name");
@@ -270,6 +274,9 @@ export default function App(): JSX.Element {
         setInfo(infoText(missingLinkText(latest, false)));
       } else if (link.kind === "open") {
         reveal(`${link.namespace}/${link.id}`);
+      } else if (approvalAnswer.current !== null) {
+        // Asking about a connector now: the link waits until that is answered.
+        heldLink.current = target;
       } else {
         setLinkRequest({ target });
       }
@@ -515,8 +522,10 @@ export default function App(): JSX.Element {
       if (plan.trustApproved && !(await approveConnectors([{ item, componentId: componentId ?? null }]))) {
         return;
       }
-      const outcome = await retrying(() => invokeParsed(plan.command, operationOutcomeSchema, itemCommandArgs(item, componentId, { trustApproved: plan.trustApproved })));
-      const notice = plan.command === "uninstall_item" ? outcomeNotice(plan.backupLead, outcome) : installedNotice(item, componentId, state?.agentProfiles ?? [], plan, outcome);
+      // What the dialog showed: the backend asks again if the package changed since.
+      const shown = plan.trustApproved ? shownDigests([item]) : null;
+      const outcome = await retrying(() => invokeParsed(plan.command, operationOutcomeSchema, itemCommandArgs(item, componentId, { trustApproved: plan.trustApproved, shown })));
+      const notice = plan.command === "uninstall_item" ? uninstalledNotice(item, componentId, plan.backupLead, outcome) : installedNotice(item, componentId, state?.agentProfiles ?? [], plan, outcome);
       if (notice !== null) {
         setInfo(notice);
       }
@@ -559,6 +568,10 @@ export default function App(): JSX.Element {
     approvalAnswer.current?.(settings);
     approvalAnswer.current = null;
     setApprovalRequest(null);
+    if (heldLink.current !== null) {
+      setLinkRequest({ target: heldLink.current });
+      heldLink.current = null;
+    }
   }
 
   /** Asks before connectors are installed, saving any API keys typed in. False means the person said no. */
@@ -652,11 +665,22 @@ export default function App(): JSX.Element {
     setAppsRequest(null);
     const { item, componentId } = request;
     // Adding an app back installs the connector there, which the person approves like any install.
-    if (added && !(await approveConnectors([{ item, componentId }]))) {
+    const excludedBefore = item.components.find((component) => component.id === componentId)?.excludedApps ?? [];
+    const addingApps = (state?.agentProfiles ?? []).filter((profile) => excludedBefore.includes(profile.targetId) && !excluded.includes(profile.targetId)).map((profile) => profile.displayName);
+    if (added && !(await approveConnectors([{ item, componentId, addingApps }]))) {
       return;
     }
     await onCard(item, `Couldn't change which apps use ${item.name}.`, async () => {
-      const outcome = await retrying(() => invokeParsed("set_excluded_apps", operationOutcomeSchema, { sourceId: item.sourceId, localId: item.localId, componentId, excluded, trustApproved: added }));
+      const outcome = await retrying(() =>
+        invokeParsed("set_excluded_apps", operationOutcomeSchema, {
+          sourceId: item.sourceId,
+          localId: item.localId,
+          componentId,
+          excluded,
+          trustApproved: added,
+          shown: added ? shownDigests([item]) : null
+        })
+      );
       const notice = outcomeNotice("The files that were there before were backed up to", outcome);
       setInfo(notice ?? infoText(`Saved. Restart the AI apps you changed so they notice.`));
     });
@@ -666,12 +690,13 @@ export default function App(): JSX.Element {
    * Asks before a batch installs any connector among `eligible`. Null means
    * the person said no; otherwise whether the batch carries that approval.
    */
-  async function connectorApproval(action: BulkAction, eligible: readonly BulkPlanEntry[]): Promise<boolean | null> {
+  /** The approval a batch sends: none needed, the packages the dialog showed, or null when the person declined. */
+  async function connectorApproval(action: BulkAction, eligible: readonly BulkPlanEntry[]): Promise<{ trustApproved: boolean; shown: Record<string, string> | null } | null> {
     const needApproval = action === "uninstall" ? [] : (state?.items ?? []).filter((item) => item.requiresApproval && eligible.some((entry) => entry.id === item.id));
     if (needApproval.length === 0) {
-      return false;
+      return { trustApproved: false, shown: null };
     }
-    return (await approveConnectors(needApproval.map((item) => ({ item, componentId: null })))) ? true : null;
+    return (await approveConnectors(needApproval.map((item) => ({ item, componentId: null })))) ? { trustApproved: true, shown: shownDigests(needApproval) } : null;
   }
 
   function showBatchResult(verb: string, result: BulkResult, from?: string): void {
@@ -698,11 +723,11 @@ export default function App(): JSX.Element {
       if (!(await reviewBulk(source, action, plan))) {
         return;
       }
-      const trustApproved = await connectorApproval(action, eligible);
-      if (trustApproved === null) {
+      const approval = await connectorApproval(action, eligible);
+      if (approval === null) {
         return;
       }
-      showBatchResult(verb, await retrying(() => invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action, trustApproved })), source.name);
+      showBatchResult(verb, await retrying(() => invokeParsed("run_bulk_items", bulkResultSchema, { sourceId: source.sourceId, action, ...approval })), source.name);
     } catch (reason) {
       showActionError(toAppError(reason, `Couldn't ${verb} packages from ${source.name}.`));
     } finally {
@@ -734,11 +759,11 @@ export default function App(): JSX.Element {
       ) {
         return;
       }
-      const trustApproved = await connectorApproval(action, eligible);
-      if (trustApproved === null) {
+      const approval = await connectorApproval(action, eligible);
+      if (approval === null) {
         return;
       }
-      showBatchResult(verb, await retrying(() => invokeParsed("run_items", bulkResultSchema, { ids, action, trustApproved })));
+      showBatchResult(verb, await retrying(() => invokeParsed("run_items", bulkResultSchema, { ids, action, ...approval })));
     } catch (reason) {
       showActionError(toAppError(reason, `Couldn't ${verb} ${bundle.name}.`));
     } finally {
@@ -930,7 +955,7 @@ export default function App(): JSX.Element {
   const checked = lastCheckedLabel(state);
   const body = catalogBody(state, offlineHint, filtering);
   const view = marketplaceView(state, isOffline(state, offlineHint));
-  const noMatches = noMatchesText(query, driftOnly, visibleSources.length);
+  const noMatches = noMatchesText(query, driftOnly, visibleSources.length, catalogFilter !== "all");
   const matchCount = [...itemsBySource.values()].reduce((total, items) => total + items.length, 0);
   // With nothing loaded yet, a failure replaces the spinner instead of sitting above it forever.
   const loadFailed = state === null && error !== null && !syncing;

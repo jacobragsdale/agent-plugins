@@ -533,7 +533,7 @@ Admins only. The latest 200 `problem` reports in [the report shape](#reports-and
 
 ### `GET /api/admin/packages/{namespace}/{packageId}/installs`
 
-Admins only. Every PC whose latest heartbeat lists the package, most recently seen first: `[{ "account", "device", "version", "clientVersion", "lastSeenAt" }]`. `version` is `null` for an app that does not report versions. `?format=csv` downloads the same columns as CSV.
+Admins only. Every PC whose latest heartbeat lists the package, most recently seen first: `[{ "account", "device", "version", "clientVersion", "lastSeenAt" }]`. `version` is the marketplace version on that PC, including an older one whose updates the person holds; it is `null` for an app that does not report versions, and for a held package the app has not yet seen installed at a current version. `?format=csv` downloads the same columns as CSV.
 
 ### `GET /api/admin/audit`
 

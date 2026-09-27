@@ -86,8 +86,8 @@ fn apply_launch_at_login_default<R: Runtime>(app: &App<R>) {
     let Ok(paths) = crate::paths::SystemPaths::from_system() else {
         return;
     };
-    let marker = paths.app_data().join("launch-at-login-default");
-    let wanted = policy.or_else(|| (!marker.exists()).then_some(true));
+    let wanted =
+        policy.or_else(|| (!crate::startup::launch_default_applied(&paths)).then_some(true));
     let autolaunch = app.autolaunch();
     let result = match wanted {
         Some(true) if !autolaunch.is_enabled().unwrap_or(false) => autolaunch.enable(),
@@ -100,8 +100,7 @@ fn apply_launch_at_login_default<R: Runtime>(app: &App<R>) {
         return;
     }
     if policy.is_none() {
-        let _ = std::fs::create_dir_all(paths.app_data());
-        let _ = std::fs::write(marker, b"");
+        crate::startup::remember_launch_default(&paths);
     }
 }
 

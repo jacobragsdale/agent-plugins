@@ -157,12 +157,17 @@ fn dispatch(command: &str, args: &[String]) -> Result<(), String> {
         "review" => review(args),
         "revoke" => revoke(args),
         "bundle" => bundle(args),
-        // Run by the uninstaller, just before it deletes this folder.
-        "remove-from-path" => crate::startup::remove_cli_dir_from_path().map(|removed| {
-            if removed {
-                println!("Removed this folder from the user PATH.");
+        // Run by the uninstaller (not an update), just before it deletes this folder.
+        "remove-from-path" => {
+            if let Ok(paths) = crate::paths::SystemPaths::from_system() {
+                crate::startup::forget_launch_at_login(&paths);
             }
-        }),
+            crate::startup::remove_cli_dir_from_path().map(|removed| {
+                if removed {
+                    println!("Removed this folder from the user PATH.");
+                }
+            })
+        }
         _ => Err(usage()),
     }
 }
@@ -1089,11 +1094,11 @@ fn install(args: &[String]) -> Result<(), String> {
                         ));
                     }
                     let outcome = if replace {
-                        application::replace_item(&state, source_id, local_id, approve_mcp, component)
-                            .await?
+                        application::replace_item(&state, source_id, local_id, approve_mcp, None, component)
+                            .await
                     } else {
                         // A person's own entry of the same name is only found while writing it.
-                        application::install_item(&state, source_id, local_id, approve_mcp, component)
+                        application::install_item(&state, source_id, local_id, approve_mcp, None, component)
                             .await
                             .map_err(|error| {
                                 if error.contains("already exists and is unmanaged") {
@@ -1101,10 +1106,23 @@ fn install(args: &[String]) -> Result<(), String> {
                                 } else {
                                     error
                                 }
-                            })?
+                            })
+                    };
+                    let outcome = match outcome {
+                        // Another install of the same package finished first.
+                        Err(error) if error.ends_with(crate::executor::ALREADY_INSTALLED) => {
+                            println!("{target} is already installed.");
+                            return Ok(());
+                        }
+                        outcome => outcome?,
                     };
                     println!("installed {target} ({})", item.name);
                     print_outcome(&outcome);
+                    if let Ok(paths) = crate::paths::SystemPaths::from_system() {
+                        for busy in crate::executor::busy_skips(&paths, &item.id) {
+                            println!("note: {busy}");
+                        }
+                    }
                     return Ok(());
                 }
                 if parts.len() == 3 {
@@ -1177,6 +1195,12 @@ fn print_report(report: &AutoUpdateReport, app: &AppState) {
     }
     for extended in &report.extended_items {
         println!("added {extended} to newly found apps");
+    }
+    for released in &report.released_items {
+        println!("removed {released} from apps no longer found or kept out");
+    }
+    for stuck in &report.still_pulled {
+        eprintln!("warning: {stuck}");
     }
     for failure in &report.failed_items {
         eprintln!("could not update {}: {}", failure.id, failure.message);
@@ -1328,9 +1352,12 @@ fn installed_version(item: &crate::app_state::CatalogItemState) -> Option<&str> 
 
 fn cached_state() -> Result<AppState, String> {
     let state = RuntimeState::new();
-    run(application::load_cached_app_state(&state))?.ok_or_else(|| {
-        "Agent Plugins has no saved state yet. Run `agent-plugins sync`.".to_string()
-    })
+    run(application::load_cached_app_state(&state))?
+        // Never synced and nothing installed: there is nothing saved to show.
+        .filter(|app| app.checked_at_epoch_seconds != 0 || !app.items.is_empty())
+        .ok_or_else(|| {
+            "Agent Plugins has no saved state yet. Run `agent-plugins sync`.".to_string()
+        })
 }
 
 fn list(args: &[String]) -> Result<(), String> {
@@ -1427,13 +1454,24 @@ fn status(args: &[String]) -> Result<(), String> {
             Ok(())
         };
     }
-    let view =
-        marketplace::api_json::<serde_json::Value>(Method::GET, &format!("packages/{id}"), None)?;
     // `local` is this computer's copy, so only a package installed here has one.
     let local = cached_state()
         .ok()
         .and_then(|app| app.items.into_iter().find(|item| item.id == id))
         .filter(|item| is_installed(item.status));
+    let view = match marketplace::api_json::<serde_json::Value>(
+        Method::GET,
+        &format!("packages/{id}"),
+        None,
+    ) {
+        Ok(view) => view,
+        // Deleted, or shared with you no longer: the copy here still counts.
+        Err(error) if local.is_some() && exit_code(&error) == EXIT_NOT_FOUND => {
+            serde_json::Value::Null
+        }
+        Err(error) => return Err(error),
+    };
+    let found = !view.is_null();
     let versions = view["versions"]
         .as_array()
         .into_iter()
@@ -1451,7 +1489,7 @@ fn status(args: &[String]) -> Result<(), String> {
         .collect::<Vec<_>>();
     let summary = json!({
         "id": id,
-        "name": view["name"],
+        "name": if found { view["name"].clone() } else { json!(local.as_ref().map(|item| &item.name)) },
         "liveVersion": view["liveVersion"],
         "visibility": view["effective"],
         "revoked": view["revoked"].as_bool().unwrap_or(false),
@@ -1476,8 +1514,12 @@ fn status(args: &[String]) -> Result<(), String> {
         other => other.to_string(),
     };
     println!("{} ({id})", text(&summary["name"]));
-    println!("  live version  {}", text(&summary["liveVersion"]));
-    println!("  visible to    {}", text(&summary["visibility"]));
+    if found {
+        println!("  live version  {}", text(&summary["liveVersion"]));
+        println!("  visible to    {}", text(&summary["visibility"]));
+    } else {
+        println!("  marketplace   not found: it was deleted, or you no longer have access");
+    }
     if summary["revoked"] == true {
         let by = if summary["revokedByAdmin"] == true {
             "an admin"
@@ -1492,11 +1534,13 @@ fn status(args: &[String]) -> Result<(), String> {
             println!("  review note   {}", text(&summary["reviewNote"]));
         }
     }
-    println!(
-        "  installs      {} ({} using it in the last 30 days)",
-        text(&summary["installs"]),
-        text(&summary["installedBase"])
-    );
+    if found {
+        println!(
+            "  installs      {} ({} using it in the last 30 days)",
+            text(&summary["installs"]),
+            text(&summary["installedBase"])
+        );
+    }
     match &local {
         Some(item) => println!(
             "  this computer {}{}",
@@ -1567,6 +1611,8 @@ fn sync(args: &[String]) -> Result<(), String> {
         && report.removed_items.is_empty()
         && report.repaired_items.is_empty()
         && report.extended_items.is_empty()
+        && report.released_items.is_empty()
+        && report.still_pulled.is_empty()
         && report.failed_items.is_empty()
     {
         println!("Everything is up to date.");
@@ -1659,7 +1705,7 @@ async fn install_many(
     if !needs_approval.is_empty() && !approve_mcp {
         return Err(approval_needed(&needs_approval));
     }
-    let result = application::run_items(state, ids, BulkAction::Install, approve_mcp).await?;
+    let result = application::run_items(state, ids, BulkAction::Install, approve_mcp, None).await?;
     for id in &result.completed {
         let name = app
             .items

@@ -43,6 +43,8 @@ const PROXY_PAIRS: [[&str; 2]; 4] = [
     ["NO_PROXY", "no_proxy"],
 ];
 const UV_NATIVE_TLS: &str = "UV_NATIVE_TLS";
+/// What newer uv reads instead of `UV_NATIVE_TLS`, which it calls deprecated.
+const UV_SYSTEM_CERTS: &str = "UV_SYSTEM_CERTS";
 const SESSION_RECORD_FILE: &str = "session-environment.json";
 /// Waits before each background `uv` install attempt at launch.
 const TOOL_INSTALL_DELAYS: [Duration; 3] = [
@@ -215,6 +217,8 @@ pub(crate) trait Host {
     fn set_link_handler(&mut self, exe: Option<&Path>) -> Result<(), String>;
     fn managed_tools_root(&self) -> Option<PathBuf>;
     fn install_tool_pack(&mut self, pack: ToolPack) -> Result<PathBuf, String>;
+    /// Whether this `uv` takes `UV_SYSTEM_CERTS`.
+    fn uv_has_system_certs(&self, uv: &Path) -> bool;
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -346,6 +350,16 @@ impl Host for LiveHost {
 
     fn install_tool_pack(&mut self, pack: ToolPack) -> Result<PathBuf, String> {
         install_official_tool_pack(self, pack)
+    }
+
+    fn uv_has_system_certs(&self, uv: &Path) -> bool {
+        // An older uv rejects the unknown flag.
+        crate::process::command(uv)
+            .args(["--system-certs", "--version"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     }
 }
 
@@ -791,7 +805,7 @@ fn apply_system_proxy(host: &mut impl Host, system: SystemProxy, report: &mut St
 }
 
 fn ensure_uv_trust(host: &mut impl Host, report: &mut StartupReport) {
-    if env_utf8(host, UV_NATIVE_TLS).is_some() {
+    if env_utf8(host, UV_NATIVE_TLS).is_some() || env_utf8(host, UV_SYSTEM_CERTS).is_some() {
         return;
     }
     host.set_env(UV_NATIVE_TLS, OsStr::new("1"));
@@ -827,9 +841,31 @@ fn finish_session(host: &mut impl Host, report: &mut StartupReport) {
     if let Err(error) = register_link_handler(host) {
         report.notes.push(error);
     }
+    let uv = report
+        .tools
+        .iter()
+        .find(|tool| tool.name == "uv")
+        .and_then(|tool| tool.path.clone());
+    // Newer uv warns on every run that UV_NATIVE_TLS is deprecated; the new
+    // name means the same. A value the person chose themselves stays.
+    if env_utf8(host, UV_NATIVE_TLS).as_deref() == Some("1")
+        && uv.is_some_and(|uv| host.uv_has_system_certs(&uv))
+    {
+        host.remove_env(UV_NATIVE_TLS);
+        if env_utf8(host, UV_SYSTEM_CERTS).is_none() {
+            host.set_env(UV_SYSTEM_CERTS, OsStr::new("1"));
+        }
+        if let Err(error) = host.remove_session_env(UV_NATIVE_TLS) {
+            report.notes.push(format!(
+                "Could not remove {UV_NATIVE_TLS} from the user session: {error}"
+            ));
+        }
+    }
     let mut values = report.user_proxy_values.clone();
-    if let Some(value) = host.env(UV_NATIVE_TLS) {
-        values.push((UV_NATIVE_TLS.to_string(), value));
+    for key in [UV_NATIVE_TLS, UV_SYSTEM_CERTS] {
+        if let Some(value) = host.env(key) {
+            values.push((key.to_string(), value));
+        }
     }
     for (key, value) in values {
         if let Err(error) = persist_if_changed(host, &key, &value) {
@@ -889,6 +925,72 @@ fn persist_session_path(host: &mut impl Host, dirs: &[PathBuf]) -> Result<Vec<Pa
 /// the folder was there.
 pub(crate) fn remove_cli_dir_from_path() -> Result<bool, String> {
     remove_cli_dir_from_path_with(&mut LiveHost)
+}
+
+/// The file that says the Launch at Login default was applied once, so the
+/// person's own choice stands from then on.
+const LAUNCH_DEFAULT_MARKER: &str = "launch-at-login-default";
+/// The same mark in the registry, which a data folder that refuses writes
+/// cannot lose (a lost mark would turn Launch at Login back on).
+#[cfg(windows)]
+const LAUNCH_DEFAULT_KEY: &str = r"Software\Agent Plugins";
+#[cfg(windows)]
+const LAUNCH_DEFAULT_VALUE: &str = "LaunchAtLoginDefaultApplied";
+/// The Run value the autostart plugin writes: the product name.
+#[cfg(windows)]
+const RUN_VALUE_NAME: &str = "Agent Plugins";
+
+pub(crate) fn launch_default_applied(paths: &crate::paths::SystemPaths) -> bool {
+    #[cfg(windows)]
+    {
+        let marked = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+            .open_subkey(LAUNCH_DEFAULT_KEY)
+            .and_then(|key| key.get_value::<u32, _>(LAUNCH_DEFAULT_VALUE));
+        if marked.is_ok() {
+            return true;
+        }
+    }
+    paths.app_data().join(LAUNCH_DEFAULT_MARKER).exists()
+}
+
+pub(crate) fn remember_launch_default(paths: &crate::paths::SystemPaths) {
+    #[cfg(windows)]
+    {
+        let marked = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+            .create_subkey(LAUNCH_DEFAULT_KEY)
+            .and_then(|(key, _)| key.set_value(LAUNCH_DEFAULT_VALUE, &1u32));
+        if marked.is_ok() {
+            return;
+        }
+    }
+    let _ = fs::create_dir_all(paths.app_data());
+    let _ = fs::write(paths.app_data().join(LAUNCH_DEFAULT_MARKER), b"");
+}
+
+/// Run by the uninstaller: the Run entry would start a program that is gone,
+/// and a reinstall starts over with Launch at Login on.
+pub(crate) fn forget_launch_at_login(paths: &crate::paths::SystemPaths) {
+    #[cfg(windows)]
+    {
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+        let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+        for (key, value) in [
+            (
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                RUN_VALUE_NAME,
+            ),
+            (
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
+                RUN_VALUE_NAME,
+            ),
+            (LAUNCH_DEFAULT_KEY, LAUNCH_DEFAULT_VALUE),
+        ] {
+            if let Ok(key) = hkcu.open_subkey_with_flags(key, KEY_SET_VALUE) {
+                let _ = key.delete_value(value);
+            }
+        }
+    }
+    let _ = fs::remove_file(paths.app_data().join(LAUNCH_DEFAULT_MARKER));
 }
 
 fn remove_cli_dir_from_path_with(host: &mut impl Host) -> Result<bool, String> {
@@ -2259,6 +2361,27 @@ fn sanitize_tool_archive_path(path: &Path) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
+    #[cfg(not(windows))]
+    #[test]
+    fn an_uninstall_forgets_that_the_launch_at_login_default_was_applied() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = crate::paths::SystemPaths {
+            home: root.path().join("home"),
+            config: root.path().join("config"),
+            data: root.path().join("data"),
+            local_data: root.path().join("local-data"),
+            cache: root.path().join("cache"),
+        };
+        assert!(!launch_default_applied(&paths));
+        remember_launch_default(&paths);
+        assert!(launch_default_applied(&paths));
+        forget_launch_at_login(&paths);
+        assert!(
+            !launch_default_applied(&paths),
+            "a reinstall turns it on again"
+        );
+    }
+
     #[test]
     fn a_value_is_checked_before_anything_is_saved() {
         assert!(check_user_variable("ACME_TOKEN", "abc").is_ok());
@@ -2298,6 +2421,7 @@ mod tests {
         install_error: Option<String>,
         installed: Vec<ToolPack>,
         https_proxy_at_install: Option<String>,
+        uv_system_certs: bool,
     }
 
     impl FakeHost {
@@ -2324,6 +2448,7 @@ mod tests {
                 install_error: None,
                 installed: Vec::new(),
                 https_proxy_at_install: None,
+                uv_system_certs: false,
             }
         }
 
@@ -2514,6 +2639,10 @@ mod tests {
 
         fn managed_tools_root(&self) -> Option<PathBuf> {
             self.managed_root.clone()
+        }
+
+        fn uv_has_system_certs(&self, _uv: &Path) -> bool {
+            self.uv_system_certs
         }
 
         fn install_tool_pack(&mut self, pack: ToolPack) -> Result<PathBuf, String> {
@@ -2734,6 +2863,38 @@ mod tests {
         let mut host = FakeHost::new().with_env(UV_NATIVE_TLS, "false");
         prepare_with(&mut host);
         assert_eq!(host.env_str(UV_NATIVE_TLS).as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn a_uv_that_knows_system_certs_gets_the_new_name() {
+        let mut host = FakeHost::new()
+            .with_path("/usr/bin")
+            .with_root("/home/user/.local/bin")
+            .with_executable(uv_path().to_str().expect("utf8"))
+            .with_session(UV_NATIVE_TLS, "1");
+        host.uv_system_certs = true;
+        prepare_with(&mut host);
+        assert_eq!(
+            host.persisted.get(UV_SYSTEM_CERTS),
+            Some(&OsString::from("1"))
+        );
+        assert!(
+            !host.persisted.contains_key(UV_NATIVE_TLS),
+            "no deprecation warning"
+        );
+
+        let mut host = FakeHost::new()
+            .with_env(UV_NATIVE_TLS, "false")
+            .with_root("/home/user/.local/bin")
+            .with_executable(uv_path().to_str().expect("utf8"));
+        host.uv_system_certs = true;
+        prepare_with(&mut host);
+        assert_eq!(
+            host.env_str(UV_NATIVE_TLS).as_deref(),
+            Some("false"),
+            "the person's own choice"
+        );
+        assert!(host.env_str(UV_SYSTEM_CERTS).is_none());
     }
 
     #[test]

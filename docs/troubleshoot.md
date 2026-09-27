@@ -124,7 +124,7 @@ A ledger that is merely damaged does not fail this check: Agent Plugins sets it 
 
 ## A source was not found on the server
 
-A source whose **Saved copy** badge's tooltip reads `<name> was not found on the server (first noticed <date>)` answers 404: it was unpublished, or you may no longer see it. Its saved copy stays usable. Agent Plugins retires it only after 3 not-found results spanning at least 3 days; a successful fetch in between starts the count over. The default catalog is never retired.
+A source whose **Saved copy** badge's tooltip reads `<name> was not found on the server (first noticed <date>)` answers 404: it was unpublished, or you may no longer see it. Packages you installed from it stay installed and can still be removed, but nothing new is installed from its saved copy: an install says the package was not found on the server (exit status 4 in the CLI). Agent Plugins retires it only after 3 not-found results spanning at least 3 days; a successful fetch in between starts the count over. The default catalog is never retired.
 
 If you expected to keep access, see [A package or source you expected is missing](#a-package-or-source-you-expected-is-missing) before the grace period ends.
 

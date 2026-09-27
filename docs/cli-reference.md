@@ -8,7 +8,9 @@ The app puts its folder on your user `PATH` when it starts, and uninstalling tak
 "%LOCALAPPDATA%\Agent Plugins\agent-plugins.com"
 ```
 
-On Windows the installer also puts `agent-plugins.com` beside it: a small console program that runs the command through the app. Shells pick `.com` before `.exe` for a bare `agent-plugins`, and they wait for a console program and read its output, which they do not do for the app itself. Call `agent-plugins` without an extension from PowerShell, `cmd`, or a script. A first argument that is not a command, an option, or an `agent-plugins://` link prints the usage and exits with status 2 instead of opening the window.
+On Windows the installer also puts `agent-plugins.com` beside it: a small console program that runs the command through the app. Shells pick `.com` before `.exe` for a bare `agent-plugins`, and they wait for a console program and read its output, which they do not do for the app itself. Call `agent-plugins` without an extension from PowerShell, `cmd`, or a script. A first argument that is not a command, an option, or an `agent-plugins://` link prints the usage and exits with status 2 instead of opening the window. Stopping a command (Ctrl+Break, or closing the terminal) also stops the app it runs; a change it was making is undone the next time Agent Plugins starts.
+
+One change runs at a time across the window and every command. A command that has to wait for another's change prints `Waiting for another Agent Plugins window or command to finish a change...` after 2 seconds, then carries on.
 
 ## Synopsis
 
@@ -245,7 +247,7 @@ installed jacob/review (Review workflow)
   backed up C:\Users\jacob\.agents\.agent-plugins-backups\...
 ```
 
-Backup lines appear only when an existing destination had to be preserved, and `warning: <text>` names an app that was skipped. A package already installed prints `<target> is already installed.` and succeeds. An unknown ID fails with ``<id> is not in the catalog. Try `agent-plugins search`.`` A team invite link is refused with a pointer to `team join`.
+Backup lines appear only when an existing destination had to be preserved, and `warning: <text>` names an app that was skipped because its settings file could not be read. `note: <text>` names an app skipped only because it had its settings file open; the next sync adds the package there, from the app or the CLI. A package already installed prints `<target> is already installed.` and succeeds, including when another install of it finished first. An unknown ID fails with ``<id> is not in the catalog. Try `agent-plugins search`.`` A team invite link is refused with a pointer to `team join`.
 
 ### `install --local <path>`
 
@@ -286,7 +288,7 @@ Review (jacob/review)
 
 `removed from every PC by an admin` (or `by its owners`) appears for a revoked package, and `MCP review <state>` with any `review note` for a package with an MCP server.
 
-`--json` prints `{ id, name, liveVersion, visibility, revoked, revokedByAdmin, review, reviewNote, installs, installedBase, versions, local }`. Each version is `{ version, publishedAt, publishedBy, changelog, withdrawn, purged }`. `local` is `{ status, installedVersion, held }`, or null when the package is not installed here.
+`--json` prints `{ id, name, liveVersion, visibility, revoked, revokedByAdmin, review, reviewNote, installs, installedBase, versions, local }`. Each version is `{ version, publishedAt, publishedBy, changelog, withdrawn, purged }`. `local` is `{ status, installedVersion, held }`, or null when the package is not installed here. When the marketplace answers not found (the package was deleted, or you lost access) but it is installed here, `status` still shows this computer's copy, with `marketplace   not found` in place of the marketplace lines (and those fields null in `--json`), and exits 0.
 
 ## `uninstall <ns>/<package>[/<component>]`
 
@@ -390,7 +392,7 @@ Given such a link as its argument, the executable opens the window, or hands the
 
 ## Environment
 
-The CLI prepares the host the same way the app does before it installs: it locates `uv`/`uvx`, normalizes proxy variables, and sets `UV_NATIVE_TLS`. Requests to the marketplace origin carry a Kerberos `Negotiate` token on a domain-joined host, or the `X-Dev-User` header where the server accepts it. Usage events are flushed as the process exits and never affect the exit status.
+The CLI prepares the host the same way the app does before it installs: it locates `uv`/`uvx`, normalizes proxy variables, and sets `UV_NATIVE_TLS` (`UV_SYSTEM_CERTS` for a uv that takes it). Requests to the marketplace origin carry a Kerberos `Negotiate` token on a domain-joined host, or the `X-Dev-User` header where the server accepts it. Usage events are flushed as the process exits and never affect the exit status.
 
 | Variable                   | Effect                                                                                                                                    |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |

@@ -104,6 +104,11 @@ export function itemCommandArgs(item: CatalogItem, componentId: string | undefin
   return componentId === undefined ? { sourceId: item.sourceId, localId: item.localId, ...extra } : { sourceId: item.sourceId, localId: item.localId, componentId, ...extra };
 }
 
+/** Each package's digest as an approval dialog showed it, so the backend can ask again about one that changed meanwhile. */
+export function shownDigests(items: readonly CatalogItem[]): Record<string, string> {
+  return Object.fromEntries(items.map((item) => [item.id, item.digest]));
+}
+
 /** A changed package ("modified") is restored by replacing it: the changed copy is backed up first. */
 export function commandForStatus(status: ItemStatus): "install_item" | "replace_item" | "uninstall_item" | null {
   if (status === "sourceConflict") {
@@ -294,7 +299,7 @@ export function packageName(items: readonly CatalogItem[], id: string): string {
 export type ReportNotice = Readonly<{ text: string }>;
 
 export function reportNotice(state: AppState): ReportNotice | null {
-  const { updatedItems, removedItems } = state.autoUpdateReport;
+  const { updatedItems, removedItems, stillPulled } = state.autoUpdateReport;
   const lines: string[] = [];
   if (updatedItems.length > 0) {
     const updated = updatedItems.map((item) => `${packageName(state.items, item.id)}${item.toVersion === undefined ? "" : ` to ${item.toVersion}`}`);
@@ -304,6 +309,7 @@ export function reportNotice(state: AppState): ReportNotice | null {
     const who = removedItems.length === 1 ? "its publisher or an admin pulled it" : "their publishers or an admin pulled them";
     lines.push(`Removed ${removedItems.join(", ")}: ${who} from every PC.`);
   }
+  lines.push(...stillPulled);
   lines.push(...state.notifications.map((news) => news.text));
   return lines.length === 0 ? null : { text: lines.join(" ") };
 }
@@ -326,6 +332,23 @@ export function installedNotice(item: CatalogItem, componentId: string | undefin
   const lead = plan.verb === "install" ? (item.status === "available" ? "is installed" : "is updated") : plan.verb === "restore" ? "is back to the original" : "is installed";
   const text = [`${item.name} ${lead}.`, ...usage, ...(done === null ? [] : [done.text])].join(" ");
   return { text, folder: done?.folder ?? null, caution: done?.caution ?? false };
+}
+
+/** What an uninstall leaves: its outcome, and the connector settings kept for this Windows account. */
+export function uninstalledNotice(item: CatalogItem, componentId: string | undefined, backupLead: string, outcome: OperationOutcome): InfoNotice | null {
+  const done = outcomeNotice(backupLead, outcome);
+  const kept = [
+    ...new Set(
+      item.connectors
+        .filter((connector) => componentId === undefined || connector.componentId === componentId)
+        .flatMap((connector) => connector.environment.filter((name) => !connector.missingEnvironment.includes(name)))
+    )
+  ];
+  if (kept.length === 0) {
+    return done;
+  }
+  const text = `${kept.join(", ")} ${kept.length === 1 ? "stays" : "stay"} saved for your Windows account, in case you install it again. Remove ${kept.length === 1 ? "it" : "them"} in Edit environment variables for your account if you no longer need ${kept.length === 1 ? "it" : "them"}.`;
+  return { text: done === null ? text : `${done.text} ${text}`, folder: done?.folder ?? null, caution: done?.caution ?? false };
 }
 
 /** What a finished action leaves to read: AI apps it skipped (amber), then where backups went. */

@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 pub(crate) use items::{
     bulk_plan, bulk_run, install_item, keep_my_version, plan_items, plan_source_removal,
     remove_source, replace_item, reset_app, run_items, save_connector_settings, set_excluded_apps,
-    set_held, set_manual_invocation, uninstall_item,
+    set_held, set_manual_invocation, uninstall_item, Shown,
 };
 pub(crate) use sources::{cancel_prepared_source, confirm_source, prepare_source};
 pub(crate) use sync::{load_cached_app_state, run_preflight, sync_app_state};
@@ -384,7 +384,7 @@ mod live_nexus_tests {
                 true,
             )?;
         }
-        install_item(runtime, "skillbook", "git-ops", true, None).await?;
+        install_item(runtime, "skillbook", "git-ops", true, None, None).await?;
         load_cached_app_state(runtime)
             .await?
             .ok_or_else(|| "App state missing after install.".to_string())

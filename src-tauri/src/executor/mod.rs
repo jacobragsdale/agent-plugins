@@ -18,12 +18,13 @@ use crate::source::{ConfiguredSource, SourceSnapshot};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod activate;
 mod journal;
 pub(crate) use journal::{UNDO_PENDING, UNDO_RUNNING};
+/// How an install of exactly what is installed already is refused.
+pub(crate) const ALREADY_INSTALLED: &str = "is already installed.";
 mod matching;
 mod stage;
 
@@ -52,8 +53,16 @@ const STALE_STAGING_AGE: Duration = Duration::from_secs(10 * 60);
 /// The ledger for display. Reads never wait on recovery: a rollback that
 /// cannot finish yet is retried by the next change or sync.
 pub(crate) fn read_ledger(paths: &SystemPaths) -> Result<InstallationLedger, String> {
+    // One command reads the ledger several times; say why recovery fails once.
+    static LAST_REPORTED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     if let Err(error) = recover_unless_busy(paths) {
-        eprintln!("{error}");
+        let mut last = LAST_REPORTED
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if last.as_deref() != Some(error.as_str()) {
+            eprintln!("{error}");
+            *last = Some(error);
+        }
     }
     read_ledger_raw(paths)
 }
@@ -103,19 +112,52 @@ fn unusable_here(item: &CatalogItem, plan: &OperationPlan) -> String {
     .to_string()
 }
 
-/// Packages that skipped an agent because its settings file was unreadable
-/// or locked. The next sync retries them.
-// ponytail: in memory, so a restart forgets the retry; persist it if agents stay skipped.
-fn skipped_agents() -> &'static Mutex<BTreeSet<String>> {
-    static SKIPPED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
-    &SKIPPED
+const SKIPPED_AGENTS_FILE: &str = "skipped-agents.json";
+
+/// Packages that skipped an agent because its settings file was unreadable or
+/// locked, each with the busy files' messages. On disk, so the next sync
+/// retries them whichever process installed them.
+// ponytail: read-modify-write outside the transaction lock; two processes racing can drop one retry until the next skip.
+fn skipped_agents(paths: &SystemPaths) -> BTreeMap<String, Vec<String>> {
+    fs::read(paths.app_data().join(SKIPPED_AGENTS_FILE))
+        .ok()
+        .and_then(|contents| serde_json::from_slice(&contents).ok())
+        .unwrap_or_default()
+}
+
+fn save_skipped_agents(paths: &SystemPaths, skipped: &BTreeMap<String, Vec<String>>) {
+    let path = paths.app_data().join(SKIPPED_AGENTS_FILE);
+    let saved = if skipped.is_empty() {
+        fs_retry::remove_file(&path)
+    } else {
+        fs::create_dir_all(paths.app_data())
+            .and_then(|()| serde_json::to_vec(skipped).map_err(std::io::Error::other))
+            .and_then(|contents| fs_retry::replace_file(&path, &contents))
+    };
+    if let Err(error) = saved.or_else(|error| {
+        (error.kind() == std::io::ErrorKind::NotFound)
+            .then_some(())
+            .ok_or(error)
+    }) {
+        eprintln!("Could not save {}: {error}", path.display());
+    }
+}
+
+/// The busy settings files `installation_id` skipped, still waiting for a sync.
+pub(crate) fn busy_skips(paths: &SystemPaths, installation_id: &str) -> Vec<String> {
+    skipped_agents(paths)
+        .remove(installation_id)
+        .unwrap_or_default()
 }
 
 /// Whether `installation_id` skipped an agent since the last call, clearing it.
-pub(crate) fn take_skipped_agent(installation_id: &str) -> bool {
-    skipped_agents()
-        .lock()
-        .is_ok_and(|mut skipped| skipped.remove(installation_id))
+pub(crate) fn take_skipped_agent(paths: &SystemPaths, installation_id: &str) -> bool {
+    let mut skipped = skipped_agents(paths);
+    let taken = skipped.remove(installation_id).is_some();
+    if taken {
+        save_skipped_agents(paths, &skipped);
+    }
+    taken
 }
 
 /// One agent's unreadable or locked settings file, or a skill folder that
@@ -123,6 +165,7 @@ pub(crate) fn take_skipped_agent(installation_id: &str) -> bool {
 /// that would write to it leave the plan, and each skipped place becomes a
 /// warning. Fails only when nothing else is left to install.
 fn skip_unusable_documents(
+    paths: &SystemPaths,
     plan: &mut OperationPlan,
     installation_id: &str,
 ) -> Result<Vec<String>, String> {
@@ -152,6 +195,8 @@ fn skip_unusable_documents(
         }
     }
     if problems.is_empty() {
+        // Nothing skipped this time, so an older skip has nothing left to retry.
+        take_skipped_agent(paths, installation_id);
         return Ok(Vec::new());
     }
     let dropped_resources = plan
@@ -186,16 +231,16 @@ fn skip_unusable_documents(
             .retain(|binding_id| !dropped_bindings.contains(binding_id));
         !planned.consumer_binding_ids.is_empty()
     });
-    if let Ok(mut skipped) = skipped_agents().lock() {
-        skipped.insert(installation_id.to_string());
-    }
     // A busy file frees up on its own and the next sync retries it, so only an
     // unreadable one is worth a warning: someone has to fix that file.
-    Ok(problems
-        .into_iter()
-        .filter(|(_, busy)| !busy)
-        .map(|(text, _)| text)
-        .collect())
+    let (busy, unreadable): (Vec<_>, Vec<_>) = problems.into_iter().partition(|(_, busy)| *busy);
+    let mut skipped = skipped_agents(paths);
+    skipped.insert(
+        installation_id.to_string(),
+        busy.into_iter().map(|(text, _)| text).collect(),
+    );
+    save_skipped_agents(paths, &skipped);
+    Ok(unreadable.into_iter().map(|(text, _)| text).collect())
 }
 
 /// Where a resource is written: its settings file, or the folder a whole
@@ -401,7 +446,7 @@ pub(crate) fn install_components(
             item.id
         ));
     }
-    let warnings = skip_unusable_documents(&mut plan, &item.id)?;
+    let warnings = skip_unusable_documents(paths, &mut plan, &item.id)?;
     // A component no AI app here can use would be recorded as installed while
     // nothing uses it. Say which apps cannot, and why, instead.
     let newly_selected = existing.as_ref().is_none_or(|record| {
@@ -443,7 +488,7 @@ pub(crate) fn install_components(
             && !stale_bindings
             && plan_matches_ledger(&ledger_state, &plan)?
         {
-            return Err(format!("{} is already installed.", item.id));
+            return Err(format!("{} {ALREADY_INSTALLED}", item.id));
         }
     }
     planner::preflight_installed_conflicts(&ledger_state, source, item, &plan)?;
@@ -596,7 +641,7 @@ pub(crate) fn install_batch(
                 item.id
             ));
         }
-        warnings.extend(skip_unusable_documents(&mut plan, &item.id)?);
+        warnings.extend(skip_unusable_documents(paths, &mut plan, &item.id)?);
         if item
             .conflicts_with
             .iter()
@@ -1074,6 +1119,102 @@ pub(crate) fn uninstall_components(
     })
 }
 
+/// Removes a package pulled from the marketplace from every app whose
+/// settings can be changed now, even changed copies (backed up first). An app
+/// whose settings file is busy or damaged keeps its part for the next sync to
+/// remove, and is named in the warnings.
+pub(crate) fn uninstall_pulled(
+    paths: &SystemPaths,
+    installation_id: &str,
+) -> Result<OperationOutcome, String> {
+    let (_lock, ledger_state) = ledger_for_change(paths)?;
+    let record = ledger_state
+        .items
+        .get(installation_id)
+        .ok_or_else(|| format!("{installation_id} is not installed."))?;
+    let mut warnings = Vec::new();
+    let mut detach = BTreeSet::new();
+    for binding_id in &record.binding_ids {
+        let problems = ledger_state
+            .bindings
+            .get(binding_id)
+            .into_iter()
+            .flat_map(|binding| &binding.resource_ids)
+            .filter_map(|resource_id| ledger_state.resources.get(resource_id))
+            .filter_map(entry_unremovable)
+            .collect::<Vec<_>>();
+        if problems.is_empty() {
+            detach.insert(binding_id.clone());
+        }
+        warnings.extend(problems);
+    }
+    warnings.sort();
+    warnings.dedup();
+    if detach.is_empty() {
+        return Err(warnings.join(" "));
+    }
+    let mut next = ledger_state.clone();
+    let removed = detach_bindings(&mut next, installation_id, &detach);
+    let transaction_id = transaction_id(installation_id);
+    let (journal, _, backup_paths) = stage_changes(&StageRequest {
+        paths,
+        transaction_id: &transaction_id,
+        plan: &OperationPlan::default(),
+        removed: &removed,
+        remaining_ledger: &next,
+        replace_unmanaged: false,
+        force_modified: true,
+    })?;
+    update_document_digests_from_journal(&mut next, &journal)?;
+    next.last_transaction_id = Some(transaction_id);
+    commit(paths, &journal, &next)?;
+    Ok(OperationOutcome {
+        backup_paths: backup_paths
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        warnings,
+    })
+}
+
+/// Whether every file `plan` installs is already on disk exactly as planned,
+/// so a package a restored ledger remembers at an older version can be taken
+/// as installed at this one.
+pub(crate) fn disk_matches_plan(plan: &OperationPlan) -> bool {
+    !plan.resources.is_empty()
+        && plan
+            .resources
+            .values()
+            .all(|planned| match &planned.desired {
+                DesiredResource::Path(desired) => identical_to_desired(desired, &desired.path),
+                _ => false,
+            })
+}
+
+/// Why a recorded settings entry cannot be removed now: its file is busy, or
+/// cannot be read or parsed.
+fn entry_unremovable(resource: &ResourceRecord) -> Option<String> {
+    let OwnedResource::StructuredEntry(entry) = &resource.owned else {
+        return None;
+    };
+    let path = Path::new(&entry.document_path);
+    let app = managed_documents::app_names([resource.adapter_id.as_str()]);
+    if document_locked(path) {
+        return Some(format!(
+            "{app} is using its settings file {}, so the package is still in {app}. Close {app}; Agent Plugins tries again the next time it checks for updates.",
+            path.display()
+        ));
+    }
+    managed_documents::read_or_empty(path, entry.format)
+        .and_then(|contents| {
+            managed_documents::entry_value(&contents, entry.format, &entry.key_path)
+        })
+        .err()
+        .map(|error| {
+            managed_documents::document_error(path, [resource.adapter_id.as_str()], &error)
+        })
+}
+
 fn merge_plan(combined: &mut OperationPlan, plan: &OperationPlan) -> Result<(), String> {
     for binding in plan.bindings.values() {
         combined.add_binding(binding.clone())?;
@@ -1247,19 +1388,7 @@ fn detach_components(
     if remaining_binding_ids.is_empty() {
         ledger.items.remove(installation_id);
     }
-    let mut orphan_ids = Vec::new();
-    for (resource_id, resource) in &mut ledger.resources {
-        resource
-            .consumer_binding_ids
-            .retain(|consumer| !binding_ids.contains(consumer));
-        if resource.consumer_binding_ids.is_empty() {
-            orphan_ids.push(resource_id.clone());
-        }
-    }
-    orphan_ids
-        .into_iter()
-        .filter_map(|resource_id| ledger.resources.remove(&resource_id))
-        .collect()
+    remove_orphans(ledger, &binding_ids)
 }
 
 fn detach_installation(
@@ -1273,6 +1402,37 @@ fn detach_installation(
     for binding_id in &binding_ids {
         ledger.bindings.remove(binding_id);
     }
+    remove_orphans(ledger, &binding_ids)
+}
+
+/// Removes `binding_ids` from the installation, and the installation once no
+/// binding is left, without changing which components are selected.
+fn detach_bindings(
+    ledger: &mut InstallationLedger,
+    installation_id: &str,
+    binding_ids: &BTreeSet<String>,
+) -> Vec<ResourceRecord> {
+    for binding_id in binding_ids {
+        ledger.bindings.remove(binding_id);
+    }
+    let emptied = ledger.items.get_mut(installation_id).is_some_and(|record| {
+        record
+            .binding_ids
+            .retain(|binding_id| !binding_ids.contains(binding_id));
+        record.binding_ids.is_empty()
+    });
+    if emptied {
+        ledger.items.remove(installation_id);
+    }
+    remove_orphans(ledger, binding_ids)
+}
+
+/// Drops the detached bindings from every resource and returns the resources
+/// no binding uses any more.
+fn remove_orphans(
+    ledger: &mut InstallationLedger,
+    binding_ids: &BTreeSet<String>,
+) -> Vec<ResourceRecord> {
     let mut orphan_ids = Vec::new();
     for (resource_id, resource) in &mut ledger.resources {
         resource
@@ -1608,6 +1768,10 @@ mod tests {
         let (source, snapshot, item) = fixture(root.path());
         install(&paths, &source, &snapshot, &item, false, false).expect("install");
         assert!(paths.home.join(".agents/skills/acme-review").is_dir());
+        // The CLI reads this refusal as success when a second install lost the race.
+        assert!(install(&paths, &source, &snapshot, &item, false, false)
+            .expect_err("the same install again")
+            .ends_with(ALREADY_INSTALLED));
         let ledger = read_ledger(&paths).expect("ledger");
         assert_eq!(ledger.items.len(), 1);
         assert_eq!(ledger.bindings.len(), 1);
@@ -2567,7 +2731,50 @@ mod tests {
             .expect("cursor config")
             .contains("acme-database"));
         assert!(paths.home.join(".agents/skills/acme-review").is_dir());
-        assert!(take_skipped_agent(&item.id));
+        assert!(
+            take_skipped_agent(&paths, &item.id),
+            "kept on disk for any process"
+        );
+        assert!(!take_skipped_agent(&paths, &item.id), "taken once");
+    }
+
+    #[test]
+    fn a_pulled_package_leaves_every_app_whose_settings_can_be_changed() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let (source, snapshot, item) = mixed_fixture(root.path());
+        crate::agent_profiles::set_enabled(&paths, TargetId::Cursor, true).expect("cursor");
+        crate::agent_profiles::set_enabled(&paths, TargetId::Codex, true).expect("codex");
+        install(&paths, &source, &snapshot, &item, false, true).expect("install");
+        let codex = paths.home.join(".codex/config.toml");
+        assert!(fs::read_to_string(&codex).expect("codex").contains("acme"));
+        fs::write(&codex, "model = = broken").expect("break codex");
+
+        let outcome = uninstall_pulled(&paths, &item.id).expect("partial removal");
+
+        assert!(outcome
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("Codex")));
+        assert!(!fs::read_to_string(paths.home.join(".cursor/mcp.json"))
+            .expect("cursor config")
+            .contains("acme-database"));
+        let ledger = read_ledger(&paths).expect("ledger");
+        let left = &ledger.items[&item.id].binding_ids;
+        assert!(
+            !left.is_empty()
+                && left
+                    .iter()
+                    .all(|id| ledger.bindings[id].target_id == "codex")
+        );
+
+        fs::write(&codex, "").expect("fixed");
+        let outcome = uninstall_pulled(&paths, &item.id).expect("the rest");
+        assert!(outcome.warnings.is_empty());
+        assert!(!read_ledger(&paths)
+            .expect("ledger")
+            .items
+            .contains_key(&item.id));
     }
 
     #[test]

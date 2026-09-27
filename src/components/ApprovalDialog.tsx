@@ -5,8 +5,12 @@ import type { CatalogItem, Connector } from "../ipc/schemas";
 import { listPhrase } from "../lib/marketplace";
 import { returnFocus } from "../lib/returnFocus";
 
-/** A package (or one part of it) whose connectors the person is asked about. */
-export type ApprovalEntry = Readonly<{ item: CatalogItem; componentId: string | null }>;
+/**
+ * A package (or one part of it) whose connectors the person is asked about.
+ * `addingApps` names the apps a connector is being added to, when that is the
+ * whole change (ticking an app in **Which apps use it?**).
+ */
+export type ApprovalEntry = Readonly<{ item: CatalogItem; componentId: string | null; addingApps?: readonly string[] }>;
 
 /**
  * `install` asks before connectors are installed; `settings` only fills in
@@ -87,6 +91,8 @@ export function ApprovalDialog({ request, onResolve }: Readonly<{ request: Appro
             </Button>
           </Dialog.Close>
           <Button
+            // Settings mode saves only what was typed; with nothing typed there is nothing to save.
+            disabled={!install && Object.keys(typed).length === 0}
             onClick={() => {
               onResolve(typed);
             }}
@@ -119,10 +125,14 @@ function EntryFacts({ entry }: Readonly<{ entry: ApprovalEntry }>): JSX.Element 
         <div key={connector.componentId} className="approval-connector">
           <Text as="p" size="2">
             <strong>{connector.name}</strong>
-            {connector.changed ? " (changed in this update)" : ""}: {connector.summary}
+            {connector.changed && entry.addingApps === undefined ? " (changed in this update)" : ""}: {connector.summary}
           </Text>
           <Text as="p" color="gray" size="1">
-            {connector.apps.length === 0 ? "None of the AI apps on this computer can use it." : `Goes to ${listPhrase(connector.apps)}.`}
+            {entry.addingApps !== undefined
+              ? `Adds it to ${listPhrase(entry.addingApps)}.`
+              : connector.apps.length === 0
+                ? "None of the AI apps on this computer can use it."
+                : `Goes to ${listPhrase(connector.apps)}.`}
           </Text>
           {connector.missingProgram === null ? null : (
             <Text as="p" color="amber" size="1">

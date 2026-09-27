@@ -115,6 +115,8 @@ export const itemSchema = z
     riskDetails: z.array(z.string().min(1)).readonly().default([]),
     connectors: z.array(connectorSchema).readonly().default([]),
     /** The person holds this package's background updates. */
+    /** The package's content digest; an approval sends back the one its dialog showed. */
+    digest: z.string().default(""),
     held: z.boolean().default(false),
     marketplace: marketplaceMetaSchema.nullable().default(null)
   })
@@ -180,7 +182,11 @@ export const autoUpdateReportSchema = z
     /** Display names of installed packages the sync added to newly found AI apps. */
     extendedItems: z.array(z.string().min(1)).readonly().default([]),
     /** Display names of packages the sync uninstalled because their publisher or an admin pulled them. */
-    removedItems: z.array(z.string().min(1)).readonly().default([])
+    removedItems: z.array(z.string().min(1)).readonly().default([]),
+    /** Display names of installed packages the sync took out of AI apps no longer found, or kept out. */
+    releasedItems: z.array(z.string().min(1)).readonly().default([]),
+    /** A pulled package still in an app whose settings file was busy or damaged: why, one line each. */
+    stillPulled: z.array(z.string().min(1)).readonly().default([])
   })
   .readonly();
 export const teamRefSchema = z.object({ namespace: z.string().min(1), displayName: z.string().min(1), owner: z.boolean() }).readonly();

@@ -36,6 +36,8 @@ pub(super) struct JournalMutation {
 }
 
 const LOCK_FILE: &str = "transaction.lock";
+/// How long a change waits on another process's before saying so.
+const LOCK_WAIT_NOTICE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Serializes ledger changes across processes. The window and the command
 /// line both change the ledger, and recovery must never roll back a journal
@@ -63,8 +65,25 @@ impl TransactionLock {
             return Ok(Self(path));
         }
         let file = open_lock_file(paths)?;
-        file.lock()
-            .map_err(|error| format!("Could not lock {}: {error}", path.display()))?;
+        // Another window or command is mid-change; after a moment say why
+        // nothing happens, since a slow download can hold it for a while.
+        let started = std::time::Instant::now();
+        let mut said = false;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) => {
+                    if !said && started.elapsed() >= LOCK_WAIT_NOTICE {
+                        eprintln!("Waiting for another Agent Plugins window or command to finish a change...");
+                        said = true;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(fs::TryLockError::Error(error)) => {
+                    return Err(format!("Could not lock {}: {error}", path.display()))
+                }
+            }
+        }
         held()
             .entry(path.clone())
             .and_modify(|(_, holders)| *holders += 1)
