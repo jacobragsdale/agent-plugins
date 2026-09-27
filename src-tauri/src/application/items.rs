@@ -1214,6 +1214,31 @@ mod tests {
         assert!(paths.home.join(".agents/skills/acme-review").is_dir());
     }
 
+    #[test]
+    fn a_vscode_edition_removed_after_the_install_is_not_brought_back() {
+        use crate::agent_profiles::{set_enabled, TargetId};
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        set_enabled(&paths, TargetId::GithubCopilot, true).expect("copilot");
+        let insiders = paths.config.join("Code - Insiders");
+        fs::create_dir_all(insiders.join("User")).expect("insiders");
+        fs::create_dir_all(paths.config.join("Code/User")).expect("stable");
+        let (source, snapshot) = mcp_source(root.path());
+        let item = snapshot.catalog.items["review"].clone();
+        install::install_item_components_approved(&paths, &source, &snapshot, &item, true, None)
+            .expect("install");
+        assert!(insiders.join("User/mcp.json").is_file());
+
+        // Uninstalling VS Code Insiders takes its settings folder with it.
+        fs::remove_dir_all(&insiders).expect("uninstall insiders");
+        let sources = vec![(source, snapshot)];
+        repair_in(&paths, &sources).expect("repair");
+        extend_in(&paths, &sources).expect("extend");
+
+        assert!(!insiders.exists());
+        assert!(paths.config.join("Code/User/mcp.json").is_file());
+    }
+
     fn mcp_source(root: &Path) -> (ConfiguredSource, SourceSnapshot) {
         let (source, mut snapshot) = skill_source(root);
         fs::create_dir_all(snapshot.path.join("mcp")).expect("mcp dir");

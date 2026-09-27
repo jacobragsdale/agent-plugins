@@ -354,6 +354,23 @@ pub(super) fn stage_documents(
         }
         let original = match fs::read(&path) {
             Ok(contents) => contents,
+            // Nothing to take out of a file that is gone, and writing an empty one would bring
+            // back the folder of an app that was uninstalled, so it would look installed again.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && !plan
+                        .resources
+                        .values()
+                        .any(|planned| match &planned.desired {
+                            DesiredResource::StructuredEntry(desired) => {
+                                desired.document_path == path
+                            }
+                            DesiredResource::TextBlock(desired) => desired.document_path == path,
+                            DesiredResource::Path(_) => false,
+                        }) =>
+            {
+                continue;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => match format {
                 Some(format) => managed_documents::read_or_empty(&path, format)?,
                 None => Vec::new(),
