@@ -125,6 +125,7 @@ public sealed class MarketplaceApiFactory : WebApplicationFactory<Program>, IAsy
 public sealed class InMemoryArtifactStore : IArtifactStore
 {
     private readonly Dictionary<string, byte[]> _blobs = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _cancelableDeletes = new(StringComparer.Ordinal);
     private readonly Lock _lock = new();
 
     public IReadOnlyCollection<string> Paths
@@ -156,9 +157,22 @@ public sealed class InMemoryArtifactStore : IArtifactStore
         lock (_lock)
         {
             _blobs.Remove(path);
+            if (cancellationToken.CanBeCanceled)
+            {
+                _cancelableDeletes.Add(path);
+            }
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>Whether <paramref name="path"/> was deleted with a token a hung-up request could cancel.</summary>
+    public bool DeletedCancelably(string path)
+    {
+        lock (_lock)
+        {
+            return _cancelableDeletes.Contains(path);
+        }
     }
 
     public Task<bool> CheckAsync(CancellationToken cancellationToken) => Task.FromResult(true);

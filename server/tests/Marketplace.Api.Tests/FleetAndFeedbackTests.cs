@@ -157,6 +157,8 @@ public sealed partial class MarketplaceApiTests
         Assert.Equal(HttpStatusCode.Forbidden, (await user.DeleteAsync("/api/packages/deleter/unused", ct)).StatusCode);
         Assert.Equal(HttpStatusCode.NoContent, (await owner.DeleteAsync("/api/packages/deleter/unused", ct)).StatusCode);
         Assert.DoesNotContain("deleter/unused/1.0.0.zip", factory.Store.Paths);
+        // Committed first, so a client that hangs up can't leave the archive behind.
+        Assert.False(factory.Store.DeletedCancelably("deleter/unused/1.0.0.zip"));
         using (var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("deleter", "unused", "A new start."), "1.0.0"))
         {
             await PublishLiveAsync(owner, "deleter", "unused", form);
@@ -175,6 +177,7 @@ public sealed partial class MarketplaceApiTests
         Assert.Equal(HttpStatusCode.Forbidden, (await owner.DeleteAsync("/api/admin/packages/deleter/used/versions/1.1.0", ct)).StatusCode);
         Assert.Equal(HttpStatusCode.NoContent, (await admin.DeleteAsync("/api/admin/packages/deleter/used/versions/1.1.0", ct)).StatusCode);
         Assert.DoesNotContain("deleter/used/1.1.0.zip", factory.Store.Paths);
+        Assert.False(factory.Store.DeletedCancelably("deleter/used/1.1.0.zip"));
         Assert.Equal("1.0.0", IndexEntry(await user.GetFromJsonAsync<JsonElement>("/api/index", Json, ct), "deleter/used").GetProperty("version").GetString());
         Assert.Equal(HttpStatusCode.NotFound, (await owner.GetAsync("/api/packages/deleter/used/versions/1.1.0/files", ct)).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await owner.DeleteAsync("/api/packages/deleter/used/versions/1.1.0/yank", ct)).StatusCode);

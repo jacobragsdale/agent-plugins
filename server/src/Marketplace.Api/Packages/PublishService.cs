@@ -704,11 +704,12 @@ public sealed partial class PublishService(
         await db.SaveChangesAsync(cancellationToken);
         await RegenerateNamespaceAsync(ns, new Dictionary<string, ReadOnlyMemory<byte>>(), cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        // Committed: a client that hangs up now must not leave the archives behind.
         foreach (var path in paths)
         {
             try
             {
-                await store.DeleteAsync(path, cancellationToken);
+                await store.DeleteAsync(path, CancellationToken.None);
             }
             catch (ProblemException problem)
             {
@@ -745,13 +746,14 @@ public sealed partial class PublishService(
         }
 
         await transaction.CommitAsync(cancellationToken);
+        // Committed: a client that hangs up now must not leave the archives behind.
         var suggestions = await db.Suggestions.AsNoTracking()
             .Where(suggestion => suggestion.PackageId == package.Id && suggestion.AcceptedVersion == version.Version && suggestion.StoragePath != "")
             .Select(suggestion => suggestion.StoragePath)
-            .ToListAsync(cancellationToken);
+            .ToListAsync(CancellationToken.None);
         foreach (var path in suggestions.Prepend(version.StoragePath))
         {
-            await store.DeleteAsync(path, cancellationToken);
+            await store.DeleteAsync(path, CancellationToken.None);
         }
 
         logger.LogWarning("{Account} purged {Package} {Version}.", identity.Account, package.CanonicalId, version.Version);
