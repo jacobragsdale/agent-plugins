@@ -833,22 +833,12 @@ fn deliver_with_outbox(
     events: Vec<ClientEvent>,
     post: impl Fn(&[ClientEvent]) -> Result<(), String>,
 ) -> Result<(), String> {
-    let _guard = OUTBOX.lock().unwrap_or_else(|error| error.into_inner());
-    let now = epoch_seconds_now();
-    let mut queue = std::fs::read(outbox)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Vec<QueuedEvent>>(&bytes).ok())
-        .unwrap_or_default();
-    if events.iter().any(|event| event.kind == "heartbeat") {
-        queue.retain(|queued| queued.event.kind != "heartbeat");
-    }
-    queue.extend(events.into_iter().map(|event| QueuedEvent {
-        queued_at: now,
-        event,
-    }));
-    queue.retain(|queued| now.saturating_sub(queued.queued_at) <= OUTBOX_MAX_AGE_SECONDS);
-    let excess = queue.len().saturating_sub(OUTBOX_MAX_EVENTS);
-    queue.drain(..excess);
+    let read = || {
+        std::fs::read(outbox)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<QueuedEvent>>(&bytes).ok())
+            .unwrap_or_default()
+    };
     let save = |queue: &[QueuedEvent]| {
         if queue.is_empty() {
             let _ = std::fs::remove_file(outbox);
@@ -859,23 +849,47 @@ fn deliver_with_outbox(
             let _ = crate::fs_retry::replace_file(outbox, &json);
         }
     };
-    // On disk before the post, so a process killed while posting loses nothing;
-    // the server drops a duplicate if the post got through.
-    save(&queue);
+    let lock = || OUTBOX.lock().unwrap_or_else(|error| error.into_inner());
+    // On disk before anything is posted, so a process killed while posting loses
+    // nothing; the server drops a duplicate if the post got through. The lock
+    // covers the file only: another report must not wait for a slow post to queue.
+    let queue = {
+        let _guard = lock();
+        let now = epoch_seconds_now();
+        let mut queue = read();
+        if events.iter().any(|event| event.kind == "heartbeat") {
+            queue.retain(|queued| queued.event.kind != "heartbeat");
+        }
+        queue.extend(events.into_iter().map(|event| QueuedEvent {
+            queued_at: now,
+            event,
+        }));
+        queue.retain(|queued| now.saturating_sub(queued.queued_at) <= OUTBOX_MAX_AGE_SECONDS);
+        let excess = queue.len().saturating_sub(OUTBOX_MAX_EVENTS);
+        queue.drain(..excess);
+        save(&queue);
+        queue
+    };
+    let key = |queued: &QueuedEvent| serde_json::to_string(queued).unwrap_or_default();
+    let mut delivered = std::collections::BTreeSet::new();
     let mut result = Ok(());
-    while !queue.is_empty() {
-        let batch = queue
+    for batch in queue.chunks(EVENTS_PER_BATCH) {
+        let events = batch
             .iter()
-            .take(EVENTS_PER_BATCH)
             .map(|queued| queued.event.clone())
             .collect::<Vec<_>>();
-        if let Err(error) = post(&batch) {
+        if let Err(error) = post(&events) {
             result = Err(error);
             break;
         }
-        queue.drain(..batch.len());
+        delivered.extend(batch.iter().map(key));
     }
-    save(&queue);
+    if !delivered.is_empty() {
+        let _guard = lock();
+        let mut queue = read();
+        queue.retain(|queued| !delivered.contains(&key(queued)));
+        save(&queue);
+    }
     result
 }
 
@@ -1187,6 +1201,44 @@ mod tests {
         // One that sends only older items never moves the place back.
         let (newest, news) = after_seen(40, vec![item(39), item(30)]);
         assert_eq!((newest, news.len()), (40, 0));
+    }
+
+    #[test]
+    fn a_report_queues_while_another_is_still_posting() {
+        let dir = tempfile::tempdir().expect("dir");
+        let outbox = dir.path().join(OUTBOX_FILE);
+        let (done, finished) = std::sync::mpsc::channel();
+        deliver_with_outbox(
+            &outbox,
+            vec![ClientEvent::heartbeat(
+                Vec::new(),
+                Vec::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+            )],
+            |_| {
+                // While this post hangs, the next report must still reach the disk.
+                let (outbox, done) = (outbox.clone(), done.clone());
+                std::thread::spawn(move || {
+                    let _ = deliver_with_outbox(
+                        &outbox,
+                        vec![ClientEvent::install("acme/tools", None, Vec::new())],
+                        |_| Err("offline".to_string()),
+                    );
+                    let _ = done.send(());
+                });
+                finished
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(|_| "the second report waited for this post".to_string())
+            },
+        )
+        .expect("delivered");
+        let queued = std::fs::read_to_string(&outbox).expect("the install is still queued");
+        assert!(queued.contains("acme/tools"));
+        assert!(
+            !queued.contains("heartbeat"),
+            "only what was delivered leaves"
+        );
     }
 
     #[test]
