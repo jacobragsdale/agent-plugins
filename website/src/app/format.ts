@@ -139,6 +139,8 @@ export interface SkillText {
   readonly name: string;
   readonly description: string;
   readonly body: string;
+  /** Frontmatter lines besides name and description, such as `disable-model-invocation`, kept as written. */
+  readonly extra?: readonly string[];
 }
 
 interface Frontmatter {
@@ -211,7 +213,9 @@ export function parseSkillMd(text: string): SkillText | null {
     const extent = keyExtent(parts.lines, key);
     return extent === null ? "" : scalar(parts.lines.slice(extent.start, extent.end));
   };
-  return { name: field("name"), description: field("description"), body: parts.body.trim() };
+  const edited = [keyExtent(parts.lines, "name"), keyExtent(parts.lines, "description")];
+  const extra = parts.lines.filter((line, index) => line.trim().length > 0 && !edited.some((extent) => extent !== null && index >= extent.start && index < extent.end));
+  return { name: field("name"), description: field("description"), body: parts.body.trim(), ...(extra.length > 0 ? { extra } : {}) };
 }
 
 export function formatBytes(bytes: number): string {
@@ -410,8 +414,14 @@ export function packageIdFor(name: string, space: string): string {
 }
 
 /** A SKILL.md from what someone typed: the description is quoted, so a colon or a quote in it stays valid YAML. */
+/** The files of a live version that a skill written in the editor, a SKILL.md alone, would remove. */
+export function filesWritingDrops(paths: readonly string[]): string[] {
+  return paths.filter((path) => path !== "agent-plugins.json" && !path.endsWith("SKILL.md"));
+}
+
 export function skillMd(skill: SkillText): string {
-  return `---\nname: ${skill.name}\ndescription: ${JSON.stringify(skill.description.replace(/\s+/gu, " ").trim())}\n---\n\n${skill.body.trim()}\n`;
+  const extra = (skill.extra ?? []).map((line) => `${line}\n`).join("");
+  return `---\nname: ${skill.name}\ndescription: ${JSON.stringify(skill.description.replace(/\s+/gu, " ").trim())}\n${extra}---\n\n${skill.body.trim()}\n`;
 }
 
 export type BrowseSort = "popular" | "new" | "updated";

@@ -9,6 +9,7 @@ import {
   newestFirst,
   packageIdFor,
   parseBrowse,
+  filesWritingDrops,
   parseSkillMd,
   skillMd,
   slugify,
@@ -190,7 +191,25 @@ describe("packageIdFor", () => {
   });
 });
 
+describe("filesWritingDrops", () => {
+  it("names the files a written SKILL.md would remove", () => {
+    expect(filesWritingDrops(["agent-plugins.json", "skills/multi/SKILL.md", "skills/multi/scripts/run.ps1", "skills/multi/references/guide.md"])).toEqual([
+      "skills/multi/scripts/run.ps1",
+      "skills/multi/references/guide.md"
+    ]);
+    expect(filesWritingDrops(["agent-plugins.json", "skills/single/SKILL.md"])).toEqual([]);
+  });
+});
+
 describe("skillMd", () => {
+  it("keeps the frontmatter an edit does not show", () => {
+    const live = "---\nname: single\ndescription: Use when testing.\ndisable-model-invocation: true\nlicense: MIT\nmetadata:\n  owner: qa\n---\n\nOld body.\n";
+    const parsed = parseSkillMd(live);
+    expect(parsed?.extra).toEqual(["disable-model-invocation: true", "license: MIT", "metadata:", "  owner: qa"]);
+    const edited = skillMd({ name: "single", description: "Use when testing.", body: "New body.", extra: parsed?.extra ?? [] });
+    expect(edited).toBe('---\nname: single\ndescription: "Use when testing."\ndisable-model-invocation: true\nlicense: MIT\nmetadata:\n  owner: qa\n---\n\nNew body.\n');
+  });
+
   it("writes frontmatter that reads back, even with colons and quotes", () => {
     const text = skillMd({ name: "standup", description: 'Use when asked: "write my standup"', body: "# Standup\n\nKeep it short." });
     expect(parseSkillMd(text)).toEqual({ name: "standup", description: 'Use when asked: "write my standup"', body: "# Standup\n\nKeep it short." });

@@ -9,7 +9,7 @@ import { Router, RouterLink } from "@angular/router";
 import type { PublishForm, Visibility } from "../api";
 import { Api, ApiError, archiveUrl, versionFiles } from "../api";
 import type { Bump } from "../format";
-import { idPattern, nextVersion, packageIdFor, parseSkillMd, skillMd, slugify } from "../format";
+import { filesWritingDrops, idPattern, nextVersion, packageIdFor, parseSkillMd, skillMd, slugify } from "../format";
 import { Session } from "../session";
 import { Icon } from "../shared/icon";
 import { runTask } from "../shared/tasks";
@@ -124,6 +124,21 @@ export class PublishPage {
       return path === undefined ? null : parseSkillMd(await this.api.fileText(params.files, path));
     }
   });
+  /** The live version's files, for a new version: writing it here publishes a SKILL.md alone. */
+  private readonly liveFiles = resource({
+    params: () => {
+      const detail = this.existing.value();
+      const live = detail?.liveVersion ?? null;
+      return this.mode() === "upload" && detail !== undefined && live !== null ? { files: versionFiles(detail.namespace, detail.packageId, live) } : undefined;
+    },
+    loader: ({ params }) => this.api.files(params.files)
+  });
+
+  /** Files a written version would remove from every PC: the editor is for single-file skills only. */
+  protected readonly writeDrops = computed(() =>
+    this.source() === "write" && this.mode() === "upload" && this.liveFiles.hasValue() ? filesWritingDrops(this.liveFiles.value().map((file) => file.path)) : []
+  );
+
   protected readonly version = computed(() => {
     const detail = this.existing.value();
     return detail === undefined
@@ -166,7 +181,9 @@ export class PublishPage {
       return [];
     }
 
-    const text = skillMd({ name: slugify(this.packageId()), description, body });
+    // An edit keeps the live file's other frontmatter, such as `disable-model-invocation`.
+    const extra = this.liveSkill.hasValue() ? (this.liveSkill.value()?.extra ?? []) : [];
+    const text = skillMd({ name: slugify(this.packageId()), description, body, extra });
     return [{ path: "SKILL.md", file: new File([text], "SKILL.md", { type: "text/markdown" }) }];
   });
 
@@ -198,6 +215,7 @@ export class PublishPage {
       this.idProblem() === null &&
       this.space() !== "" &&
       this.files().length > 0 &&
+      this.writeDrops().length === 0 &&
       describeUpload(this.files())?.usable === true &&
       (this.mode() === "new" ? this.uploadTitle().trim().length > 0 : this.existing.hasValue()) &&
       (!this.suggesting() || this.message().trim().length > 0)

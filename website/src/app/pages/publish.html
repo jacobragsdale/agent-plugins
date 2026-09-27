@@ -28,6 +28,12 @@
       </mat-button-toggle-group>
 
       <app-skill-editor [hidden]="source() !== 'write' || suggesting()" [showName]="mode() === 'new'" [(name)]="uploadTitle" [(description)]="skillDescription" [(body)]="skillBody" />
+      @if (writeDrops().length > 0) {
+        <p class="notice" role="alert">
+          This skill has other files ({{ writeDrops().join(", ") }}). Writing it here would publish only its SKILL.md and remove them from every PC that has it. Choose
+          <strong>Upload files</strong> and include every file.
+        </p>
+      }
       <app-upload-picker [hidden]="source() === 'write' && !suggesting()" [showName]="mode() === 'new'" [(picked)]="picked" [(title)]="uploadTitle" />
       <app-file-changes [loading]="check.isLoading()" [problem]="checkProblem()" [check]="checked()" />
 
