@@ -64,6 +64,8 @@ export const connectorSchema = z
     missingEnvironment: z.array(z.string().min(1)).readonly(),
     missingProgram: z.string().min(1).nullable(),
     apps: z.array(z.string().min(1)).readonly(),
+    /** The apps it is in now; empty until it is installed. */
+    installedApps: z.array(z.string().min(1)).readonly().default([]),
     changed: z.boolean()
   })
   .readonly();

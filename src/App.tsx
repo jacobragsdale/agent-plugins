@@ -665,8 +665,12 @@ export default function App(): JSX.Element {
     setAppsRequest(null);
     const { item, componentId } = request;
     // Adding an app back installs the connector there, which the person approves like any install.
+    // Every app the connector goes to after the change that it isn't in now: the ones ticked again,
+    // and any it was never in (an app found again after it went away).
     const excludedBefore = item.components.find((component) => component.id === componentId)?.excludedApps ?? [];
-    const addingApps = (state?.agentProfiles ?? []).filter((profile) => excludedBefore.includes(profile.targetId) && !excluded.includes(profile.targetId)).map((profile) => profile.displayName);
+    const connector = item.connectors.find((entry) => entry.componentId === componentId);
+    const readded = (state?.agentProfiles ?? []).filter((profile) => excludedBefore.includes(profile.targetId) && !excluded.includes(profile.targetId)).map((profile) => profile.displayName);
+    const addingApps = [...new Set([...(connector?.apps ?? []), ...readded])].filter((app) => !(connector?.installedApps ?? []).includes(app));
     if (added && !(await approveConnectors([{ item, componentId, addingApps }]))) {
       return;
     }

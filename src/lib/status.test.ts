@@ -154,6 +154,7 @@ describe("uninstalledNotice", () => {
       missingEnvironment: ["DB_URL"],
       missingProgram: null,
       apps: [],
+      installedApps: [],
       changed: false
     };
     const [first] = state.items;

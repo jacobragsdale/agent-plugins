@@ -86,6 +86,8 @@ pub(crate) struct ConnectorState {
     pub(crate) missing_program: Option<String>,
     /// The apps that get it, by display name.
     pub(crate) apps: Vec<String>,
+    /// The apps it is in now, by display name; empty until it is installed.
+    pub(crate) installed_apps: Vec<String>,
     /// It is installed and this version changes what it runs.
     pub(crate) changed: bool,
 }

@@ -412,14 +412,19 @@ fn connectors(
                         .map(|target| target.display_name().to_string())
                 })
                 .collect();
-            let installed = record.is_some_and(|record| {
-                record.binding_ids.iter().any(|binding_id| {
-                    ledger_state
-                        .bindings
-                        .get(binding_id)
-                        .is_some_and(|binding| binding.component_id == component.id)
+            let installed_apps = record
+                .into_iter()
+                .flat_map(|record| &record.binding_ids)
+                .filter_map(|binding_id| ledger_state.bindings.get(binding_id))
+                .filter(|binding| binding.component_id == component.id)
+                .filter_map(|binding| {
+                    agent_profiles::TargetId::ALL
+                        .into_iter()
+                        .find(|target| target.as_str() == binding.target_id)
+                        .map(|target| target.display_name().to_string())
                 })
-            });
+                .collect::<Vec<_>>();
+            let installed = !installed_apps.is_empty();
             let (summary, missing_program) = match server {
                 crate::mcp::McpServer::Stdio { command, .. } => (
                     format!("Starts a program called {command} on this computer."),
@@ -452,6 +457,7 @@ fn connectors(
                 environment,
                 missing_program,
                 apps,
+                installed_apps,
                 changed: installed
                     && !crate::planner::mcp_entries_owned(plan, ledger_state, Some(&component.id)),
             }
