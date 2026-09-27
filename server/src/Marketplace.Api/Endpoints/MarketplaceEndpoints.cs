@@ -531,14 +531,25 @@ public static class MarketplaceEndpoints
             var identity = context.MarketplaceIdentity();
             var now = time.GetUtcNow().UtcDateTime;
             // Accounts match without case (EntryMatches), so one row per account whatever its spelling.
-            var block = await db.Blocks.FirstOrDefaultAsync(candidate => candidate.Account.ToLower() == account.ToLower(), cancellationToken)
-                ?? db.Blocks.Add(new Block { Account = account, BlockedBy = identity.Account }).Entity;
-            block.BlockedBy = identity.Account;
-            block.BlockedAt = now;
-            block.Reason = reason is { Length: > 0 } ? reason : null;
-            db.Audit(identity.Account, "block", account, block.Reason, now);
-            await db.SaveChangesAsync(cancellationToken);
-            return TypedResults.NoContent();
+            // Two admins blocking at once: the second insert hits the key, so it updates the first one's row.
+            for (var attempt = 0; ; attempt++)
+            {
+                var block = await db.Blocks.FirstOrDefaultAsync(candidate => candidate.Account.ToLower() == account.ToLower(), cancellationToken)
+                    ?? db.Blocks.Add(new Block { Account = account, BlockedBy = identity.Account }).Entity;
+                block.BlockedBy = identity.Account;
+                block.BlockedAt = now;
+                block.Reason = reason is { Length: > 0 } ? reason : null;
+                db.Audit(identity.Account, "block", account, block.Reason, now);
+                try
+                {
+                    await db.SaveChangesAsync(cancellationToken);
+                    return TypedResults.NoContent();
+                }
+                catch (DbUpdateException error) when (attempt == 0 && error.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation })
+                {
+                    db.ChangeTracker.Clear();
+                }
+            }
         }).WithName("Block").ProducesProblem(422);
 
         admin.MapDelete("/blocks/{account}", async Task<NoContent> (string account, HttpContext context, MarketplaceDbContext db, TimeProvider time, CancellationToken cancellationToken) =>

@@ -218,4 +218,41 @@ public sealed partial class MarketplaceApiTests
         Assert.DoesNotContain("decliner/db", Revoked(await stranger.GetFromJsonAsync<JsonElement>("/api/index", Json, ct)));
         Assert.Contains("decliner/db", Revoked(await owner.GetFromJsonAsync<JsonElement>("/api/index", Json, ct)));
     }
+
+    [Fact]
+    public async Task A_suggestion_decided_and_withdrawn_at_once_has_one_outcome()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var owner = factory.ClientFor("TEST\\racer");
+        using var suggester = factory.ClientFor("TEST\\racesuggester");
+        using (var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("racer", "notes"), "1.0.0"))
+        {
+            await PublishLiveAsync(owner, "racer", "notes", form);
+        }
+
+        for (var round = 0; round < 5; round++)
+        {
+            var id = (await Suggest(suggester, "racer", "notes", SamplePackages.SkillPackage("racer", "notes", $"Round {round}."), "Race.")).GetProperty("id").GetInt64();
+            var accept = owner.PostAsJsonAsync($"/api/suggestions/{id}", new { decision = "accept" }, Json, ct);
+            var withdraw = suggester.DeleteAsync($"/api/suggestions/{id}", ct);
+            var statuses = new[] { (await accept).StatusCode, (await withdraw).StatusCode };
+            Assert.Single(statuses, status => status is HttpStatusCode.OK or HttpStatusCode.NoContent);
+            Assert.Single(statuses, HttpStatusCode.Conflict);
+        }
+    }
+
+    [Fact]
+    public async Task Two_admins_blocking_one_account_at_once_both_succeed()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var first = factory.ClientFor("TEST\\admin");
+        using var second = factory.ClientFor("TEST\\admin");
+        for (var round = 0; round < 5; round++)
+        {
+            var statuses = await Task.WhenAll(
+                first.PutAsJsonAsync($"/api/admin/blocks/TEST%5Cracy{round}", new { reason = "One." }, Json, ct),
+                second.PutAsJsonAsync($"/api/admin/blocks/TEST%5Cracy{round}", new { reason = "Two." }, Json, ct));
+            Assert.All(statuses, response => Assert.Equal(HttpStatusCode.NoContent, response.StatusCode));
+        }
+    }
 }

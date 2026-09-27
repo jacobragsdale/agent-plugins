@@ -155,12 +155,22 @@ public sealed class SuggestionService(
         {
             var semver = request.Version is { Length: > 0 } text ? PublishService.ParseVersion(text) : PublishService.NextPatch(package);
             var archive = await store.GetAsync(suggestion.StoragePath, cancellationToken);
+            await ClaimAsync(suggestion, SuggestionState.Accepted, identity.Account, now, cancellationToken);
             suggestion.State = SuggestionState.Accepted;
             suggestion.AcceptedVersion = semver.ToString();
             Decided(identity, suggestion, $"{identity.DisplayName} accepted your suggestion to {package.Name}; it's version {semver} now.", now);
 
             // The commit saves this tracked suggestion in its own transaction, so accepting is all or nothing.
-            await publish.CommitAsync(identity, suggestion.SuggestedBy, package.Namespace, package.PackageId, semver, package.Tags, suggestion.Message, archive, ArchiveInspector.Inspect(archive), cancellationToken);
+            try
+            {
+                await publish.CommitAsync(identity, suggestion.SuggestedBy, package.Namespace, package.PackageId, semver, package.Tags, suggestion.Message, archive, ArchiveInspector.Inspect(archive), cancellationToken);
+            }
+            catch
+            {
+                await db.Suggestions.Where(candidate => candidate.Id == suggestion.Id && candidate.State == SuggestionState.Accepted)
+                    .ExecuteUpdateAsync(set => set.SetProperty(candidate => candidate.State, SuggestionState.Pending).SetProperty(candidate => candidate.DecidedBy, (string?)null).SetProperty(candidate => candidate.DecidedAt, (DateTime?)null), CancellationToken.None);
+                throw;
+            }
         }
         else if (request.Decision == "decline")
         {
@@ -170,6 +180,7 @@ public sealed class SuggestionService(
                 throw new ProblemException(422, $"Say why you're declining, in up to {PublishService.MaxReviewNote:N0} characters; the person who suggested it sees your note.");
             }
 
+            await ClaimAsync(suggestion, SuggestionState.Declined, identity.Account, now, cancellationToken);
             suggestion.State = SuggestionState.Declined;
             suggestion.DecisionNote = note;
             Decided(identity, suggestion, $"{identity.DisplayName} declined your suggestion to {package.Name}: {note}", now);
@@ -200,10 +211,22 @@ public sealed class SuggestionService(
         }
 
         RequirePending(suggestion);
-        suggestion.State = SuggestionState.Withdrawn;
-        suggestion.DecidedBy = identity.Account;
-        suggestion.DecidedAt = timeProvider.GetUtcNow().UtcDateTime;
-        await db.SaveChangesAsync(cancellationToken);
+        await ClaimAsync(suggestion, SuggestionState.Withdrawn, identity.Account, timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+    }
+
+    /// <summary>
+    /// Moves a pending suggestion to its decided state in one statement, so a decision and a withdrawal sent at
+    /// once (or two decisions) can't both win: the second finds it no longer pending and gets 409.
+    /// </summary>
+    private async Task ClaimAsync(Suggestion suggestion, SuggestionState state, string account, DateTime now, CancellationToken cancellationToken)
+    {
+        var claimed = await db.Suggestions
+            .Where(candidate => candidate.Id == suggestion.Id && candidate.State == SuggestionState.Pending)
+            .ExecuteUpdateAsync(set => set.SetProperty(candidate => candidate.State, state).SetProperty(candidate => candidate.DecidedBy, account).SetProperty(candidate => candidate.DecidedAt, now), cancellationToken);
+        if (claimed == 0)
+        {
+            throw new ProblemException(409, "This suggestion is not waiting any more: someone decided or withdrew it just now.");
+        }
     }
 
     /// <summary>Suggestions waiting on the caller's namespaces, and the caller's own.</summary>
