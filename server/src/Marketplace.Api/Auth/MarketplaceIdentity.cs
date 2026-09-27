@@ -101,12 +101,14 @@ public static partial class IdentityResolver
         var ns = candidates.FirstOrDefault(candidate => owners.TryGetValue(candidate, out var owner) && IsClaimant(owner, identity.Account))
             ?? candidates.FirstOrDefault(candidate => !owners.ContainsKey(candidate));
 
-        var account = identity.Account.ToLowerInvariant();
+        // Entries with the caller's username, then the domain rule: CORP\jane is jane@CORP.EXAMPLE.COM.
         var username = Username(identity.Account).ToLowerInvariant();
-        var teams = await db.TeamMembers.AsNoTracking()
-            .Where(member => member.Account.ToLower() == account || member.Account.ToLower() == username)
-            .Join(db.Publishers, member => member.Namespace, publisher => publisher.Namespace, (member, publisher) => new { member.Namespace, publisher.DisplayName, member.IsOwner })
-            .ToListAsync(cancellationToken);
+        var teams = (await db.TeamMembers.AsNoTracking()
+            .Where(member => member.Account.ToLower() == username || member.Account.ToLower().EndsWith("\\" + username) || member.Account.ToLower().StartsWith(username + "@"))
+            .Join(db.Publishers, member => member.Namespace, publisher => publisher.Namespace, (member, publisher) => new { member.Account, member.Namespace, publisher.DisplayName, member.IsOwner })
+            .ToListAsync(cancellationToken))
+            .Where(team => EntryMatches(team.Account, identity.Account))
+            .ToList();
         var memberships = teams
             .GroupBy(team => team.Namespace, StringComparer.Ordinal)
             .Select(group => new TeamMembership(group.Key, group.First().DisplayName, group.Any(team => team.IsOwner)))

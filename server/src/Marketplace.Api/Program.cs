@@ -112,7 +112,8 @@ builder.Services.AddAuthorization(options =>
 {
     options.AddPolicy(MarketplaceEndpoints.AdminPolicy, policy => policy
         .RequireAuthenticatedUser()
-        .RequireAssertion(context => IdentityResolver.Resolve(context.User, authOptions).IsAdmin));
+        // Every requirement runs even when the caller is anonymous, and an anonymous principal has no name to resolve.
+        .RequireAssertion(context => context.User.Identity?.IsAuthenticated == true && IdentityResolver.Resolve(context.User, authOptions).IsAdmin));
 });
 
 builder.Services.AddDbContext<MarketplaceDbContext>(options =>

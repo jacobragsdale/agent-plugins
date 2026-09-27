@@ -259,18 +259,7 @@ public sealed class AccessService(MarketplaceDbContext db, NotificationService n
     public async Task<ShareView> SetAsync(MarketplaceIdentity identity, string ns, string? id, ShareRequest request, CancellationToken cancellationToken)
     {
         var target = Target(identity, ns, id);
-        var publisher = await db.Publishers.AsNoTracking().SingleOrDefaultAsync(candidate => candidate.Namespace == ns, cancellationToken);
-        if (id is null && publisher?.Kind == PublisherKind.Team && !identity.IsTeamOwner(ns))
-        {
-            throw new ProblemException(403, $"Only the team's owners can change who sees {publisher.DisplayName}.");
-        }
-
-        // Accounts that derive the same name all own it until one publishes; only the claimant may set its list.
-        if (ns == identity.Namespace && (publisher is null || !IdentityResolver.IsClaimant(publisher.Account, identity.Account)))
-        {
-            throw new ProblemException(409, $"Publish to {ns} before you set who may see it.");
-        }
-
+        await CheckMaySetAsync(identity, ns, id, cancellationToken);
         if (id is not null && !await ExistsAsync(ns, id, cancellationToken))
         {
             throw ProblemException.NotFound(target);
@@ -356,12 +345,30 @@ public sealed class AccessService(MarketplaceDbContext db, NotificationService n
     public async Task<string> ShareLinkAsync(MarketplaceIdentity identity, string ns, string? id, bool reset, CancellationToken cancellationToken)
     {
         var target = Target(identity, ns, id);
+        // A share link adds whoever opens it to the list, so it needs the same right as changing the list.
+        await CheckMaySetAsync(identity, ns, id, cancellationToken);
         if (id is not null && !await ExistsAsync(ns, id, cancellationToken))
         {
             throw ProblemException.NotFound(target);
         }
 
         return await LinkAsync(Link.Share, target, identity.Account, reset, cancellationToken);
+    }
+
+    /// <summary>A team's space is its owners' to share; a personal namespace only its claimant's, once published.</summary>
+    private async Task CheckMaySetAsync(MarketplaceIdentity identity, string ns, string? id, CancellationToken cancellationToken)
+    {
+        var publisher = await db.Publishers.AsNoTracking().SingleOrDefaultAsync(candidate => candidate.Namespace == ns, cancellationToken);
+        if (id is null && publisher?.Kind == PublisherKind.Team && !identity.IsTeamOwner(ns))
+        {
+            throw new ProblemException(403, $"Only the team's owners can change who sees {publisher.DisplayName}.");
+        }
+
+        // Accounts that derive the same name all own it until one publishes; only the claimant may set its list.
+        if (ns == identity.Namespace && (publisher is null || !IdentityResolver.IsClaimant(publisher.Account, identity.Account)))
+        {
+            throw new ProblemException(409, $"Publish to {ns} before you set who may see it.");
+        }
     }
 
     /// <summary>The link of <paramref name="kind"/> for a target, created on first request; <paramref name="reset"/> replaces it.</summary>
@@ -400,7 +407,9 @@ public sealed class AccessService(MarketplaceDbContext db, NotificationService n
         var rule = await db.AccessRules.FindAsync([target], cancellationToken);
         if (rule is null)
         {
-            rule = new AccessRule { Target = target, Visibility = id is null ? Visibility.Private : Visibility.Inherit, UpdatedBy = identity.Account };
+            // The setting a missing rule stands for: a redeem adds to the list and never hides a public space
+            // (one that only looked hidden, because its owner was blocked).
+            rule = new AccessRule { Target = target, Visibility = id is null ? Visibility.Public : Visibility.Inherit, UpdatedBy = identity.Account };
             db.AccessRules.Add(rule);
         }
 

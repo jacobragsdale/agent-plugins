@@ -464,7 +464,9 @@ public sealed partial class PublishService(
             throw new ProblemException(403, "An admin removed this package from every PC, so only an admin can restore it.");
         }
 
-        if (package.RevokedAt is not null != revoked)
+        // An admin revoking what its owners already revoked takes the revoke over, so they can't restore it.
+        var adminTakesOver = revoked && identity.IsAdmin && package.RevokedAt is not null && !package.RevokedByAdmin;
+        if (package.RevokedAt is not null != revoked || adminTakesOver)
         {
             var now = timeProvider.GetUtcNow().UtcDateTime;
             package.RevokedAt = revoked ? now : null;

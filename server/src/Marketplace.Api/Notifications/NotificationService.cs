@@ -67,7 +67,7 @@ public sealed class NotificationService(
     public async Task<NotificationsView> ListAsync(MarketplaceIdentity identity, long? after, int? limit, CancellationToken cancellationToken)
     {
         var take = Math.Clamp(limit ?? 50, 1, MaxLimit);
-        var query = Mine(identity);
+        var query = await MineAsync(identity, cancellationToken);
         var items = after is { } since
             ? query.Where(notification => notification.Id > since).OrderBy(notification => notification.Id)
             : query.OrderByDescending(notification => notification.Id);
@@ -79,13 +79,13 @@ public sealed class NotificationService(
     public async Task ReadAsync(MarketplaceIdentity identity, long upTo, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;
-        await Mine(identity)
+        await (await MineAsync(identity, cancellationToken))
             .Where(notification => notification.Id <= upTo && notification.ReadAt == null)
             .ExecuteUpdateAsync(setters => setters.SetProperty(notification => notification.ReadAt, now), cancellationToken);
     }
 
-    public Task<int> UnreadAsync(MarketplaceIdentity identity, CancellationToken cancellationToken) =>
-        Mine(identity).CountAsync(notification => notification.ReadAt == null, cancellationToken);
+    public async Task<int> UnreadAsync(MarketplaceIdentity identity, CancellationToken cancellationToken) =>
+        await (await MineAsync(identity, cancellationToken)).CountAsync(notification => notification.ReadAt == null, cancellationToken);
 
     /// <summary>
     /// Posts <c>{ text, link }</c> to <c>Notifications:WebhookUrl</c>, when set, without holding up the request.
@@ -114,11 +114,20 @@ public sealed class NotificationService(
         });
     }
 
-    /// <summary>The caller's notifications. A bare username entry (a team member added by name) matches any domain.</summary>
-    private IQueryable<Notification> Mine(MarketplaceIdentity identity)
+    /// <summary>
+    /// The caller's notifications: those addressed to any entry that names them, as team membership reads it
+    /// (a bare username matches any domain; CORP\jane is jane@CORP.EXAMPLE.COM).
+    /// </summary>
+    private async Task<IQueryable<Notification>> MineAsync(MarketplaceIdentity identity, CancellationToken cancellationToken)
     {
-        var account = identity.Account.ToLower();
         var username = IdentityResolver.Username(identity.Account).ToLower();
-        return db.Notifications.Where(notification => notification.Account.ToLower() == account || notification.Account.ToLower() == username);
+        var spellings = (await db.Notifications
+                .Where(notification => notification.Account.ToLower() == username || notification.Account.ToLower().EndsWith("\\" + username) || notification.Account.ToLower().StartsWith(username + "@"))
+                .Select(notification => notification.Account)
+                .Distinct()
+                .ToListAsync(cancellationToken))
+            .Where(entry => IdentityResolver.EntryMatches(entry, identity.Account))
+            .ToArray();
+        return db.Notifications.Where(notification => spellings.Contains(notification.Account));
     }
 }
