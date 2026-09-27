@@ -321,15 +321,32 @@ public sealed class EventsService(MarketplaceDbContext db, AccessService access,
     }
 
     /// <summary>Whether anyone ever installed the package or reported it installed.</summary>
-    public async Task<bool> EverInstalledAsync(string canonicalId, CancellationToken cancellationToken) =>
-        await db.Events.AnyAsync(item => item.Kind == "install" && item.PackageId == canonicalId, cancellationToken)
-        || await db.Heartbeats.AnyAsync(heartbeat => heartbeat.Installed.Contains(canonicalId), cancellationToken);
+    public async Task<bool> EverInstalledAsync(string canonicalId, CancellationToken cancellationToken)
+    {
+        var since = await CreatedAtAsync(canonicalId, cancellationToken);
+        return await db.Events.AnyAsync(item => item.Kind == "install" && item.PackageId == canonicalId, cancellationToken)
+            || await db.Heartbeats.AnyAsync(heartbeat => heartbeat.Installed.Contains(canonicalId) && heartbeat.ReceivedAt >= since, cancellationToken);
+    }
+
+    /// <summary>
+    /// When the package now under <paramref name="canonicalId"/> was created. A heartbeat received before then
+    /// lists the package an admin deleted under the same id, not this one.
+    /// </summary>
+    private async Task<DateTime> CreatedAtAsync(string canonicalId, CancellationToken cancellationToken)
+    {
+        var slash = canonicalId.IndexOf('/', StringComparison.Ordinal);
+        var (ns, packageId) = (canonicalId[..slash], canonicalId[(slash + 1)..]);
+        return await db.Packages.Where(package => package.Namespace == ns && package.PackageId == packageId)
+            .Select(package => (DateTime?)package.CreatedAt)
+            .SingleOrDefaultAsync(cancellationToken) ?? DateTime.MinValue;
+    }
 
     /// <summary>Every PC whose latest heartbeat lists the package, most recent first.</summary>
     public async Task<InstallView[]> InstallsAsync(string canonicalId, CancellationToken cancellationToken)
     {
+        var since = await CreatedAtAsync(canonicalId, cancellationToken);
         var heartbeats = await db.Heartbeats.AsNoTracking()
-            .Where(heartbeat => heartbeat.Installed.Contains(canonicalId))
+            .Where(heartbeat => heartbeat.Installed.Contains(canonicalId) && heartbeat.ReceivedAt >= since)
             .OrderByDescending(heartbeat => heartbeat.OccurredAt)
             .ToListAsync(cancellationToken);
         return heartbeats.Select(heartbeat => new InstallView(

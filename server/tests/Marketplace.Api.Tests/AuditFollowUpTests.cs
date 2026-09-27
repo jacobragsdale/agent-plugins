@@ -78,6 +78,9 @@ public sealed partial class MarketplaceApiTests
 
         var install = new { events = new object[] { new { kind = "install", occurredAt = DateTimeOffset.UtcNow, clientVersion = "0.2.2", packageId = "reuser/tool" } } };
         Assert.Equal(HttpStatusCode.Accepted, (await user.PostAsJsonAsync("/api/events", install, Json, ct)).StatusCode);
+        // A PC that had the old package and never reports again.
+        var heartbeat = new { events = new object[] { new { kind = "heartbeat", occurredAt = DateTimeOffset.UtcNow, clientVersion = "0.2.2", device = "PC-GONE", installed = new[] { "reuser/tool" } } } };
+        Assert.Equal(HttpStatusCode.Accepted, (await user.PostAsJsonAsync("/api/events", heartbeat, Json, ct)).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await owner.DeleteAsync("/api/packages/reuser/tool", ct)).StatusCode);
         Assert.Equal(HttpStatusCode.NoContent, (await admin.DeleteAsync("/api/packages/reuser/tool", ct)).StatusCode);
         Assert.Contains("reuser/tool", Revoked(await user.GetFromJsonAsync<JsonElement>("/api/index", Json, ct)));
@@ -90,6 +93,7 @@ public sealed partial class MarketplaceApiTests
 
         Assert.DoesNotContain("reuser/tool", Revoked(await user.GetFromJsonAsync<JsonElement>("/api/index", Json, ct)));
         Assert.Equal(0, (await owner.GetFromJsonAsync<JsonElement>("/api/packages/reuser/tool", Json, ct)).GetProperty("installs").GetInt32());
+        Assert.Equal(0, (await admin.GetFromJsonAsync<JsonElement>("/api/admin/packages/reuser/tool/installs", Json, ct)).GetArrayLength());
         Assert.Equal(HttpStatusCode.NoContent, (await owner.DeleteAsync("/api/packages/reuser/tool", ct)).StatusCode);
     }
 
