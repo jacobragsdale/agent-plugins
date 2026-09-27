@@ -166,7 +166,11 @@ pub(super) fn apply_index(state: &mut AppState, index: &crate::marketplace::Inde
 /// retried or done by hand.
 fn drop_revoked(items: &mut Vec<crate::app_state::CatalogItemState>, revoked: &[String]) {
     items.retain(|item| {
-        !revoked.contains(&item.id) || super::items::counts_as_installed(item.status)
+        !revoked.contains(&item.id)
+            || !matches!(
+                item.status,
+                crate::install::ItemStatus::Available | crate::install::ItemStatus::Conflict
+            )
     });
 }
 
@@ -679,11 +683,17 @@ mod tests {
         let mut items = vec![
             catalog_item("bob/pulled", ItemStatus::Available),
             catalog_item("bob/stuck", ItemStatus::Installed),
+            // Gone from the catalog, but still in an app whose settings could not be changed.
+            catalog_item("bob/half", ItemStatus::Removed),
             catalog_item("bob/kept", ItemStatus::Available),
         ];
         drop_revoked(
             &mut items,
-            &["bob/pulled".to_string(), "bob/stuck".to_string()],
+            &[
+                "bob/pulled".to_string(),
+                "bob/stuck".to_string(),
+                "bob/half".to_string(),
+            ],
         );
         let ids = items
             .iter()
@@ -691,7 +701,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             ids,
-            ["bob/stuck", "bob/kept"],
+            ["bob/stuck", "bob/half", "bob/kept"],
             "installed stays so it can be removed"
         );
     }
