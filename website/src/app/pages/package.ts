@@ -226,31 +226,36 @@ export class PackagePage {
   }
 
   private async sendReport(kind: ReportKind): Promise<void> {
-    const reason = await prompt(
-      this.dialog,
-      kind === "problem"
-        ? {
-            title: "Report a problem",
-            message: "Tell the owners and the admins what's wrong: it doesn't work, it's harmful, or it contains something private.",
-            confirm: "Send report",
-            field: { label: "What's wrong?", hint: "Up to 2,048 characters", required: true }
-          }
-        : {
-            title: "Tell the owners",
-            message: "What works, what it gets wrong, what you wish it did. No files needed.",
-            confirm: "Send",
-            field: { label: "Your feedback", hint: "Up to 2,048 characters", required: true }
-          }
-    );
-    if (reason === undefined) {
-      return;
-    }
+    // A send that fails opens the dialog again with the text kept, so nothing typed is lost.
+    for (let draft = ""; ;) {
+      const reason = await prompt(
+        this.dialog,
+        kind === "problem"
+          ? {
+              title: "Report a problem",
+              message: "Tell the owners and the admins what's wrong: it doesn't work, it's harmful, or it contains something private.",
+              confirm: "Send report",
+              field: { label: "What's wrong?", hint: "Up to 2,048 characters", required: true, value: draft }
+            }
+          : {
+              title: "Tell the owners",
+              message: "What works, what it gets wrong, what you wish it did. No files needed.",
+              confirm: "Send",
+              field: { label: "Your feedback", hint: "Up to 2,048 characters", required: true, value: draft }
+            }
+      );
+      if (reason === undefined) {
+        return;
+      }
 
-    try {
-      await this.api.report(this.ns(), this.pkg(), reason, kind);
-      this.snackBar.open(kind === "problem" ? "Thanks. The owners and the admins have your report." : "Thanks. The owners have your feedback.", undefined, { duration: 4000 });
-    } catch (error) {
-      this.snackBar.open(ApiError.from(error).message, "Dismiss");
+      try {
+        await this.api.report(this.ns(), this.pkg(), reason, kind);
+        this.snackBar.open(kind === "problem" ? "Thanks. The owners and the admins have your report." : "Thanks. The owners have your feedback.", undefined, { duration: 4000 });
+        return;
+      } catch (error) {
+        draft = reason;
+        this.snackBar.open(`${ApiError.from(error).message} Your text is still there; send it again or cancel.`, "Dismiss");
+      }
     }
   }
 }

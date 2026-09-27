@@ -105,7 +105,7 @@ export class PublishPage {
   protected readonly title = computed(() => (this.mode() === "new" ? this.uploadTitle() : (this.existingDetail()?.name ?? "")));
   protected readonly heading = computed(() => {
     const [heading] = headings[this.mode()];
-    return this.mode() === "new" ? heading : `${heading}: ${this.title()}`;
+    return this.mode() === "new" || this.title() === "" ? heading : `${heading}: ${this.title()}`;
   });
 
   protected readonly lead = computed(() => headings[this.mode()][1]);

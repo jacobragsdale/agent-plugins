@@ -511,7 +511,7 @@ A report document: `{ "id", "account", "packageId", "kind", "reason", "createdAt
 | `POST /api/packages/{ns}/{packageId}/reports` | Anyone who can see the package | Body `{ "reason": "…", "kind": "problem" }`; `reason` is 1 to 2,048 characters and `kind` defaults to `problem`. `202`. Both kinds reach the package's owners; a `problem` also reaches admins. |
 | `GET /api/packages/{ns}/{packageId}/reports`  | The package's owners, admins   | Its latest 200 reports, open first, newest first. `403` for anyone else who can see the package.                                                                                                |
 | `GET /api/reports/mine`                       | Anyone                         | The caller's own latest 200, newest first, with the resolution.                                                                                                                                 |
-| `POST /api/reports/{id}/resolve`              | The package's owners, admins   | Optional body `{ "note": "…" }` (at most 2,048 characters), which the reporter sees. `204`; `404` for anyone else.                                                                              |
+| `POST /api/reports/{id}/resolve`              | The package's owners, admins   | Optional body `{ "note": "…" }` (at most 2,048 characters), which the reporter sees. `204`; `403` for an owner on a `problem`, which only admins close; `404` for anyone else.                  |
 
 ### `GET /api/admin/summary`
 

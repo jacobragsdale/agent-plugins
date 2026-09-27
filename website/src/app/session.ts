@@ -59,7 +59,7 @@ export const devUserInterceptor: HttpInterceptorFn = (request, next) => {
   // Signed out where the server trusts the development header: the request would carry no credentials, and the
   // 401's Negotiate challenge makes a browser off the domain pop up a password box that can never succeed.
   if (devUser.offered() && !request.url.startsWith("/api/health")) {
-    return throwError(() => new HttpErrorResponse({ status: 401, statusText: "Sign in first", url: request.url }));
+    return throwError(() => new HttpErrorResponse({ status: 401, statusText: "Sign in first", url: request.url, error: { title: "Sign in above to see this." } }));
   }
   return next(request);
 };

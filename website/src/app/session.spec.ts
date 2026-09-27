@@ -14,7 +14,7 @@ describe("devUserInterceptor", () => {
     const { http, backend, devUser } = setup();
     devUser.set(null);
     devUser.offered.set(true);
-    await expect(firstValueFrom(http.get("/api/notifications"))).rejects.toMatchObject({ status: 401 });
+    await expect(firstValueFrom(http.get("/api/notifications"))).rejects.toMatchObject({ status: 401, error: { title: "Sign in above to see this." } });
     backend.expectNone("/api/notifications");
     const health = firstValueFrom(http.get("/api/health"));
     backend.expectOne("/api/health").flush({});
