@@ -159,10 +159,13 @@ public sealed partial class MarketplaceApiTests
         Assert.DoesNotContain("deleter/unused/1.0.0.zip", factory.Store.Paths);
         // Committed first, so a client that hangs up can't leave the archive behind.
         Assert.False(factory.Store.DeletedCancelably("deleter/unused/1.0.0.zip"));
+        // The store keeps the deleted archive's path reserved, so the freed id's 1.0.0 is stored beside it.
         using (var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("deleter", "unused", "A new start."), "1.0.0"))
         {
             await PublishLiveAsync(owner, "deleter", "unused", form);
         }
+
+        Assert.Equal(HttpStatusCode.OK, (await owner.GetAsync("/api/packages/deleter/unused/versions/1.0.0/files", ct)).StatusCode);
 
         var refused = await owner.DeleteAsync("/api/packages/deleter/used", ct);
         Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);

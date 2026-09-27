@@ -254,7 +254,7 @@ public sealed partial class PublishService(
         {
             Package = package,
             Version = semver.ToString(),
-            StoragePath = storagePath,
+            StoragePath = stored.Path,
             ArchiveDigest = stored.Sha256,
             SizeBytes = stored.SizeBytes,
             ManifestJson = inspected.PackageManifest.ToJsonString(),
@@ -936,7 +936,19 @@ public sealed partial class PublishService(
         }
         catch (ArtifactConflictException)
         {
-            var existing = await store.GetAsync(storagePath, cancellationToken);
+            byte[] existing;
+            try
+            {
+                existing = await store.GetAsync(storagePath, cancellationToken);
+            }
+            catch (InvalidOperationException) when (!storagePath.EndsWith(".alt.zip", StringComparison.Ordinal))
+            {
+                // Artifact Keeper keeps a deleted artifact's path reserved: the version of a package deleted
+                // under this id. Store this one next to it, named by its content so a retry finds it again.
+                var digest = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(archive.Span));
+                return await StoreAsync($"{storagePath[..^".zip".Length]}.{digest[..12]}.alt.zip", archive, label, cancellationToken);
+            }
+
             if (!existing.AsSpan().SequenceEqual(archive.Span))
             {
                 throw new ProblemException(409, $"{label} is already in the package store with different content, left by an earlier publish that did not finish. Publish a new version number.");

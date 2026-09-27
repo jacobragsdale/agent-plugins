@@ -126,6 +126,7 @@ public sealed class InMemoryArtifactStore : IArtifactStore
 {
     private readonly Dictionary<string, byte[]> _blobs = new(StringComparer.Ordinal);
     private readonly HashSet<string> _cancelableDeletes = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _deleted = new(StringComparer.Ordinal);
     private readonly Lock _lock = new();
 
     public IReadOnlyCollection<string> Paths
@@ -143,7 +144,8 @@ public sealed class InMemoryArtifactStore : IArtifactStore
     {
         lock (_lock)
         {
-            if (!_blobs.TryAdd(path, bytes.ToArray()))
+            // Like Artifact Keeper, a deleted artifact keeps its path reserved.
+            if (_deleted.Contains(path) || !_blobs.TryAdd(path, bytes.ToArray()))
             {
                 throw new ArtifactConflictException(path);
             }
@@ -156,7 +158,11 @@ public sealed class InMemoryArtifactStore : IArtifactStore
     {
         lock (_lock)
         {
-            _blobs.Remove(path);
+            if (_blobs.Remove(path))
+            {
+                _deleted.Add(path);
+            }
+
             if (cancellationToken.CanBeCanceled)
             {
                 _cancelableDeletes.Add(path);
