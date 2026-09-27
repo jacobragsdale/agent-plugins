@@ -84,10 +84,11 @@ pub(crate) fn maybe_run() -> Option<i32> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let command = args.first()?;
     if !COMMANDS.contains(&command.as_str()) {
-        // Options such as `--background` are the window's, and so is an
-        // `agent-plugins://` link from the portal. Anything else is a mistyped
-        // command, which should say so rather than open the window.
-        if command.starts_with('-') || crate::deep_link::looks_like_link(command) {
+        // `--background` (tray::BACKGROUND_ARG) is the window's only option, and
+        // an `agent-plugins://` link from the portal is the window's too.
+        // Anything else, `--version` included, is a mistyped command, which
+        // should say so rather than open the window and hold the terminal.
+        if opens_window(command) {
             return None;
         }
         host_identity::attach_parent_console();
@@ -104,6 +105,11 @@ pub(crate) fn maybe_run() -> Option<i32> {
     };
     marketplace::flush_events();
     Some(code)
+}
+
+/// Whether a first argument that names no command is the window's.
+fn opens_window(argument: &str) -> bool {
+    argument == "--background" || crate::deep_link::looks_like_link(argument)
 }
 
 fn dispatch(command: &str, args: &[String]) -> Result<(), String> {
@@ -225,15 +231,22 @@ fn parse_args(
         options: Vec::new(),
     };
     let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        let arg = if arg == "-y" { "--yes" } else { arg.as_str() };
+    while let Some(given) = iter.next() {
+        let arg = if given == "-y" {
+            "--yes"
+        } else {
+            given.as_str()
+        };
         if let Some(name) = valued.iter().find(|name| **name == arg) {
-            let value = iter.next().ok_or_else(|| format!("{arg} needs a value."))?;
+            let value = iter
+                .next()
+                .ok_or_else(|| format!("{given} needs a value."))?;
             parsed.options.push((name, Some(value.clone())));
         } else if let Some(name) = switches.iter().find(|name| **name == arg) {
             parsed.options.push((name, None));
-        } else if arg.starts_with("--") {
-            return Err(format!("Unknown option {arg}."));
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            // A short option such as `-j` is not a positional either.
+            return Err(format!("Unknown option {given}."));
         } else {
             parsed.positional.push(arg.to_string());
         }
@@ -1263,7 +1276,11 @@ fn cached_state() -> Result<AppState, String> {
 }
 
 fn list(args: &[String]) -> Result<(), String> {
-    let json = parse_args(args, &[], &["--json"])?.has("--json");
+    let parsed = parse_args(args, &[], &["--json"])?;
+    if !parsed.positional.is_empty() {
+        return Err(usage());
+    }
+    let json = parsed.has("--json");
     let app = cached_state()?;
     let installed = app
         .items
@@ -1314,13 +1331,17 @@ fn status(args: &[String]) -> Result<(), String> {
     let [target] = parsed.positional.as_slice() else {
         return Err(usage());
     };
-    let (namespace, package, _) = package_parts(target)?;
+    let (namespace, package, None) = package_parts(target)? else {
+        return Err(usage());
+    };
     let id = format!("{namespace}/{package}");
     let view =
         marketplace::api_json::<serde_json::Value>(Method::GET, &format!("packages/{id}"), None)?;
+    // `local` is this computer's copy, so only a package installed here has one.
     let local = cached_state()
         .ok()
-        .and_then(|app| app.items.into_iter().find(|item| item.id == id));
+        .and_then(|app| app.items.into_iter().find(|item| item.id == id))
+        .filter(|item| is_installed(item.status));
     let versions = view["versions"]
         .as_array()
         .into_iter()
@@ -1854,6 +1875,11 @@ fn share(args: &[String]) -> Result<(), String> {
         return Err(usage());
     };
     let path = format!("access/{}", marketplace::target_path(target)?);
+    // `--link` hands out the link and changes nothing else, so a list change beside it would be dropped.
+    let changes = ["--public", "--private", "--inherit", "--add", "--remove"];
+    if parsed.has("--link") && changes.iter().any(|flag| parsed.has(flag)) {
+        return Err(usage());
+    }
     if parsed.has("--link") {
         let body = serde_json::json!({ "reset": parsed.has("--reset") });
         let answer = marketplace::api_json::<serde_json::Value>(
@@ -2187,6 +2213,18 @@ mod tests {
         assert_eq!(parsed.value("--name"), Some("Data"));
         assert!(parse_args(&strings(&["--name"]), &["--name"], &[]).is_err());
         assert!(parse_args(&strings(&["--nope"]), &[], &[]).is_err());
+        assert_eq!(
+            parse_args(&strings(&["-j"]), &[], &["--json"])
+                .err()
+                .as_deref(),
+            Some("Unknown option -j.")
+        );
+        assert_eq!(
+            parse_args(&strings(&["x", "-y"]), &[], &[])
+                .err()
+                .as_deref(),
+            Some("Unknown option -y.")
+        );
         let repeated = parse_args(
             &strings(&["--add", "bob", "--add", "team:platform"]),
             &["--add"],
@@ -2194,6 +2232,15 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(repeated.values("--add"), vec!["bob", "team:platform"]);
+    }
+
+    #[test]
+    fn only_the_background_flag_and_links_open_the_window() {
+        assert!(opens_window("--background"));
+        assert!(opens_window("agent-plugins://open/jacob/review"));
+        for argument in ["--version", "-v", "--json", "--background-task"] {
+            assert!(!opens_window(argument), "{argument}");
+        }
     }
 
     #[test]

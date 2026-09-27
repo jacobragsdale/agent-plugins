@@ -632,6 +632,14 @@ fn find_vscode_like_product_json(root: &Path) -> Option<PathBuf> {
     ]
     .into_iter()
     .find(|path| path.is_file())
+    .or_else(|| {
+        // Windows installs now keep the app in a versioned folder: <root>\<commit>\resources\app.
+        fs::read_dir(root)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path().join("resources/app/product.json"))
+            .find(|path| path.is_file())
+    })
 }
 
 fn read_json_string_field(path: &Path, field: &str) -> Option<String> {
@@ -723,19 +731,23 @@ fn vscode_insiders_app_roots(home: &Path) -> Vec<PathBuf> {
 
 fn detect_vscode_copilot_from(editions: &[VscodeEdition]) -> Option<Detection> {
     editions.iter().find_map(|edition| {
-        if !edition
+        let product = edition
             .app_roots
             .iter()
-            .any(|root| find_vscode_like_product_json(root).is_some())
-        {
-            return None;
-        }
-        first_dir_with_prefix(&edition.extensions, "github.copilot").map(|dir| Detection {
-            detected: true,
-            version: read_json_string_field(&dir.join("package.json"), "version"),
-            message: None,
-            inconclusive: false,
-        })
+            .find_map(|root| find_vscode_like_product_json(root))?;
+        // VS Code now ships Copilot Chat built in; older installs have it as a user extension.
+        let builtin = product
+            .parent()
+            .map(|app| app.join("extensions/copilot"))
+            .filter(|dir| dir.join("package.json").is_file());
+        builtin
+            .or_else(|| first_dir_with_prefix(&edition.extensions, "github.copilot"))
+            .map(|dir| Detection {
+                detected: true,
+                version: read_json_string_field(&dir.join("package.json"), "version"),
+                message: None,
+                inconclusive: false,
+            })
     })
 }
 
@@ -1276,6 +1288,28 @@ mod tests {
         .expect("detected");
         assert!(detection.detected);
         assert_eq!(detection.version.as_deref(), Some("1.372.0"));
+    }
+
+    #[test]
+    fn vscode_copilot_built_in_to_a_versioned_windows_install_is_detected() {
+        // The layout VS Code 1.1xx installs on Windows: <root>\<commit>\resources\app, Copilot Chat built in.
+        let root = tempfile::tempdir().expect("root");
+        let app = root
+            .path()
+            .join("Microsoft VS Code/04c0d99f4f/resources/app");
+        fs::create_dir_all(app.join("extensions/copilot")).expect("built-in extension");
+        fs::write(app.join("product.json"), r#"{"version":"1.130.0"}"#).expect("product");
+        fs::write(
+            app.join("extensions/copilot/package.json"),
+            r#"{"name":"copilot-chat","publisher":"GitHub","version":"0.67.0"}"#,
+        )
+        .expect("manifest");
+        let detection = detect_vscode_copilot_from(&[VscodeEdition {
+            app_roots: vec![root.path().join("Microsoft VS Code")],
+            extensions: root.path().join("home/.vscode/extensions"),
+        }])
+        .expect("detected");
+        assert_eq!(detection.version.as_deref(), Some("0.67.0"));
     }
 
     #[test]

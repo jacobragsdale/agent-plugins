@@ -232,6 +232,17 @@ pub(crate) async fn uninstall_item(
         (Err(_), Some(record)) => super::project::record_source(&[], record),
         (Err(error), None) => return Err(error),
     };
+    // A component the package doesn't have installed would uninstall nothing and still report success.
+    if let (Some(component), Some(record)) = (component_id, ledger.items.get(&canonical_id)) {
+        let installed = record
+            .binding_ids
+            .iter()
+            .filter_map(|id| ledger.bindings.get(id))
+            .any(|binding| binding.component_id == component);
+        if !installed {
+            return Err(format!("{canonical_id}/{component} is not installed."));
+        }
+    }
     let ids = component_id.map(|component_id| vec![component_id.to_string()]);
     let outcome =
         install::uninstall_item_components(&paths, &source, &canonical_id, ids.as_deref(), force)?;
@@ -279,6 +290,13 @@ pub(crate) async fn set_held(
     let mut choices = crate::choices::read(&paths)?;
     let id = format!("{source_id}/{local_id}");
     if held {
+        // A hold belongs to an install; one stored ahead of it would hold the next install from the start.
+        if !crate::executor::read_ledger(&paths)?
+            .items
+            .contains_key(&id)
+        {
+            return Err(format!("{id} is not installed."));
+        }
         choices.held.insert(id);
     } else {
         choices.held.remove(&id);
