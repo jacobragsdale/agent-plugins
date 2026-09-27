@@ -72,7 +72,9 @@ export class PackagePage {
   protected readonly live = computed(() => this.detail.hasValue() && this.detail.value().liveVersion !== null && !this.detail.value().revoked);
   protected readonly canReport = computed(() => this.session.me() !== null && !this.owner());
   protected readonly canSuggest = computed(() => this.canReport() && this.live());
-  protected readonly space = computed(() => spaceWords(this.session.me(), this.ns(), this.detail.value()?.publisher.displayName ?? this.ns()));
+  // Reading value() from a resource that failed to load throws, so a missing package reads this.
+  private readonly detailValue = computed(() => (this.detail.hasValue() ? this.detail.value() : undefined));
+  protected readonly space = computed(() => spaceWords(this.session.me(), this.ns(), this.detailValue()?.publisher.displayName ?? this.ns()));
 
   /** Owners see every suggestion; anyone else sees their own, so the tab shows only when there is something. */
   protected readonly suggestions = resource({
@@ -139,7 +141,7 @@ export class PackagePage {
   constructor() {
     const title = inject(Title);
     effect(() => {
-      const name = this.detail.value()?.name;
+      const name = this.detailValue()?.name;
       if (name !== undefined) {
         title.setTitle(`${name} · Agent Plugins`);
       }

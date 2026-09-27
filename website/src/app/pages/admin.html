@@ -27,6 +27,8 @@
           <app-report-list [reports]="reports.value()" (resolve)="resolve($event)" />
         } @else if (reports.error(); as error) {
           <p class="problem">{{ message(error) }}</p>
+        } @else {
+          <mat-progress-bar mode="indeterminate" aria-label="Loading reports" />
         }
       </div>
     </mat-tab>
@@ -61,6 +63,8 @@
           <app-usage-summary [summary]="summary.value()" />
         } @else if (summary.error(); as error) {
           <p class="problem">{{ message(error) }}</p>
+        } @else {
+          <mat-progress-bar mode="indeterminate" aria-label="Loading usage" />
         }
       </div>
     </mat-tab>

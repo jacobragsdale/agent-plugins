@@ -25,7 +25,7 @@
       </p>
     </div>
   } @else if (session.me() !== null) {
-    <form class="stack" (submit)="submit($event)">
+    <form class="stack" (submit)="submit($event)" (input)="edited.set(true)">
       @if (mode() === "new") {
         <app-publish-target [spaces]="spaces()" [hasTeam]="hasTeam()" [(space)]="space" [(visibility)]="visibility" />
       }
@@ -42,7 +42,7 @@
           <strong>Upload files</strong> and include every file.
         </p>
       }
-      <app-upload-picker [hidden]="source() === 'write' && !suggesting()" [showName]="mode() === 'new'" [(picked)]="picked" [(title)]="uploadTitle" />
+      <app-upload-picker [hidden]="source() === 'write' && !suggesting()" [showName]="mode() === 'new'" [(picked)]="picked" (pickedChange)="edited.set(true)" [(title)]="uploadTitle" />
       <app-file-changes [loading]="check.isLoading()" [problem]="checkProblem()" [check]="checked()" />
 
       @if (suggesting()) {
@@ -72,6 +72,7 @@
 
       <div class="row submit">
         <button mat-flat-button type="submit" [disabled]="!ready()"><app-icon name="check" />{{ submitLabel() }}</button>
+        <span class="muted">{{ stillNeeded() }}</span>
         <a mat-button [routerLink]="cancelLink()">Cancel</a>
       </div>
     </form>

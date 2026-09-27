@@ -44,7 +44,8 @@ type Source = "write" | "upload";
     Problem
   ],
   templateUrl: "./publish.html",
-  styleUrl: "./publish.scss"
+  styleUrl: "./publish.scss",
+  host: { "(window:beforeunload)": "holdUnsaved($event)" }
 })
 export class PublishPage {
   public readonly mode = input.required<Mode>();
@@ -88,6 +89,8 @@ export class PublishPage {
   protected readonly uploadTitle = signal("");
   protected readonly submitting = signal(false);
   protected readonly problem = signal<ApiError | null>(null);
+  /** Something typed or picked that isn't published yet; leaving asks first. */
+  protected readonly edited = signal(false);
 
   protected readonly spaces = computed(() =>
     (this.mineValue()?.spaces ?? []).map((space) => ({
@@ -159,6 +162,11 @@ export class PublishPage {
       return `${this.spaceLabel()} already has a package called “${this.packageId()}”. Pick another name, or publish a new version of that one from My skills.`;
     }
 
+    // A bundle takes the same name in its space, and the server refuses the clash.
+    if (this.mode() === "new" && this.mineValue()?.bundles.some((bundle) => bundle.namespace === this.space() && bundle.bundleId === this.packageId()) === true) {
+      return `${this.spaceLabel()} already has a bundle called “${this.packageId()}”. Pick another name.`;
+    }
+
     if (this.mode() !== "new" || this.uploadTitle().trim().length === 0) {
       return null;
     }
@@ -213,6 +221,26 @@ export class PublishPage {
     return this.suggesting() ? "Send suggestion" : `Publish version ${this.version()}`;
   });
 
+  /** What the editor still needs, so a disabled Publish says why. */
+  protected readonly missing = computed(() => {
+    if (this.source() !== "write" || this.suggesting()) {
+      return [];
+    }
+
+    const needed: string[] = [];
+    if (this.mode() === "new" && this.uploadTitle().trim() === "") {
+      needed.push("a name");
+    }
+    if (this.skillDescription().trim() === "") {
+      needed.push("when the assistant should use it");
+    }
+    if (this.skillBody().trim() === "") {
+      needed.push("the instructions");
+    }
+    return needed;
+  });
+  protected readonly stillNeeded = computed(() => (this.ready() || this.missing().length === 0 ? "" : `Still needed: ${this.missing().join(", ")}.`));
+
   protected readonly ready = computed(
     () =>
       !this.submitting() &&
@@ -226,10 +254,11 @@ export class PublishPage {
   );
 
   constructor() {
-    // Opening the editor on a new version starts from the live SKILL.md.
+    // Opening the editor on a new version starts from the live SKILL.md, unless the
+    // person already typed: a file that arrives late never replaces their text.
     effect(() => {
       const skill = this.liveSkill.hasValue() ? this.liveSkill.value() : null;
-      if (skill !== null) {
+      if (skill !== null && !untracked(this.edited)) {
         untracked(() => {
           this.skillDescription.set(skill.description);
           this.skillBody.set(skill.body);
@@ -241,6 +270,18 @@ export class PublishPage {
   protected setSource(value: unknown): void {
     if (value === "write" || value === "upload") {
       this.source.set(value);
+    }
+  }
+
+  /** Asked by the route before an in-app navigation leaves the page. */
+  public mayLeave(): boolean {
+    return !this.edited() || window.confirm("Leave this page? What you wrote here isn't saved.");
+  }
+
+  /** A reload or a closed tab: the browser asks, in its own words. */
+  protected holdUnsaved(event: BeforeUnloadEvent): void {
+    if (this.edited()) {
+      event.preventDefault();
     }
   }
 
@@ -266,6 +307,7 @@ export class PublishPage {
       if (this.suggesting()) {
         const suggestion = await this.api.suggest(ns, packageId, this.message().trim(), this.form());
         this.snackBar.open("Sent. The owners will take a look.", undefined, { duration: 6000 });
+        this.edited.set(false);
         await this.router.navigate(["/suggestions", suggestion.id]);
         return;
       }
@@ -276,9 +318,12 @@ export class PublishPage {
         : `Published version ${published.version}. Install it now from its page; PCs that already have it get it within about 15 minutes.`;
       // A warning stays until it is dismissed.
       this.snackBar.open([message, ...published.warnings].join(" "), "OK", published.warnings.length > 0 ? {} : { duration: 8000 });
+      this.edited.set(false);
       await this.router.navigate(["/p", ns, packageId]);
     } catch (error) {
       this.problem.set(ApiError.from(error));
+      // Someone may have published meanwhile: the next free version comes from a fresh look.
+      this.existing.reload();
     } finally {
       this.submitting.set(false);
     }

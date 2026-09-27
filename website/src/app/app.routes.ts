@@ -1,15 +1,30 @@
-import type { CanMatchFn, Routes } from "@angular/router";
+import type { CanDeactivateFn, CanMatchFn, Routes } from "@angular/router";
 import { adminOnly } from "./session";
 
 /** Only the topics help.html has a case for; any other /help/... falls through to not found. */
 const helpTopic: CanMatchFn = (_route, segments) => ["getting-started", "publish", "source-manifest", "source-repository"].includes(segments[1]?.path ?? "");
 
+/** A page with unsaved work asks before an in-app navigation leaves it. */
+export const confirmLeave: CanDeactivateFn<{ mayLeave(): boolean }> = (page) => page.mayLeave();
+
 export const routes: Routes = [
   { path: "", title: "Agent Plugins", loadComponent: () => import("./pages/home").then((page) => page.HomePage) },
   { path: "browse", title: "Browse skills · Agent Plugins", loadComponent: () => import("./pages/browse").then((page) => page.BrowsePage) },
   { path: "p/:ns/:pkg", title: "Skill · Agent Plugins", loadComponent: () => import("./pages/package").then((page) => page.PackagePage) },
-  { path: "p/:ns/:pkg/upload", title: "New version · Agent Plugins", data: { mode: "upload" }, loadComponent: () => import("./pages/publish").then((page) => page.PublishPage) },
-  { path: "p/:ns/:pkg/suggest", title: "Suggest a change · Agent Plugins", data: { mode: "suggest" }, loadComponent: () => import("./pages/publish").then((page) => page.PublishPage) },
+  {
+    path: "p/:ns/:pkg/upload",
+    title: "New version · Agent Plugins",
+    data: { mode: "upload" },
+    canDeactivate: [confirmLeave],
+    loadComponent: () => import("./pages/publish").then((page) => page.PublishPage)
+  },
+  {
+    path: "p/:ns/:pkg/suggest",
+    title: "Suggest a change · Agent Plugins",
+    data: { mode: "suggest" },
+    canDeactivate: [confirmLeave],
+    loadComponent: () => import("./pages/publish").then((page) => page.PublishPage)
+  },
   { path: "suggestions/:id", title: "Suggestion · Agent Plugins", loadComponent: () => import("./pages/suggestion").then((page) => page.SuggestionPage) },
   { path: "b/:ns/:id", title: "Bundle · Agent Plugins", loadComponent: () => import("./pages/bundle").then((page) => page.BundlePage) },
   { path: "b/:ns/:id/edit", title: "Edit bundle · Agent Plugins", loadComponent: () => import("./pages/bundle-edit").then((page) => page.BundleEditPage) },
@@ -17,7 +32,7 @@ export const routes: Routes = [
   { path: "teams", title: "Teams · Agent Plugins", loadComponent: () => import("./pages/teams").then((page) => page.TeamsPage) },
   { path: "teams/:ns", title: "Team · Agent Plugins", loadComponent: () => import("./pages/team").then((page) => page.TeamPage) },
   { path: "l/:code", title: "Opening a link · Agent Plugins", loadComponent: () => import("./pages/link").then((page) => page.LinkPage) },
-  { path: "publish", title: "Share a skill · Agent Plugins", data: { mode: "new" }, loadComponent: () => import("./pages/publish").then((page) => page.PublishPage) },
+  { path: "publish", title: "Share a skill · Agent Plugins", data: { mode: "new" }, canDeactivate: [confirmLeave], loadComponent: () => import("./pages/publish").then((page) => page.PublishPage) },
   { path: "notifications", title: "Notifications · Agent Plugins", loadComponent: () => import("./pages/notifications").then((page) => page.NotificationsPage) },
   { path: "mine", title: "My skills · Agent Plugins", loadComponent: () => import("./pages/mine").then((page) => page.MinePage) },
   { path: "admin", title: "Admin · Agent Plugins", canMatch: [adminOnly], loadComponent: () => import("./pages/admin").then((page) => page.AdminPage) },

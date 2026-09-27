@@ -1,5 +1,6 @@
 import { Component, computed, inject, input, output, resource, signal } from "@angular/core";
 import { MatButtonModule } from "@angular/material/button";
+import { MatProgressBarModule } from "@angular/material/progress-bar";
 import { MatDialog } from "@angular/material/dialog";
 import { MatFormFieldModule } from "@angular/material/form-field";
 import { MatInputModule } from "@angular/material/input";
@@ -284,7 +285,7 @@ export class InstallsLookup {
 /** Every change anyone made, newest first, a hundred at a time. */
 @Component({
   selector: "app-audit-log",
-  imports: [MatButtonModule, Icon],
+  imports: [MatButtonModule, MatProgressBarModule, Icon],
   template: `
     <div class="row">
       <p class="muted grow">Publishing, sharing, links, teams, bundles, reviews, removals, and blocks, with who did it.</p>
@@ -314,6 +315,9 @@ export class InstallsLookup {
         }
       </tbody>
     </table>
+    @if (loading()) {
+      <mat-progress-bar mode="indeterminate" aria-label="Loading the audit log" />
+    }
     @if (problem(); as failure) {
       <p class="problem">{{ failure }}</p>
     }

@@ -1,6 +1,6 @@
 import { TestBed } from "@angular/core/testing";
 import { provideRouter, Router } from "@angular/router";
-import { routes } from "./app.routes";
+import { confirmLeave, routes } from "./app.routes";
 import type { SessionState } from "./session";
 import { Session } from "./session";
 
@@ -28,5 +28,13 @@ describe("admin route", () => {
     const router = TestBed.inject(Router);
     await router.navigateByUrl("/admin");
     expect(router.url).toBe("/");
+  });
+});
+
+describe("publish routes", () => {
+  it("ask before leaving unsaved work", () => {
+    for (const path of ["publish", "p/:ns/:pkg/upload", "p/:ns/:pkg/suggest"]) {
+      expect(routes.find((route) => route.path === path)?.canDeactivate).toEqual([confirmLeave]);
+    }
   });
 });
