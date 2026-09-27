@@ -232,7 +232,7 @@ public sealed partial class PublishService(
         var waitingBefore = package is not null && Gated(package) && AccessService.NeedsReview(rules, ns, packageId);
 
         var publisher = await ClaimPublisherAsync(identity, ns, now, cancellationToken);
-        var stored = dryRun ? new StoredArtifact(storagePath, digest, archive.Length) : await StoreAsync(storagePath, archive, $"{ns}/{packageId} {semver}", cancellationToken);
+        var (storedPath, stored) = dryRun ? (storagePath, new StoredArtifact(storagePath, digest, archive.Length)) : await StoreAsync(storagePath, archive, $"{ns}/{packageId} {semver}", cancellationToken);
         var isNew = package is null;
         if (isNew)
         {
@@ -254,7 +254,7 @@ public sealed partial class PublishService(
         {
             Package = package,
             Version = semver.ToString(),
-            StoragePath = stored.Path,
+            StoragePath = storedPath,
             ArchiveDigest = stored.Sha256,
             SizeBytes = stored.SizeBytes,
             ManifestJson = inspected.PackageManifest.ToJsonString(),
@@ -928,11 +928,12 @@ public sealed partial class PublishService(
     /// Stores a version's archive. The store is immutable and outside the database transaction, so a
     /// publish that failed after its upload leaves the blob behind; a retry with the same bytes adopts it.
     /// </summary>
-    private async Task<StoredArtifact> StoreAsync(string storagePath, ReadOnlyMemory<byte> archive, string label, CancellationToken cancellationToken)
+    /// <returns>The path the archive is stored at, relative like <paramref name="storagePath"/>.</returns>
+    private async Task<(string Path, StoredArtifact Stored)> StoreAsync(string storagePath, ReadOnlyMemory<byte> archive, string label, CancellationToken cancellationToken)
     {
         try
         {
-            return await store.PutAsync(storagePath, archive, cancellationToken);
+            return (storagePath, await store.PutAsync(storagePath, archive, cancellationToken));
         }
         catch (ArtifactConflictException)
         {
@@ -955,7 +956,7 @@ public sealed partial class PublishService(
             }
 
             logger.LogWarning("Adopted the stored archive at {Path} left by an unfinished publish.", storagePath);
-            return new StoredArtifact(storagePath, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(archive.Span)), archive.Length);
+            return (storagePath, new StoredArtifact(storagePath, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(archive.Span)), archive.Length));
         }
     }
 

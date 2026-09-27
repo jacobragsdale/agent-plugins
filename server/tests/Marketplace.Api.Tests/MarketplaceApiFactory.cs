@@ -151,7 +151,8 @@ public sealed class InMemoryArtifactStore : IArtifactStore
             }
         }
 
-        return Task.FromResult(new StoredArtifact(path, Convert.ToHexStringLower(SHA256.HashData(bytes.Span)), bytes.Length));
+        // Artifact Keeper answers with its full path, prefix included, which callers must not store as theirs.
+        return Task.FromResult(new StoredArtifact($"prefix/{path}", Convert.ToHexStringLower(SHA256.HashData(bytes.Span)), bytes.Length));
     }
 
     public Task DeleteAsync(string path, CancellationToken cancellationToken)
