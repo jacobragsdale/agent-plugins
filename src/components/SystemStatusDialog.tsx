@@ -192,7 +192,8 @@ function StatusSummary({
       >
         {detected.length === 0 ? null : (
           <Text as="p" color="gray" size="1">
-            Skills go to {[...new Set(detected.map((profile) => profile.skillDirectory))].join(" and ")}.
+            {/* An app that takes no skill folder (Claude Desktop) explains itself in Agent details, not in this list. */}
+            Skills go to {[...new Set(detected.map((profile) => profile.skillDirectory).filter((directory) => !directory.startsWith("None:")))].join(" and ")}.
           </Text>
         )}
       </SummaryRow>

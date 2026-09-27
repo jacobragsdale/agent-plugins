@@ -697,7 +697,11 @@ fn remove_revoked(paths: &SystemPaths, loaded: &[LoadedSource], revoked: &[Strin
         }
         let source = super::project::record_source(loaded, record);
         match install::uninstall_item_components(paths, &source, id, None, true) {
-            Ok(_) => removed.push(record.name.clone()),
+            Ok(_) => {
+                // Like an uninstall: a restored package installed again starts without the old hold.
+                super::items::forget_hold(paths, id);
+                removed.push(record.name.clone());
+            }
             Err(error) => eprintln!(
                 "Could not remove {id}, which was pulled from the marketplace; the next sync tries again: {error}"
             ),
@@ -1811,6 +1815,11 @@ mod tests {
             .home
             .join(".claude/skills/skillbook-python-standards/SKILL.md");
         fs::write(&installed, "edited").expect("edit");
+        let mut choices = crate::choices::read(&paths).expect("choices");
+        choices
+            .held
+            .insert("skillbook/python-standards".to_string());
+        crate::choices::write(&paths, &choices).expect("hold");
 
         let removed = remove_revoked(&paths, &[], &["skillbook/python-standards".to_string()]);
 
@@ -1820,6 +1829,13 @@ mod tests {
         assert!(
             ledger.items.contains_key("skillbook/python"),
             "only the revoked package goes"
+        );
+        assert!(
+            crate::choices::read(&paths)
+                .expect("choices")
+                .held
+                .is_empty(),
+            "a restored package installed again starts without the hold"
         );
     }
 

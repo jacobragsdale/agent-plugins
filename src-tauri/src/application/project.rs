@@ -383,7 +383,11 @@ fn connectors(
         .iter()
         .filter_map(|component| Some((component, component.mcp_server.as_ref()?)))
         .map(|(component, server)| {
-            let environment = server.environment_names().into_iter().collect::<Vec<_>>();
+            let environment = server
+                .environment_names()
+                .into_iter()
+                .filter(|name| crate::startup::is_connector_setting(name))
+                .collect::<Vec<_>>();
             let apps = plan
                 .compatibility
                 .iter()

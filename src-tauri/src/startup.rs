@@ -420,21 +420,34 @@ pub(crate) fn environment_has(name: &str) -> bool {
         || live_session_env(name).ok().flatten().is_some()
 }
 
-/// Saves a connector setting, such as an API key, where the person's apps
-/// read environment variables, and in this process so the window sees it at
-/// once. The value is never logged or recorded anywhere else.
-pub(crate) fn save_user_variable(name: &str, value: &str) -> Result<(), String> {
-    let valid_name = !name.is_empty()
+/// Whether a variable a connector reads is one the person sets: the system's own
+/// (`PATH`, `APPDATA`, …) are always there and never offered or saved.
+pub(crate) fn is_connector_setting(name: &str) -> bool {
+    !name.is_empty()
         && name.len() <= 128
         && name
             .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
-    if !valid_name || matches!(name, "PATH" | "HOME" | "USERPROFILE" | "APPDATA") {
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        && !matches!(name, "PATH" | "HOME" | "USERPROFILE" | "APPDATA")
+}
+
+/// Whether `save_user_variable` would take this name and value; checked for every
+/// setting before any is saved, so a bad one doesn't leave the others half written.
+pub(crate) fn check_user_variable(name: &str, value: &str) -> Result<(), String> {
+    if !is_connector_setting(name) {
         return Err(format!("{name} is not a setting Agent Plugins can save."));
     }
     if value.is_empty() || value.len() > 8192 || value.contains('\0') {
         return Err(format!("The value for {name} is empty or too long."));
     }
+    Ok(())
+}
+
+/// Saves a connector setting, such as an API key, where the person's apps
+/// read environment variables, and in this process so the window sees it at
+/// once. The value is never logged or recorded anywhere else.
+pub(crate) fn save_user_variable(name: &str, value: &str) -> Result<(), String> {
+    check_user_variable(name, value)?;
     if !cfg!(any(windows, target_os = "macos")) {
         return Err(format!(
             "Set {name} in your shell profile; Agent Plugins saves settings only on Windows and macOS."
@@ -2223,6 +2236,22 @@ fn sanitize_tool_archive_path(path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_value_is_checked_before_anything_is_saved() {
+        assert!(check_user_variable("ACME_TOKEN", "abc").is_ok());
+        assert!(check_user_variable("ACME_TOKEN", &"b".repeat(8193)).is_err());
+        assert!(check_user_variable("ACME_TOKEN", "a\0b").is_err());
+        assert!(check_user_variable("APPDATA", "x").is_err());
+    }
+
+    #[test]
+    fn system_variables_are_not_connector_settings() {
+        assert!(is_connector_setting("ACME_TOKEN"));
+        for name in ["APPDATA", "PATH", "HOME", "USERPROFILE", "lower", ""] {
+            assert!(!is_connector_setting(name), "{name}");
+        }
+    }
     use std::collections::BTreeSet;
 
     struct FakeHost {

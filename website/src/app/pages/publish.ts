@@ -90,15 +90,19 @@ export class PublishPage {
   protected readonly problem = signal<ApiError | null>(null);
 
   protected readonly spaces = computed(() =>
-    (this.mine.value()?.spaces ?? []).map((space) => ({
+    (this.mineValue()?.spaces ?? []).map((space) => ({
       namespace: space.namespace,
       label: `${space.lane === "personal" ? "My space" : space.displayName} · ${space.visibility === "private" ? "private" : "everyone can see it"}`
     }))
   );
   protected readonly suggesting = computed(() => this.mode() === "suggest");
 
-  protected readonly hasTeam = computed(() => this.mine.value()?.spaces.some((space) => space.lane === "team") === true);
-  protected readonly title = computed(() => (this.mode() === "new" ? this.uploadTitle() : (this.existing.value()?.name ?? "")));
+  // A failed load keeps its error in the resource and shows it through the problem notice;
+  // reading value() from an errored resource throws, so everything else reads these.
+  protected readonly existingDetail = computed(() => (this.existing.hasValue() ? this.existing.value() : undefined));
+  private readonly mineValue = computed(() => (this.mine.hasValue() ? this.mine.value() : undefined));
+  protected readonly hasTeam = computed(() => this.mineValue()?.spaces.some((space) => space.lane === "team") === true);
+  protected readonly title = computed(() => (this.mode() === "new" ? this.uploadTitle() : (this.existingDetail()?.name ?? "")));
   protected readonly heading = computed(() => {
     const [heading] = headings[this.mode()];
     return this.mode() === "new" ? heading : `${heading}: ${this.title()}`;
@@ -108,14 +112,14 @@ export class PublishPage {
   protected readonly packageId = computed(() => this.pkg() ?? this.idOverride() ?? packageIdFor(this.title(), this.space()));
   /** Where the suggester can get the files they are improving. */
   protected readonly currentFiles = computed(() => {
-    const live = this.existing.value()?.liveVersion;
+    const live = this.existingDetail()?.liveVersion;
     return live === null || live === undefined ? null : archiveUrl(this.space(), this.packageId(), live);
   });
 
   /** The live SKILL.md, read once to fill in the editor for a new version. */
   private readonly liveSkill = resource({
     params: () => {
-      const detail = this.existing.value();
+      const detail = this.existingDetail();
       const live = detail?.liveVersion ?? null;
       return this.edit() === "true" && detail !== undefined && live !== null ? { files: versionFiles(detail.namespace, detail.packageId, live) } : undefined;
     },
@@ -127,7 +131,7 @@ export class PublishPage {
   /** The live version's files, for a new version: writing it here publishes a SKILL.md alone. */
   private readonly liveFiles = resource({
     params: () => {
-      const detail = this.existing.value();
+      const detail = this.existingDetail();
       const live = detail?.liveVersion ?? null;
       return this.mode() === "upload" && detail !== undefined && live !== null ? { files: versionFiles(detail.namespace, detail.packageId, live) } : undefined;
     },
@@ -140,7 +144,7 @@ export class PublishPage {
   );
 
   protected readonly version = computed(() => {
-    const detail = this.existing.value();
+    const detail = this.existingDetail();
     return detail === undefined
       ? "1.0.0"
       : nextVersion(
@@ -149,7 +153,7 @@ export class PublishPage {
         );
   });
 
-  protected readonly taken = computed(() => this.mode() === "new" && this.mine.value()?.packages.some((item) => item.namespace === this.space() && item.packageId === this.packageId()) === true);
+  protected readonly taken = computed(() => this.mode() === "new" && this.mineValue()?.packages.some((item) => item.namespace === this.space() && item.packageId === this.packageId()) === true);
   protected readonly idProblem = computed(() => {
     if (this.taken()) {
       return `${this.spaceLabel()} already has a package called “${this.packageId()}”. Pick another name, or publish a new version of that one from My skills.`;
@@ -198,7 +202,7 @@ export class PublishPage {
 
   /** A failed publish, or the package a new version is for failing to load. */
   protected readonly shownProblem = computed(() => this.problem() ?? (this.existing.error() === undefined ? null : ApiError.from(this.existing.error())));
-  protected readonly spaceLabel = computed(() => this.mine.value()?.spaces.find((space) => space.namespace === this.space())?.displayName ?? this.space());
+  protected readonly spaceLabel = computed(() => this.mineValue()?.spaces.find((space) => space.namespace === this.space())?.displayName ?? this.space());
   protected readonly cancelLink = computed(() => (this.mode() === "new" ? ["/mine"] : ["/p", this.space(), this.packageId()]));
 
   protected readonly submitLabel = computed(() => {
@@ -224,7 +228,7 @@ export class PublishPage {
   constructor() {
     // Opening the editor on a new version starts from the live SKILL.md.
     effect(() => {
-      const skill = this.liveSkill.value() ?? null;
+      const skill = this.liveSkill.hasValue() ? this.liveSkill.value() : null;
       if (skill !== null) {
         untracked(() => {
           this.skillDescription.set(skill.description);

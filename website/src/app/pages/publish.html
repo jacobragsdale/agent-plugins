@@ -16,6 +16,14 @@
       <h2>Sign in to share skills</h2>
       <p class="muted">Open this page on your work PC; Windows signs you in automatically.</p>
     </div>
+  } @else if (mode() === "upload" && existingDetail()?.owned === false) {
+    <div class="card">
+      <h2>Only its owners publish new versions</h2>
+      <p class="muted">You can suggest a change instead. The owners decide whether to publish it.</p>
+      <p>
+        <a mat-flat-button [routerLink]="['/p', ns(), pkg(), 'suggest']"><app-icon name="edit" />Suggest a change</a>
+      </p>
+    </div>
   } @else if (session.me() !== null) {
     <form class="stack" (submit)="submit($event)">
       @if (mode() === "new") {

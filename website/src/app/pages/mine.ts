@@ -260,7 +260,7 @@ export class MyReports {
         @for (group of groups(); track group.space.namespace) {
           <app-space-section [group]="group" (share)="shareSpace($event)" (sharePackage)="sharePackage($event)" />
         }
-        <app-my-reports [reports]="reports.value() ?? []" />
+        <app-my-reports [reports]="reports.hasValue() ? reports.value() : []" />
       }
     </div>
   `

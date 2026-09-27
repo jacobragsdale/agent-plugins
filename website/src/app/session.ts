@@ -1,7 +1,9 @@
 import type { HttpInterceptorFn } from "@angular/common/http";
+import { HttpErrorResponse } from "@angular/common/http";
 import { Injectable, computed, inject, signal } from "@angular/core";
 import type { CanMatchFn } from "@angular/router";
 import { Router } from "@angular/router";
+import { throwError } from "rxjs";
 import type { Health, Me } from "./api";
 import { Api, ApiError } from "./api";
 import { runTask } from "./shared/tasks";
@@ -18,6 +20,8 @@ export const devAccountPattern = /^[\x20-\x7E]{1,256}$/u;
 @Injectable({ providedIn: "root" })
 export class DevUser {
   public readonly account = signal(DevUser.read());
+  /** Whether this server trusts the development header, so a signed-out browser here is off the domain. */
+  public readonly offered = signal(false);
 
   public set(account: string | null): void {
     try {
@@ -44,8 +48,20 @@ export class DevUser {
 }
 
 export const devUserInterceptor: HttpInterceptorFn = (request, next) => {
-  const account = inject(DevUser).account();
-  return account !== null && request.url.startsWith("/api/") ? next(request.clone({ setHeaders: { "X-Dev-User": account } })) : next(request);
+  const devUser = inject(DevUser);
+  const account = devUser.account();
+  if (!request.url.startsWith("/api/")) {
+    return next(request);
+  }
+  if (account !== null) {
+    return next(request.clone({ setHeaders: { "X-Dev-User": account } }));
+  }
+  // Signed out where the server trusts the development header: the request would carry no credentials, and the
+  // 401's Negotiate challenge makes a browser off the domain pop up a password box that can never succeed.
+  if (devUser.offered() && !request.url.startsWith("/api/health")) {
+    return throwError(() => new HttpErrorResponse({ status: 401, statusText: "Sign in first", url: request.url }));
+  }
+  return next(request);
 };
 
 export type SessionState =
@@ -151,6 +167,7 @@ export class Session {
     try {
       health = await this.api.health();
       this.health.set(health);
+      this.devUser.offered.set(health.authSchemes.includes("DevHeader"));
     } catch (error) {
       return { kind: "unavailable", message: ApiError.from(error).message };
     }

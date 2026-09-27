@@ -254,7 +254,7 @@ pub(crate) async fn uninstall_item(
 }
 
 /// A hold belongs to the install it was set on; installing again starts fresh.
-fn forget_hold(paths: &SystemPaths, canonical_id: &str) {
+pub(super) fn forget_hold(paths: &SystemPaths, canonical_id: &str) {
     let mut choices = crate::choices::read_or_default(paths);
     if choices.held.remove(canonical_id) {
         if let Err(error) = crate::choices::write(paths, &choices) {
@@ -318,6 +318,14 @@ pub(crate) async fn set_excluded_apps(
     let _guard = runtime.operation_lock.lock().await;
     let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
     planner::validate_component_id(&item, component_id)?;
+    // Skills share one folder across apps, so only a connector can be kept out of some (ADR 0008).
+    if item.components.iter().any(|component| {
+        component.id == component_id && component.kind != CatalogComponentKind::McpServer
+    }) {
+        return Err(format!(
+            "{component_id} is a skill; only a connector can be kept out of some apps."
+        ));
+    }
     if let Some(unknown) = excluded.iter().find(|id| {
         !crate::agent_profiles::TargetId::ALL
             .iter()
@@ -363,6 +371,10 @@ pub(crate) async fn set_excluded_apps(
 pub(crate) async fn save_connector_settings(
     values: std::collections::BTreeMap<String, String>,
 ) -> Result<(), String> {
+    // All or nothing: a bad value must not leave the ones before it saved.
+    for (name, value) in &values {
+        crate::startup::check_user_variable(name, value.trim())?;
+    }
     for (name, value) in values {
         crate::startup::save_user_variable(&name, value.trim())?;
     }

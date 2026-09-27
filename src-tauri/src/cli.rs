@@ -84,7 +84,16 @@ fn exit_code(message: &str) -> i32 {
 
 /// Runs a CLI command when the first argument names one. Returns the exit code.
 pub(crate) fn maybe_run() -> Option<i32> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    // `args()` panics on an argument that isn't Unicode; say so as a usage error instead.
+    let Ok(args) = std::env::args_os()
+        .skip(1)
+        .map(std::ffi::OsString::into_string)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        host_identity::attach_parent_console();
+        eprintln!("error: an argument isn't valid text.\n\n{}", usage());
+        return Some(EXIT_USAGE);
+    };
     let command = args.first()?;
     if !COMMANDS.contains(&command.as_str()) {
         // `--background` (tray::BACKGROUND_ARG) is the window's only option, and
@@ -1001,19 +1010,25 @@ fn install(args: &[String]) -> Result<(), String> {
     // sync below fetches.
     let target = if requested.contains("/l/") {
         let code = marketplace::link_code(requested)?;
-        let link = marketplace::api_json::<LinkInfo>(Method::POST, &format!("links/{code}"), None)?;
-        if link.kind == "invite" {
+        // Looked at before it is redeemed: redeeming an invite would join the team.
+        let preview =
+            marketplace::api_json::<LinkInfo>(Method::GET, &format!("links/{code}"), None)?;
+        if preview.kind == "invite" {
             return Err(format!(
                 "That link invites you to the team {}. Run `agent-plugins team join {requested}` to join it.",
-                link.name
+                preview.name
             ));
         }
+        let link = marketplace::api_json::<LinkInfo>(Method::POST, &format!("links/{code}"), None)?;
         println!("{} is shared with you", link.name);
         link.target
     } else {
         requested.clone()
     };
     let parts = target.split('/').collect::<Vec<_>>();
+    if parts.iter().any(|part| part.is_empty()) {
+        return Err(usage());
+    }
     crate::prepare_host();
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     runtime.block_on(async {
@@ -1094,12 +1109,19 @@ fn install(args: &[String]) -> Result<(), String> {
                     .clone()
             }
             // A shared space installs everything in it.
-            [source_id] => app
-                .items
-                .iter()
-                .filter(|item| item.source_id == *source_id)
-                .map(|item| item.id.clone())
-                .collect(),
+            [source_id] => {
+                let ids = app
+                    .items
+                    .iter()
+                    .filter(|item| item.source_id == *source_id)
+                    .map(|item| item.id.clone())
+                    .collect::<Vec<_>>();
+                // A mistyped name is no space at all, not an empty one that is all installed.
+                if ids.is_empty() {
+                    return Err(not_found());
+                }
+                ids
+            }
             _ => return Err(not_found()),
         };
         install_many(&state, &app, &ids, approve_mcp).await
@@ -1362,6 +1384,26 @@ fn status(args: &[String]) -> Result<(), String> {
         return Err(usage());
     };
     let id = format!("{namespace}/{package}");
+    if namespace == LOCAL_NAMESPACE {
+        // Installed from a folder with `install --local`: only this computer knows it.
+        let item = cached_state()?
+            .items
+            .into_iter()
+            .find(|item| item.id == id && is_installed(item.status))
+            .ok_or_else(|| format!("{id} is not installed."))?;
+        return if parsed.has("--json") {
+            print_json(
+                &json!({ "id": id, "name": item.name, "local": { "status": status_word(item.status), "installedVersion": null, "held": item.held } }),
+            )
+        } else {
+            println!(
+                "{} ({id})\n  installed from a folder on this computer\n  this computer {}",
+                item.name,
+                status_word(item.status)
+            );
+            Ok(())
+        };
+    }
     let view =
         marketplace::api_json::<serde_json::Value>(Method::GET, &format!("packages/{id}"), None)?;
     // `local` is this computer's copy, so only a package installed here has one.

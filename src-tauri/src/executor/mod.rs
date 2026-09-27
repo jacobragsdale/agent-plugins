@@ -268,10 +268,16 @@ fn document_problem(desired: &DesiredStructuredEntry, adapter_id: &str) -> Optio
 /// cannot replace until that app closes.
 #[cfg(windows)]
 fn document_locked(path: &Path) -> bool {
-    fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .is_err_and(|error| matches!(error.raw_os_error(), Some(32 | 33)))
+    use std::os::windows::fs::OpenOptionsExt;
+    // The rename that replaces it needs delete access too: an app holding it
+    // without FILE_SHARE_DELETE passes a write probe and still fails the rename.
+    const DELETE: u32 = 0x0001_0000;
+    let busy = |options: &fs::OpenOptions| {
+        options
+            .open(path)
+            .is_err_and(|error| matches!(error.raw_os_error(), Some(32 | 33)))
+    };
+    busy(fs::OpenOptions::new().append(true)) || busy(fs::OpenOptions::new().access_mode(DELETE))
 }
 
 #[cfg(not(windows))]
