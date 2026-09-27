@@ -342,12 +342,20 @@ pub(crate) async fn set_excluded_apps(
         return Err(format!("{unknown} is not an app Agent Plugins knows."));
     }
     let previous = crate::choices::read(&paths)?;
+    let before = previous.excluded(&item.id, component_id);
+    let excluded = excluded.into_iter().collect::<BTreeSet<_>>();
     let mut next = previous.clone();
-    next.set_excluded(&item.id, component_id, excluded.into_iter().collect());
+    next.set_excluded(&item.id, component_id, excluded.clone());
     if next == previous {
         return Ok(OperationOutcome::default());
     }
     crate::choices::write(&paths, &next)?;
+    let restore = |_: &String| {
+        if let Err(error) = crate::choices::write(&paths, &previous) {
+            eprintln!("Could not restore the app choices: {error}");
+        }
+    };
+
     let installed = crate::executor::read_ledger(&paths)?
         .items
         .get(&item.id)
@@ -359,6 +367,15 @@ pub(crate) async fn set_excluded_apps(
     if !installed {
         return Ok(OperationOutcome::default());
     }
+    // Only keeping it out of more apps: take it out of those, nothing else.
+    if before.iter().all(|app| excluded.contains(app)) {
+        let newly = excluded
+            .into_iter()
+            .filter(|app| !before.contains(app))
+            .collect::<BTreeSet<_>>();
+        return crate::executor::release_component(&paths, &item.id, component_id, &newly)
+            .inspect_err(restore);
+    }
     install::install_item_components_approved(
         &paths,
         &source,
@@ -367,11 +384,7 @@ pub(crate) async fn set_excluded_apps(
         trust_approved,
         Some(&[component_id.to_string()]),
     )
-    .inspect_err(|_| {
-        if let Err(error) = crate::choices::write(&paths, &previous) {
-            eprintln!("Could not restore the app choices: {error}");
-        }
-    })
+    .inspect_err(restore)
 }
 
 /// Saves connector settings such as API keys where the person's AI apps read

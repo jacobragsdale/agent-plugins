@@ -1153,8 +1153,56 @@ pub(crate) fn uninstall_pulled(
     if detach.is_empty() {
         return Err(warnings.join(" "));
     }
+    let outcome = commit_detached(paths, &ledger_state, installation_id, &detach, true)?;
+    Ok(OperationOutcome {
+        warnings,
+        ..outcome
+    })
+}
+
+/// Takes one component out of `targets` only. Keeping a connector out of an
+/// app never plans the others again, so it can't add it where it isn't (an
+/// app found again after it went away, say) or ask for an approval.
+pub(crate) fn release_component(
+    paths: &SystemPaths,
+    installation_id: &str,
+    component_id: &str,
+    targets: &BTreeSet<String>,
+) -> Result<OperationOutcome, String> {
+    let (_lock, ledger_state) = ledger_for_change(paths)?;
+    let record = ledger_state
+        .items
+        .get(installation_id)
+        .ok_or_else(|| format!("{installation_id} is not installed."))?;
+    let detach = record
+        .binding_ids
+        .iter()
+        .filter(|binding_id| {
+            ledger_state
+                .bindings
+                .get(*binding_id)
+                .is_some_and(|binding| {
+                    binding.component_id == component_id && targets.contains(&binding.target_id)
+                })
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if detach.is_empty() {
+        return Ok(OperationOutcome::default());
+    }
+    commit_detached(paths, &ledger_state, installation_id, &detach, false)
+}
+
+/// Removes `detach` from the installation in one transaction.
+fn commit_detached(
+    paths: &SystemPaths,
+    ledger_state: &InstallationLedger,
+    installation_id: &str,
+    detach: &BTreeSet<String>,
+    force_modified: bool,
+) -> Result<OperationOutcome, String> {
     let mut next = ledger_state.clone();
-    let removed = detach_bindings(&mut next, installation_id, &detach);
+    let removed = detach_bindings(&mut next, installation_id, detach);
     let transaction_id = transaction_id(installation_id);
     let (journal, _, backup_paths) = stage_changes(&StageRequest {
         paths,
@@ -1163,7 +1211,7 @@ pub(crate) fn uninstall_pulled(
         removed: &removed,
         remaining_ledger: &next,
         replace_unmanaged: false,
-        force_modified: true,
+        force_modified,
     })?;
     update_document_digests_from_journal(&mut next, &journal)?;
     next.last_transaction_id = Some(transaction_id);
@@ -1173,7 +1221,7 @@ pub(crate) fn uninstall_pulled(
             .into_iter()
             .map(|path| path.display().to_string())
             .collect(),
-        warnings,
+        ..OperationOutcome::default()
     })
 }
 
@@ -2713,6 +2761,46 @@ mod tests {
             .collect::<Vec<_>>();
         kept.sort();
         assert_eq!(kept, ["claude copy", "shared copy"]);
+    }
+
+    #[test]
+    fn keeping_a_connector_out_of_an_app_touches_no_other_app() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        let (source, snapshot, item) = mixed_fixture(root.path());
+        crate::agent_profiles::set_enabled(&paths, TargetId::Cursor, true).expect("cursor");
+        crate::agent_profiles::set_enabled(&paths, TargetId::Codex, true).expect("codex");
+        install(&paths, &source, &snapshot, &item, false, true).expect("install");
+        // An app found after the install, which the connector never went to.
+        crate::agent_profiles::set_enabled(&paths, TargetId::ClaudeCode, true).expect("claude");
+
+        release_component(
+            &paths,
+            &item.id,
+            "database",
+            &BTreeSet::from(["cursor".to_string()]),
+        )
+        .expect("no approval needed to take it out of an app");
+
+        assert!(!fs::read_to_string(paths.home.join(".cursor/mcp.json"))
+            .expect("cursor")
+            .contains("acme-database"));
+        assert!(fs::read_to_string(paths.home.join(".codex/config.toml"))
+            .expect("codex")
+            .contains("acme-database"));
+        assert!(
+            !paths.home.join(".claude.json").exists(),
+            "not added where it wasn't"
+        );
+        let ledger = read_ledger(&paths).expect("ledger");
+        let targets = ledger.items[&item.id]
+            .binding_ids
+            .iter()
+            .map(|id| &ledger.bindings[id])
+            .filter(|binding| binding.component_id == "database")
+            .map(|binding| binding.target_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(targets, ["codex"]);
     }
 
     #[test]
