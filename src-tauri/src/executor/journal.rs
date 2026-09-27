@@ -131,8 +131,29 @@ pub(super) fn recover_unless_busy(paths: &SystemPaths) -> Result<(), String> {
 /// committed transaction whose leftovers cannot be removed yet is parked for a
 /// later sweep. Only a rollback that fails keeps the journal, so the next
 /// start retries it and no new change can start on top of it.
+/// An undone transaction whose journal could not be removed, and when. Every
+/// read runs recovery, and each removal waits out the file retry budget, so
+/// for a while after a failure one quick try stands in for another full one.
+static STUCK_JOURNAL: std::sync::Mutex<Option<(std::path::PathBuf, std::time::Instant, String)>> =
+    std::sync::Mutex::new(None);
+const STUCK_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub(crate) fn recover(paths: &SystemPaths) -> Result<(), String> {
     let journal_path = paths.app_data().join(JOURNAL_FILE);
+    let stuck = STUCK_JOURNAL
+        .lock()
+        .ok()
+        .and_then(|stuck| stuck.clone())
+        .filter(|(path, since, _)| *path == journal_path && since.elapsed() < STUCK_RETRY_AFTER);
+    if let Some((_, _, message)) = stuck {
+        // The undo itself already ran; only the journal is left to remove.
+        if fs::remove_file(&journal_path).is_err() && journal_path.exists() {
+            return Err(message);
+        }
+        if let Ok(mut stuck) = STUCK_JOURNAL.lock() {
+            *stuck = None;
+        }
+    }
     let contents = match fs::read(&journal_path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -165,11 +186,19 @@ pub(crate) fn recover(paths: &SystemPaths) -> Result<(), String> {
         // A journal left behind would be rolled back again at every read, over
         // whatever changed since, so nothing may change until it is gone.
         remove_journal(paths).map_err(|error| {
-            format!(
+            let message = format!(
                 "An earlier change {UNDO_PENDING}: Could not remove {}: {} Close any app that is using it. Agent Plugins tries again the next time it checks for updates.",
                 paths.app_data().join(JOURNAL_FILE).display(),
                 fs_retry::plain(&error)
-            )
+            );
+            if let Ok(mut stuck) = STUCK_JOURNAL.lock() {
+                *stuck = Some((
+                    paths.app_data().join(JOURNAL_FILE),
+                    std::time::Instant::now(),
+                    message.clone(),
+                ));
+            }
+            message
         })?;
     }
     sweep_parked_cleanups(paths);
