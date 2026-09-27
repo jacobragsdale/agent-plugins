@@ -5,7 +5,7 @@ using Xunit;
 
 namespace Marketplace.Api.Tests;
 
-/// <summary>Access defects found by the live end-to-end audit of c821355.</summary>
+/// <summary>Defects found by the live end-to-end audit of c821355.</summary>
 public sealed partial class MarketplaceApiTests
 {
     [Fact]
@@ -97,5 +97,125 @@ public sealed partial class MarketplaceApiTests
         var stranger = await other.GetFromJsonAsync<JsonElement>("/api/me", Json, ct);
         Assert.Empty(stranger.GetProperty("teams").EnumerateArray());
         Assert.Equal(0, stranger.GetProperty("unreadNotifications").GetInt32());
+    }
+
+    [Fact]
+    public async Task A_withdraw_or_restore_that_changes_what_runs_needs_approval_again()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var owner = factory.ClientFor("TEST\\requeuer");
+        using var admin = factory.ClientFor("TEST\\admin");
+        using var viewer = factory.ClientFor("TEST\\requeueviewer");
+        using (var form = SamplePackages.PublishForm(SamplePackages.SkillAndMcpPackage("requeuer", "db", "Node server."), "1.0.0"))
+        {
+            await PublishLiveAsync(owner, "requeuer", "db", form);
+        }
+
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/requeuer/db", new { decision = "approve" }, Json, ct)).StatusCode);
+        await AssertVisible(viewer, "requeuer", "db");
+        using (var form = SamplePackages.PublishForm(SamplePackages.SkillAndMcpPackage("requeuer", "db", "Python server.", command: "python"), "1.1.0"))
+        {
+            await PublishLiveAsync(owner, "requeuer", "db", form);
+        }
+
+        await AssertHidden(viewer, "requeuer", "db");
+
+        // Withdrawn, the approved node version is live; the admin approves it again.
+        Assert.Equal(HttpStatusCode.NoContent, (await owner.PutAsync("/api/packages/requeuer/db/versions/1.1.0/yank", null, ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/requeuer/db", new { decision = "approve" }, Json, ct)).StatusCode);
+        await AssertVisible(viewer, "requeuer", "db");
+
+        // Restoring the python version makes something unreviewed live again.
+        Assert.Equal(HttpStatusCode.NoContent, (await owner.DeleteAsync("/api/packages/requeuer/db/versions/1.1.0/yank", ct)).StatusCode);
+        await AssertHidden(viewer, "requeuer", "db");
+
+        // The same after a purge: the version below was declined.
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/requeuer/db", new { decision = "decline", note = "Python is not allowed." }, Json, ct)).StatusCode);
+        using (var form = SamplePackages.PublishForm(SamplePackages.SkillAndMcpPackage("requeuer", "db", "Back to node."), "1.2.0"))
+        {
+            await PublishLiveAsync(owner, "requeuer", "db", form);
+        }
+
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/requeuer/db", new { decision = "approve" }, Json, ct)).StatusCode);
+        await AssertVisible(viewer, "requeuer", "db");
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.DeleteAsync("/api/admin/packages/requeuer/db/versions/1.2.0", ct)).StatusCode);
+        await AssertHidden(viewer, "requeuer", "db");
+    }
+
+    [Fact]
+    public async Task An_mcp_document_that_names_a_key_twice_is_refused()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var owner = factory.ClientFor("TEST\\dupkeys");
+        var manifest = """{ "version": 2, "source": { "id": "dupkeys", "name": "dupkeys", "description": "Test." }, "packages": [ { "id": "db", "name": "db", "description": "Twice.", "components": [ { "kind": "mcpServer", "id": "db", "path": "mcp/db.json" } ] } ] }""";
+        foreach (var document in new[]
+        {
+            """{ "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "mcpServers": { "db": { "type": "stdio", "command": "node" }, "db": { "type": "stdio", "command": "python" } } }""",
+            """{ "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "mcpServers": { "db": { "type": "stdio", "command": "node", "command": "python" } } }""",
+        })
+        {
+            using var form = SamplePackages.PublishForm(SamplePackages.Zip(new Dictionary<string, string> { ["agent-plugins.json"] = manifest, ["mcp/db.json"] = document }), "1.0.0");
+            var response = await owner.PostAsync("/api/packages/dupkeys/db/versions", form, ct);
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task A_person_keeps_the_u_namespace_after_the_team_that_forced_it_is_deleted()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var founder = factory.ClientFor("TEST\\teamfounder");
+        using var person = factory.ClientFor("TEST\\kimberly");
+        Assert.Equal(HttpStatusCode.Created, (await founder.PostAsJsonAsync("/api/teams", new { @namespace = "kimberly", displayName = "Kimberly's namesake" }, Json, ct)).StatusCode);
+        Assert.Equal("u-kimberly", (await person.GetFromJsonAsync<JsonElement>("/api/me", Json, ct)).GetProperty("namespace").GetString());
+        using (var form = SamplePackages.PublishForm(SamplePackages.SkillPackage("u-kimberly", "notes"), "1.0.0"))
+        {
+            await PublishLiveAsync(person, "u-kimberly", "notes", form);
+        }
+
+        Assert.Equal(HttpStatusCode.NoContent, (await founder.DeleteAsync("/api/teams/kimberly", ct)).StatusCode);
+
+        Assert.Equal("u-kimberly", (await person.GetFromJsonAsync<JsonElement>("/api/me", Json, ct)).GetProperty("namespace").GetString());
+        Assert.Equal(HttpStatusCode.NoContent, (await person.PutAsync("/api/packages/u-kimberly/notes/versions/1.0.0/yank", null, ct)).StatusCode);
+    }
+
+    [Fact]
+    public async Task A_block_is_one_row_whatever_the_case_and_an_unblock_lifts_it()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var admin = factory.ClientFor("TEST\\admin");
+        using var blocked = factory.ClientFor("TEST\\casey");
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PutAsJsonAsync("/api/admin/blocks/TEST%5Ccasey", new { reason = "Lower." }, Json, ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PutAsJsonAsync("/api/admin/blocks/TEST%5CCASEY", new { reason = "Upper." }, Json, ct)).StatusCode);
+        Assert.Single((await admin.GetFromJsonAsync<JsonElement>("/api/admin/blocks", Json, ct)).EnumerateArray(), block => block.GetProperty("account").GetString()!.Equals("TEST\\casey", StringComparison.OrdinalIgnoreCase));
+
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.DeleteAsync("/api/admin/blocks/test%5Ccasey", ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await blocked.PostAsJsonAsync("/api/teams", new { @namespace = "casey-team", displayName = "Casey" }, Json, ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await admin.DeleteAsync("/api/admin/blocks/TEST%5Ccasey", ct)).StatusCode);
+    }
+
+    [Fact]
+    public async Task A_decline_note_is_for_the_owners_and_a_hidden_revoke_for_nobody_else()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var owner = factory.ClientFor("TEST\\decliner");
+        using var admin = factory.ClientFor("TEST\\admin");
+        using var listed = factory.ClientFor("TEST\\declinelisted");
+        using var stranger = factory.ClientFor("TEST\\declinestranger");
+        using (var form = SamplePackages.PublishForm(SamplePackages.SkillAndMcpPackage("decliner", "db", "Server."), "1.0.0"))
+        {
+            await PublishLiveAsync(owner, "decliner", "db", form);
+        }
+
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync("/api/admin/reviews/decliner/db", new { decision = "decline", note = "Internal reason." }, Json, ct)).StatusCode);
+        await Share(owner, "decliner/db", new { visibility = "private", users = new[] { "TEST\\declinelisted" } });
+        Assert.Equal("Internal reason.", (await PublicReview(owner, "decliner/db")).GetProperty("note").GetString());
+        Assert.Equal(JsonValueKind.Null, (await PublicReview(listed, "decliner/db")).GetProperty("note").ValueKind);
+
+        // Public again and still waiting, then revoked: only its owners ever saw it, so only they hear of the revoke.
+        await Share(owner, "decliner/db", new { visibility = "inherit" });
+        Assert.Equal(HttpStatusCode.NoContent, (await owner.PutAsync("/api/packages/decliner/db/revoke", null, ct)).StatusCode);
+        Assert.DoesNotContain("decliner/db", Revoked(await stranger.GetFromJsonAsync<JsonElement>("/api/index", Json, ct)));
+        Assert.Contains("decliner/db", Revoked(await owner.GetFromJsonAsync<JsonElement>("/api/index", Json, ct)));
     }
 }

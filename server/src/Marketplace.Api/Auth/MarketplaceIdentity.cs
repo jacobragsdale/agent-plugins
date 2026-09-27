@@ -88,17 +88,19 @@ public static partial class IdentityResolver
     /// </summary>
     public static async Task<MarketplaceIdentity> SettleAsync(MarketplaceIdentity identity, MarketplaceDbContext db, CancellationToken cancellationToken)
     {
-        var derived = identity.Namespace;
-        if (await db.Publishers.AnyAsync(publisher => publisher.Namespace == derived && publisher.Kind == PublisherKind.Team, cancellationToken))
-        {
-            derived = NamespaceFor("u-" + Username(identity.Account));
-        }
+        var plain = identity.Namespace;
+        var prefixed = NamespaceFor("u-" + Username(identity.Account));
+        var derived = await db.Publishers.AnyAsync(publisher => publisher.Namespace == plain && publisher.Kind == PublisherKind.Team, cancellationToken)
+            ? prefixed
+            : plain;
 
+        // A name claimed while a team held the plain one stays the caller's after that team is deleted.
         var candidates = PersonalCandidates(derived);
+        var claimable = PersonalCandidates(plain).Concat(PersonalCandidates(prefixed)).Distinct().ToArray();
         var owners = await db.Publishers.AsNoTracking()
-            .Where(publisher => candidates.Contains(publisher.Namespace))
-            .ToDictionaryAsync(publisher => publisher.Namespace, publisher => publisher.Account, StringComparer.Ordinal, cancellationToken);
-        var ns = candidates.FirstOrDefault(candidate => owners.TryGetValue(candidate, out var owner) && IsClaimant(owner, identity.Account))
+            .Where(publisher => claimable.Contains(publisher.Namespace))
+            .ToDictionaryAsync(publisher => publisher.Namespace, publisher => publisher, StringComparer.Ordinal, cancellationToken);
+        var ns = claimable.FirstOrDefault(candidate => owners.TryGetValue(candidate, out var owner) && owner.Kind == PublisherKind.Personal && IsClaimant(owner.Account, identity.Account))
             ?? candidates.FirstOrDefault(candidate => !owners.ContainsKey(candidate));
 
         // Entries with the caller's username, then the domain rule: CORP\jane is jane@CORP.EXAMPLE.COM.

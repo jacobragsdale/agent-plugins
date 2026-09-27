@@ -533,6 +533,8 @@ public sealed partial class PublishService(
                 ApplyListing(package, live, now);
             }
 
+            ReviewAgainIfLiveChanged(package);
+
             db.Audit(identity.Account, yanked ? "yank" : "unyank", package.CanonicalId, version.Version, now);
             await db.SaveChangesAsync(cancellationToken);
             await RegenerateNamespaceAsync(ns, new Dictionary<string, ReadOnlyMemory<byte>>(), cancellationToken);
@@ -694,6 +696,8 @@ public sealed partial class PublishService(
                 ApplyListing(package, live, now);
             }
 
+            ReviewAgainIfLiveChanged(package);
+
             db.Audit(identity.Account, "purge", package.CanonicalId, version.Version, now);
             await db.SaveChangesAsync(cancellationToken);
             await RegenerateNamespaceAsync(ns, new Dictionary<string, ReadOnlyMemory<byte>>(), cancellationToken);
@@ -717,6 +721,23 @@ public sealed partial class PublishService(
         package.RevokedAt is not null
             ? null
             : package.Versions.Where(version => !version.Yanked).MaxBy(version => SemVer.Parse(version.Version));
+
+    /// <summary>
+    /// A withdraw, restore, or purge can make another version live. An approval covers what its servers launch,
+    /// as on publish, so a live version that launches something else (one declined, or never reviewed) waits again.
+    /// </summary>
+    private static void ReviewAgainIfLiveChanged(Package package)
+    {
+        if (package.McpApprovedBy is not null
+            && LatestVersion(package) is { } live
+            && live.ComponentKinds.Contains(McpServerKind)
+            && package.McpApprovedSpec != McpServerSummary.LaunchSpec(live.McpServersJson))
+        {
+            package.McpApprovedBy = null;
+            package.McpApprovedAt = null;
+            package.McpApprovedSpec = null;
+        }
+    }
 
     /// <summary>The live version has an MCP server no admin has let the public see.</summary>
     public static bool Gated(Package package) =>

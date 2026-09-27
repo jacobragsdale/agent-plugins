@@ -95,30 +95,39 @@ public static class ArchiveInspector
     /// <summary>The servers an MCP document declares. The validator has already checked it, so anything unreadable is skipped.</summary>
     private static McpServerSummary[] McpServers(ZipArchiveEntry? entry)
     {
-        JsonObject? servers;
         try
         {
-            using var stream = entry?.Open();
-            servers = (stream is null ? null : JsonNode.Parse(stream) as JsonObject)?["mcpServers"] as JsonObject;
-        }
-        catch (Exception error) when (error is JsonException or InvalidDataException)
-        {
-            return [];
-        }
+            JsonObject? servers;
+            try
+            {
+                using var stream = entry?.Open();
+                servers = (stream is null ? null : JsonNode.Parse(stream) as JsonObject)?["mcpServers"] as JsonObject;
+            }
+            catch (Exception error) when (error is JsonException or InvalidDataException)
+            {
+                return [];
+            }
 
-        string[] Keys(JsonObject server, string field) => (server[field] as JsonObject)?.Select(pair => pair.Key).Order(StringComparer.Ordinal).ToArray() ?? [];
-        return (servers ?? [])
-            .Where(pair => pair.Value is JsonObject)
-            .Select(pair => (pair.Key, Server: (JsonObject)pair.Value!))
-            .Select(pair => new McpServerSummary(
-                pair.Key,
-                Text(pair.Server["type"]) ?? "unknown",
-                Text(pair.Server["command"]),
-                (pair.Server["args"] as JsonArray)?.Select(Text).OfType<string>().ToArray() ?? [],
-                Keys(pair.Server, "env"),
-                Text(pair.Server["url"]),
-                Keys(pair.Server, "headers")))
-            .ToArray();
+            string[] Keys(JsonObject server, string field) => (server[field] as JsonObject)?.Select(pair => pair.Key).Order(StringComparer.Ordinal).ToArray() ?? [];
+            return (servers ?? [])
+                .Where(pair => pair.Value is JsonObject)
+                .Select(pair => (pair.Key, Server: (JsonObject)pair.Value!))
+                .Select(pair => new McpServerSummary(
+                    pair.Key,
+                    Text(pair.Server["type"]) ?? "unknown",
+                    Text(pair.Server["command"]),
+                    (pair.Server["args"] as JsonArray)?.Select(Text).OfType<string>().ToArray() ?? [],
+                    Keys(pair.Server, "env"),
+                    Text(pair.Server["url"]),
+                    Keys(pair.Server, "headers")))
+                .ToArray();
+        }
+        catch (ArgumentException)
+        {
+            // JsonObject refuses a key named twice. The desktop app would take the last one, so the admin's
+            // review could not show what runs: refuse it instead of skipping it.
+            throw new ProblemException(422, $"{entry!.FullName} names the same key twice. Keep one of them.");
+        }
     }
 
     /// <summary>Every file under the archive's root, by its path relative to the root.</summary>

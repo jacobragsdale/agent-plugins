@@ -530,7 +530,9 @@ public static class MarketplaceEndpoints
 
             var identity = context.MarketplaceIdentity();
             var now = time.GetUtcNow().UtcDateTime;
-            var block = await db.Blocks.FindAsync([account], cancellationToken) ?? db.Blocks.Add(new Block { Account = account, BlockedBy = identity.Account }).Entity;
+            // Accounts match without case (EntryMatches), so one row per account whatever its spelling.
+            var block = await db.Blocks.FirstOrDefaultAsync(candidate => candidate.Account.ToLower() == account.ToLower(), cancellationToken)
+                ?? db.Blocks.Add(new Block { Account = account, BlockedBy = identity.Account }).Entity;
             block.BlockedBy = identity.Account;
             block.BlockedAt = now;
             block.Reason = reason is { Length: > 0 } ? reason : null;
@@ -541,9 +543,15 @@ public static class MarketplaceEndpoints
 
         admin.MapDelete("/blocks/{account}", async Task<NoContent> (string account, HttpContext context, MarketplaceDbContext db, TimeProvider time, CancellationToken cancellationToken) =>
         {
-            var block = await db.Blocks.FindAsync([account.Trim()], cancellationToken) ?? throw ProblemException.NotFound($"A block on {account}");
-            db.Blocks.Remove(block);
-            db.Audit(context.MarketplaceIdentity().Account, "unblock", block.Account, null, time.GetUtcNow().UtcDateTime);
+            var spelling = account.Trim().ToLower();
+            var blocks = await db.Blocks.Where(candidate => candidate.Account.ToLower() == spelling).ToListAsync(cancellationToken);
+            if (blocks.Count == 0)
+            {
+                throw ProblemException.NotFound($"A block on {account}");
+            }
+
+            db.Blocks.RemoveRange(blocks);
+            db.Audit(context.MarketplaceIdentity().Account, "unblock", blocks[0].Account, null, time.GetUtcNow().UtcDateTime);
             await db.SaveChangesAsync(cancellationToken);
             return TypedResults.NoContent();
         }).WithName("Unblock").ProducesProblem(404);
@@ -718,7 +726,7 @@ public static class MarketplaceEndpoints
                 package.RevokedAt is not null,
                 live?.ComponentKinds.Contains(PublishService.McpServerKind) != true ? null
                     : package.McpApprovedBy is not null ? new PublicReviewView(PublicReviewState.Approved, null)
-                    : package.McpDeclineNote is { } note ? new PublicReviewView(PublicReviewState.Declined, note)
+                    : package.McpDeclineNote is { } note ? new PublicReviewView(PublicReviewState.Declined, identity.Owns(package.Namespace) ? note : null)
                     : new PublicReviewView(PublicReviewState.Waiting, null),
                 package.RevokedByAdmin,
                 package.CreatedAt,

@@ -181,7 +181,7 @@ public sealed class CatalogService(
             .ToHashSet(StringComparer.Ordinal);
         var revoked = packages
             .Where(package => package.RevokedAt is not null
-                && (installed.Contains(package.CanonicalId) || AccessService.IsVisible(rules, identity, package.Namespace, package.PackageId)))
+                && (installed.Contains(package.CanonicalId) || AccessService.IsVisible(rules, identity, package.Namespace, package.PackageId, WasGated(package))))
             .Select(package => package.CanonicalId)
             .Order(StringComparer.Ordinal)
             .ToList();
@@ -191,6 +191,14 @@ public sealed class CatalogService(
             .Max();
         return new IndexDocument(DateTime.SpecifyKind(changed, DateTimeKind.Utc), entries, bundles, revoked);
     }
+
+    /// <summary>
+    /// Whether the package was waiting for review when it was revoked. A revoked package has no live version, so
+    /// <see cref="PublishService.Gated"/> can't say; one the caller never saw is not theirs to hear revoked.
+    /// </summary>
+    private static bool WasGated(Package package) =>
+        package.McpApprovedBy is null
+        && package.Versions.Where(version => !version.Yanked).MaxBy(version => SemVer.Parse(version.Version))?.ComponentKinds.Contains(PublishService.McpServerKind) == true;
 
     private static IndexPublisher Publisher(string ns, Publisher? publisher) =>
         new(publisher?.Account ?? ns, publisher?.DisplayName ?? ns);
