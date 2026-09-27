@@ -898,6 +898,18 @@ fn repair_in(
 /// are all gone was most likely uninstalled after that backup was taken, so
 /// it is forgotten instead of reinstalled (and its connector re-added)
 /// without the user asking.
+/// Runs before a sync acts on the package list: after a read restored the ledger from its backup, the packages
+/// whose files are gone are forgotten first, or an update would reinstall what the person uninstalled since the
+/// backup was made.
+pub(crate) fn forget_missing_if_restored() -> Result<(), String> {
+    let (paths, sources) = cached_sources()?;
+    let ledger = crate::executor::read_ledger(&paths)?;
+    if crate::ledger::take_restored_marker(&paths.app_data()) {
+        forget_missing_after_restore(&paths, &sources, &ledger);
+    }
+    Ok(())
+}
+
 fn forget_missing_after_restore(
     paths: &SystemPaths,
     sources: &[(ConfiguredSource, SourceSnapshot)],

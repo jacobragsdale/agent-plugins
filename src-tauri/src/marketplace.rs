@@ -487,25 +487,38 @@ pub(crate) fn index_with_cache(cache_base: &Path) -> Option<Index> {
         .and_then(|_| std::fs::read_to_string(cache_base.join(INDEX_ETAG_FILE)).ok());
     match fetch_index_since(etag.as_deref().map(str::trim)) {
         Ok(Some((index, etag))) => {
-            if let Ok(json) = serde_json::to_vec(&index) {
-                let _ = std::fs::create_dir_all(cache_base);
-                let _ = crate::fs_retry::replace_file(&cache_base.join(INDEX_CACHE_FILE), &json);
-                let etag_file = cache_base.join(INDEX_ETAG_FILE);
-                match etag {
-                    Some(etag) => {
-                        let _ = crate::fs_retry::replace_file(&etag_file, etag.as_bytes());
-                    }
-                    None => {
-                        let _ = std::fs::remove_file(etag_file);
-                    }
-                }
-            }
+            store_index(cache_base, &index, etag.as_deref());
             Some(index)
         }
         Ok(None) => cached,
         Err(error) => {
             eprintln!("Marketplace index unavailable, using the cached copy: {error}");
             cached
+        }
+    }
+}
+
+/// Caches a fetched index with its ETag. The ETag vouches for the cached copy, so it is kept only
+/// beside the copy it came with: after a failed cache write a 304 would bring back an older index
+/// (one that still lists a restored package as revoked) for as long as the server's stays the same.
+fn store_index(cache_base: &Path, index: &Index, etag: Option<&str>) {
+    let etag_file = cache_base.join(INDEX_ETAG_FILE);
+    let saved = serde_json::to_vec(index).ok().is_some_and(|json| {
+        let _ = std::fs::create_dir_all(cache_base);
+        match crate::fs_retry::replace_file(&cache_base.join(INDEX_CACHE_FILE), &json) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("Could not save the marketplace index: {error}");
+                false
+            }
+        }
+    });
+    match etag.filter(|_| saved) {
+        Some(etag) => {
+            let _ = crate::fs_retry::replace_file(&etag_file, etag.as_bytes());
+        }
+        None => {
+            let _ = std::fs::remove_file(etag_file);
         }
     }
 }
@@ -718,7 +731,27 @@ pub(crate) fn post_events(events: &[ClientEvent]) -> Result<(), String> {
     if !response.status().is_success() {
         return Err(failure(&url, response));
     }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    if !is_events_receipt(content_type) {
+        return Err(format!(
+            "{url} answered with a page that isn't the marketplace's receipt, such as a network sign-in page; the events are kept for the next sync."
+        ));
+    }
     Ok(())
+}
+
+/// Only the marketplace's JSON receipt means the events arrived: a captive portal or a
+/// proxy answers 200 with its own page, and treating that as delivered lost the outbox.
+fn is_events_receipt(content_type: Option<&str>) -> bool {
+    content_type.is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"))
+    })
 }
 
 static PENDING_REPORTS: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
@@ -1062,6 +1095,33 @@ pub(crate) fn version_less_than(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_json_receipt_counts_as_delivered_events() {
+        assert!(is_events_receipt(Some("application/json; charset=utf-8")));
+        assert!(!is_events_receipt(Some("text/html")));
+        assert!(!is_events_receipt(None));
+    }
+
+    #[test]
+    fn an_index_that_could_not_be_cached_drops_its_etag() {
+        let cache = tempfile::tempdir().expect("cache");
+        let index = Index {
+            revoked: vec!["acme/review".to_string()],
+            ..Index::default()
+        };
+        store_index(cache.path(), &index, Some("\"v1\""));
+        assert_eq!(
+            std::fs::read_to_string(cache.path().join(INDEX_ETAG_FILE)).expect("etag"),
+            "\"v1\""
+        );
+
+        // A cache file that can't be replaced must not leave a newer ETag vouching for the old copy.
+        std::fs::remove_file(cache.path().join(INDEX_CACHE_FILE)).expect("remove");
+        std::fs::create_dir(cache.path().join(INDEX_CACHE_FILE)).expect("block the cache file");
+        store_index(cache.path(), &Index::default(), Some("\"v2\""));
+        assert!(!cache.path().join(INDEX_ETAG_FILE).exists());
+    }
 
     /// A self-signed certificate for localhost, trusted by nothing.
     const UNTRUSTED_CERT: &str = "MIIBmzCCAUGgAwIBAgIUIZ9hVrKfJCOuFKdb1Zd33iDfPtQwCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDkyNTIzMjQzMVoYDzIxMjYwOTAxMjMyNDMxWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARE7SSKUxTn0A8dvGU1K/qf/T9G72d0wm/uJv87lytJL0gPpV6hPx0tU5GDQCV0Oz2EHwYx1HQbYoODY/6ar6nbo28wbTAdBgNVHQ4EFgQUHk3lyxGNYjjzyehPdmOg7A4Oz3cwHwYDVR0jBBgwFoAUHk3lyxGNYjjzyehPdmOg7A4Oz3cwDwYDVR0TAQH/BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwCgYIKoZIzj0EAwIDSAAwRQIgemn/lCbAzkY29XruQGhqv6GODMc4LNqOyXtsi+IiyccCIQCmxyNRDAdG7pZ6zEhfzGvSlACSHd1Wh2ww6KZqY1HG4A==";

@@ -558,11 +558,21 @@ pub(super) fn mutation_backup(
             "resource-previous",
         ));
     }
-    let directory = paths
+    // Mirror the target's place under the home folder: every backup of a transaction is chosen
+    // before anything moves, so Cursor's and VS Code's mcp.json (or a skill in two apps' folders)
+    // would otherwise share one path, and the second move lost the first original.
+    let backups = paths
         .home
         .join(".agents")
         .join(".agent-plugins-backups")
         .join(transaction_id);
+    let directory = match target
+        .parent()
+        .and_then(|parent| parent.strip_prefix(&paths.home).ok())
+    {
+        Some(relative) => backups.join(relative),
+        None => backups,
+    };
     fs_retry::create_dir_all(&directory).map_err(|error| {
         format!(
             "Could not create {}: {}",

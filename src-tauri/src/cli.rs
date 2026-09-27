@@ -72,7 +72,10 @@ fn exit_code(message: &str) -> i32 {
         EXIT_NEEDS_APPROVAL
     } else if NOT_FOUND.iter().any(|marker| message.contains(marker)) {
         EXIT_NOT_FOUND
-    } else if IpcError::from(message.to_string()).kind == IpcErrorKind::Offline {
+    } else if IpcError::from(message.to_string()).kind == IpcErrorKind::Offline
+        || crate::artifact::is_unreachable(message)
+    {
+        // A server that accepted the connection but never answered was not reached either.
         EXIT_OFFLINE
     } else {
         1
@@ -105,6 +108,14 @@ pub(crate) fn maybe_run() -> Option<i32> {
     };
     marketplace::flush_events();
     Some(code)
+}
+
+/// A sync that reached no server: exit status 5, as for any connect failure.
+fn offline_message() -> String {
+    format!(
+        "{} the marketplace, so Agent Plugins is using the copy saved at the last sync. Check the network or VPN, then try again.",
+        marketplace::CONNECT_FAILURE
+    )
 }
 
 /// Whether a first argument that names no command is the window's.
@@ -1010,7 +1021,15 @@ fn install(args: &[String]) -> Result<(), String> {
         let app = application::sync_app_state(&state).await?;
         // The sync also updated or removed other packages; say so.
         print_report(&app.auto_update_report, &app);
-        let not_found = || format!("{target} is not in the catalog. Try `agent-plugins search`.");
+        let offline = app.connectivity == crate::app_state::Connectivity::Offline;
+        let not_found = || {
+            // Offline, the catalog is the last saved copy, so a package missing from it may be new.
+            if offline {
+                offline_message()
+            } else {
+                format!("{target} is not in the catalog. Try `agent-plugins search`.")
+            }
+        };
         let ids = match parts.as_slice() {
             [source_id, local_id] | [source_id, local_id, _] => {
                 let id = format!("{source_id}/{local_id}");
@@ -1049,8 +1068,16 @@ fn install(args: &[String]) -> Result<(), String> {
                         application::replace_item(&state, source_id, local_id, approve_mcp, component)
                             .await?
                     } else {
+                        // A person's own entry of the same name is only found while writing it.
                         application::install_item(&state, source_id, local_id, approve_mcp, component)
-                            .await?
+                            .await
+                            .map_err(|error| {
+                                if error.contains("already exists and is unmanaged") {
+                                    format!("{error} Run again with --replace to back it up and replace it.")
+                                } else {
+                                    error
+                                }
+                            })?
                     };
                     println!("installed {target} ({})", item.name);
                     print_outcome(&outcome);
@@ -1467,6 +1494,9 @@ fn sync(args: &[String]) -> Result<(), String> {
     print_report(report, &app);
     if let Some(message) = &app.catalog_message {
         eprintln!("{message}");
+    }
+    if app.connectivity == crate::app_state::Connectivity::Offline {
+        return Err(offline_message());
     }
     if report.updated_items.is_empty()
         && report.removed_items.is_empty()
@@ -2232,6 +2262,15 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(repeated.values("--add"), vec!["bob", "team:platform"]);
+    }
+
+    #[test]
+    fn an_offline_sync_exits_as_unreachable() {
+        assert_eq!(exit_code(&offline_message()), EXIT_OFFLINE);
+        assert_eq!(
+            exit_code("https://marketplace.example.com/api/index timed out."),
+            EXIT_OFFLINE
+        );
     }
 
     #[test]

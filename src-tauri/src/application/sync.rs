@@ -619,6 +619,9 @@ fn apply_fetched(fetched: Fetched) -> Result<(AppState, MarketplaceCheck), Strin
     agent_profiles::apply_detected_defaults(&paths);
     let previous_index = fetched.previous_index;
     let index = fetched.index;
+    if let Err(error) = super::items::forget_missing_if_restored() {
+        eprintln!("Could not check a restored list of installed packages: {error}");
+    }
     let mut report = reconcile_installed_items(&paths, &loaded_sources)?;
     if let Some(index) = &index {
         report.removed_items = remove_revoked(&paths, &loaded_sources, &index.revoked);

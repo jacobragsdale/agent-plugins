@@ -2423,6 +2423,31 @@ mod tests {
     }
 
     #[test]
+    fn replace_backs_up_same_named_originals_of_two_apps_separately() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = paths(root.path());
+        crate::agent_profiles::set_enabled(&paths, TargetId::Cursor, true).expect("cursor");
+        crate::agent_profiles::set_enabled(&paths, TargetId::ClaudeCode, true).expect("claude");
+        let (source, snapshot, item) = fixture(root.path());
+        for (folder, text) in [
+            (".agents/skills", "shared copy"),
+            (".claude/skills", "claude copy"),
+        ] {
+            let own = paths.home.join(folder).join("acme-review");
+            fs::create_dir_all(&own).expect("own skill");
+            fs::write(own.join("SKILL.md"), text).expect("own text");
+        }
+        let outcome = install(&paths, &source, &snapshot, &item, true, false).expect("replace");
+        let mut kept = outcome
+            .backup_paths
+            .iter()
+            .map(|backup| fs::read_to_string(Path::new(backup).join("SKILL.md")).expect("backup"))
+            .collect::<Vec<_>>();
+        kept.sort();
+        assert_eq!(kept, ["claude copy", "shared copy"]);
+    }
+
+    #[test]
     fn unreadable_agent_config_skips_only_that_agent() {
         let root = tempfile::tempdir().expect("root");
         let paths = paths(root.path());
