@@ -585,15 +585,21 @@ fn search(args: &[String]) -> Result<(), String> {
         println!("No packages match.");
         return Ok(());
     }
+    // Wide enough for the longest ID, so every row keeps its columns.
+    let id_width = matches
+        .iter()
+        .map(|package| package.id.len())
+        .chain(bundles.iter().map(|bundle| bundle.id.len()))
+        .fold(32, usize::max);
     if !matches.is_empty() {
         println!(
-            "{:<32} {:<10} {:<18} {:>8} {:>6}  tags",
+            "{:<id_width$} {:<10} {:<18} {:>8} {:>6}  tags",
             "package", "version", "publisher", "installs", "users"
         );
     }
     for package in matches {
         println!(
-            "{:<32} {:<10} {:<18} {:>8} {:>6}  {}",
+            "{:<id_width$} {:<10} {:<18} {:>8} {:>6}  {}",
             package.id,
             package.version,
             truncate(&package.publisher.display_name, 18),
@@ -604,11 +610,14 @@ fn search(args: &[String]) -> Result<(), String> {
         println!("    {}", truncate(&package.description, 100));
     }
     if !bundles.is_empty() {
-        println!("{:<32} {:<10} {:<18}", "bundle", "packages", "publisher");
+        println!(
+            "{:<id_width$} {:<10} {:<18}",
+            "bundle", "packages", "publisher"
+        );
     }
     for bundle in bundles {
         println!(
-            "{:<32} {:<10} {:<18}",
+            "{:<id_width$} {:<10} {:<18}",
             bundle.id,
             bundle.members.len(),
             truncate(&bundle.publisher.display_name, 18)
@@ -1357,17 +1366,31 @@ fn list(args: &[String]) -> Result<(), String> {
         println!("Nothing is installed.");
         return Ok(());
     }
-    println!("{:<32} {:<20} {:<10} name", "package", "status", "version");
-    for item in installed {
-        let status = if item.held {
+    let status = |item: &crate::app_state::CatalogItemState| {
+        if item.held {
             format!("{} (held)", status_word(item.status))
         } else {
             status_word(item.status)
-        };
+        }
+    };
+    // Wide enough for the longest ID and status, so every row keeps its columns.
+    let id_width = installed
+        .iter()
+        .map(|item| item.id.len())
+        .fold(32, usize::max);
+    let status_width = installed
+        .iter()
+        .map(|item| status(item).len())
+        .fold(20, usize::max);
+    println!(
+        "{:<id_width$} {:<status_width$} {:<10} name",
+        "package", "status", "version"
+    );
+    for item in &installed {
         println!(
-            "{:<32} {:<20} {:<10} {}",
+            "{:<id_width$} {:<status_width$} {:<10} {}",
             item.id,
-            status,
+            status(item),
             installed_version(item).unwrap_or("-"),
             item.name
         );
