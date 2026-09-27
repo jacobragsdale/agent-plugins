@@ -28,6 +28,17 @@ public sealed class ArtifactKeeperStoreTests
         Assert.Equal(2, handler.Downloads);
     }
 
+    [Fact]
+    public async Task Health_checks_reuse_the_token_instead_of_logging_in_each_time()
+    {
+        var handler = new ScriptedHandler(HttpStatusCode.OK, HttpStatusCode.OK, HttpStatusCode.NotFound);
+        var store = Store(handler);
+        Assert.True(await store.CheckAsync(TestContext.Current.CancellationToken));
+        Assert.True(await store.CheckAsync(TestContext.Current.CancellationToken));
+        Assert.False(await store.CheckAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(1, handler.Logins);
+    }
+
     private static ArtifactKeeperStore Store(HttpMessageHandler handler) => new(
         new HttpClient(handler) { BaseAddress = new Uri("http://keeper.test/") },
         Options.Create(new ArtifactKeeperOptions { Username = "svc", Password = "secret" }),
@@ -39,10 +50,13 @@ public sealed class ArtifactKeeperStoreTests
     {
         public int Downloads { get; private set; }
 
+        public int Logins { get; private set; }
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             if (request.RequestUri!.AbsolutePath.EndsWith("/auth/login", StringComparison.Ordinal))
             {
+                Logins++;
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"access_token":"token"}""") });
             }
 

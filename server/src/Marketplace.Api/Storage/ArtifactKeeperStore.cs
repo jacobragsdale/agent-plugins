@@ -96,8 +96,17 @@ public sealed class ArtifactKeeperStore(
     {
         try
         {
-            await TokenAsync(forceRefresh: true, cancellationToken);
-            return true;
+            // Reuses the cached token: a login per probe used up Artifact Keeper's login rate limit,
+            // and the 429s then reached publishes and downloads whose token had expired.
+            using var response = await SendAsync(
+                () => new HttpRequestMessage(HttpMethod.Get, $"api/v1/repositories/{options.Value.Repository}"),
+                cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogWarning("Artifact Keeper health check answered HTTP {Status}.", (int)response.StatusCode);
+            }
+
+            return response.IsSuccessStatusCode;
         }
         catch (Exception error) when (error is HttpRequestException or ProblemException or TaskCanceledException or JsonException or InvalidOperationException)
         {
