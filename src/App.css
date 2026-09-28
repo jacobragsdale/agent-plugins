@@ -44,7 +44,7 @@ button {
   font: inherit;
 }
 
-.radix-themes {
+#root > .radix-themes {
   min-height: 100vh;
   color: var(--text);
   background: radial-gradient(circle at 15% 0%, rgba(36, 158, 216, 0.13), transparent 34rem), linear-gradient(180deg, #0b0d0f, var(--canvas) 72%);
