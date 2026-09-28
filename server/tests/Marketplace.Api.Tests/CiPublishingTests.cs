@@ -57,12 +57,14 @@ public sealed partial class MarketplaceApiTests
             [".claude/skills/notes/SKILL.md"] = Skill("ci-team-notes"),
         };
 
-        // Until an owner adds it, the pipeline learns exactly who it is and what to ask for.
+        // Until an owner adds it, the pipeline learns exactly who it is and what to ask for, with the Accept header the CI templates send.
         using (var form = RepositoryForm(files, dryRun: true))
         {
-            var refused = await pipeline.PostAsync("/api/namespaces/ci-team/publish", form, ct);
+            using var request = new HttpRequestMessage(HttpMethod.Post, "/api/namespaces/ci-team/publish") { Content = form };
+            request.Headers.Accept.ParseAdd("text/markdown, application/problem+json");
+            var refused = await pipeline.SendAsync(request, ct);
             Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
-            Assert.Contains("github:acme/skills is not a member of ci-team. A ci-team owner adds github:acme/skills under Members", await refused.Content.ReadAsStringAsync(ct));
+            Assert.Contains("github:acme/skills is not a member of ci-team. An owner of ci-team adds github:acme/skills under Members", await refused.Content.ReadAsStringAsync(ct));
         }
 
         var found = await owner.GetFromJsonAsync<JsonElement>("/api/directory?q=acme", Json, ct);

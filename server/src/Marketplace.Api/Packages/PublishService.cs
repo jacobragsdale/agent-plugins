@@ -884,7 +884,7 @@ public sealed partial class PublishService(
         if (!identity.Owns(ns))
         {
             throw identity.IsMachine
-                ? new ProblemException(403, $"{identity.Account} is not a member of {ns}. A {ns} owner adds {identity.Account} under Members on the team's page in the marketplace, then this pipeline can publish there.")
+                ? new ProblemException(403, $"{identity.Account} is not a member of {ns}. An owner of {ns} adds {identity.Account} under Members on the team's page in the marketplace, then this pipeline can publish there.")
                 : ProblemException.NotOwner(identity.Account, ns);
         }
     }

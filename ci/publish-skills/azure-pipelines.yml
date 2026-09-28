@@ -57,7 +57,7 @@ steps:
         $curl = if ($IsWindows) { 'curl.exe' } else { 'curl' }
         $changelog = git log -1 --format=%s
         $status = & $curl -sS -o $report -w '%{http_code}' `
-          -H "Authorization: Bearer $token" -H 'Accept: text/markdown' `
+          -H "Authorization: Bearer $token" -H 'Accept: text/markdown, application/problem+json' `
           -F "archive=@$archive;type=application/zip" -F "dryRun=$($dry.ToString().ToLower())" `
           --form-string "changelog=$changelog" `
           "$($env:MARKETPLACE.TrimEnd('/'))/api/namespaces/$env:NAMESPACE/publish"

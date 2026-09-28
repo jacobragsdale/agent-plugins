@@ -177,7 +177,7 @@ The marketplace admins do step 1 once. Each team does the rest.
 4. **Run it once.** It fails and names the pipeline's account:
 
    ```text
-   HTTP 403: app:3f2a7c1e-… is not a member of data-team. A data-team owner adds app:3f2a7c1e-… under Members on the team's page in the marketplace, then this pipeline can publish there.
+   HTTP 403: app:3f2a7c1e-… is not a member of data-team. An owner of data-team adds app:3f2a7c1e-… under Members on the team's page in the marketplace, then this pipeline can publish there.
    ```
 
    A team owner opens the team's page in the portal, types the account under **Add people** (the pipeline is in the directory once it has run), and adds it. Run the pipeline again.
@@ -266,7 +266,7 @@ The pipeline log and summary say what went wrong. The common cases:
 
 | Message                                                                        | What to do                                                                                                                          |
 | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `… is not a member of data-team. A data-team owner adds …`                     | Add the account it names to the team in the portal.                                                                                 |
+| `… is not a member of data-team. An owner of data-team adds …`                 | Add the account it names to the team in the portal.                                                                                 |
 | `The token was minted for X, not Y.`                                           | The pipeline asked for the wrong audience. Fix the template's `audience`, or the server's `Audience`.                               |
 | `The token comes from X, which this marketplace does not trust.`               | The issuer isn't in `Auth:Machines`. Ask the marketplace admins.                                                                    |
 | `This token belongs to a person.`                                              | The token was issued for a person, not the service connection. Use the service connection's own identity.                           |

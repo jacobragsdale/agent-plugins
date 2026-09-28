@@ -48,7 +48,7 @@ runs:
         report="$RUNNER_TEMP/marketplace-report.md"
         git archive --format=zip -o "$archive" HEAD -- "$SKILLS_PATH"
         status=$(curl -sS -o "$report" -w '%{http_code}' \
-          -H "Authorization: Bearer $token" -H "Accept: text/markdown" \
+          -H "Authorization: Bearer $token" -H "Accept: text/markdown, application/problem+json" \
           -F "archive=@$archive;type=application/zip" -F "dryRun=$dry" \
           --form-string "changelog=$(git log -1 --format=%s)" \
           "${MARKETPLACE%/}/api/namespaces/$NAMESPACE/publish")

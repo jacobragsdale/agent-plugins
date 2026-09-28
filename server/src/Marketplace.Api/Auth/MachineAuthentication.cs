@@ -62,6 +62,7 @@ public static class MachineAuthentication
                         var detail = context.AuthenticateFailure switch
                         {
                             SecurityTokenExpiredException => "The token has expired. Get a new one in each run.",
+                            SecurityTokenMalformedException => "The Authorization header does not hold a JWT. Send the token the pipeline's identity provider issued, as Bearer <token>.",
                             SecurityTokenInvalidAudienceException => $"The token was minted for {(token?.Audiences.Any() == true ? string.Join(", ", token.Audiences) : "no audience")}, not {issuer.Audience}. Ask for a token for {issuer.Audience}.",
                             SecurityTokenInvalidIssuerException => $"The token comes from {token?.Issuer ?? "no issuer"}, which this marketplace does not trust. It takes tokens from {string.Join(" and ", issuers.Select(trusted => trusted.Authority))}.",
                             null => "Send a token in the Authorization: Bearer header.",
