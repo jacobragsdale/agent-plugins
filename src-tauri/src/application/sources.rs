@@ -97,26 +97,26 @@ pub(crate) async fn confirm_source(
         })?;
     let cache = cache_base_dir()?;
     let config = config_base_dir()?;
-    let snapshot = run_blocking("Prepared source activation", move || {
-        source::activate_candidate(&cache, candidate)
+    run_blocking("Prepared source activation", move || {
+        let snapshot = source::activate_candidate(&cache, candidate)?;
+        let mut config_file = source::read_sources_config(&config)?;
+        if config_file.sources.iter().any(|source| {
+            source.source_key == snapshot.definition.source_key
+                || source.source_id == snapshot.definition.source_id
+                || source.locator.same_identity(&snapshot.definition.locator)
+        }) {
+            return Err("The source was configured while confirmation was open.".to_string());
+        }
+        config_file.sources.push(snapshot.definition);
+        config_file.sources.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.source_id.cmp(&right.source_id))
+        });
+        source::write_sources_config(&config, &config_file)?;
+        super::project::cached_state_now()
     })
-    .await?;
-    let mut config_file = source::read_sources_config(&config)?;
-    if config_file.sources.iter().any(|source| {
-        source.source_key == snapshot.definition.source_key
-            || source.source_id == snapshot.definition.source_id
-            || source.locator.same_identity(&snapshot.definition.locator)
-    }) {
-        return Err("The source was configured while confirmation was open.".to_string());
-    }
-    config_file.sources.push(snapshot.definition);
-    config_file.sources.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then_with(|| left.source_id.cmp(&right.source_id))
-    });
-    source::write_sources_config(&config, &config_file)?;
-    super::project::cached_state_now()
+    .await
 }
 
 pub(crate) async fn cancel_prepared_source(

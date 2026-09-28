@@ -1,6 +1,12 @@
 # TODO
 
-Roadmap items that aren't scheduled yet. The work port has its own runbook in `WORK_PORT_PLAN.md`.
+Work to do now, before the port. `WORK_PORT_PLAN.md` is the runbook for bringing this into the internal network later.
+
+When an item here lands, update `WORK_PORT_PLAN.md` in the same change so the port stays as small as possible:
+
+- drop steps the item made unnecessary
+- turn code steps into config steps
+- add any new config or facts the port has to supply
 
 ## Marketplace for cloud workers and CI
 
@@ -62,3 +68,23 @@ Needs machine identities.
 - **A headless Linux CLI.** It would need a `cli` Cargo feature without Tauri. `curl` covers both workers and CI.
 - **MCP servers in workers.** They need per-worker config and secrets, which belong to the pool's own deployment.
 - **Marketplace-issued tokens.** Only needed if workers run somewhere without Entra.
+
+## Desktop app performance
+
+Weak Windows VMs with antivirus are the target. The first pass (2026-09-27) made these changes:
+
+- Removed animations, the gradient background and Radix's card layers.
+- Memoized cards and deferred the search filter.
+- Kept agent detection out of state reloads.
+- Moved item command file work onto blocking workers.
+
+What's left, in order of payoff:
+
+- [ ] **Measure on a Windows VM.** Profile scrolling, typing in search, and Install over CDP into WebView2 (see the Windows harness notes), before and after each item below.
+- [ ] **Stop rebuilding the whole state after every click.** `refreshAfterOperation` calls `load_cached_manifest_state`, which rebuilds everything under `operation_lock`. Return the changed item's state from the command instead.
+- [ ] **Persist each activated revision's catalog and digests** to a JSON file next to the revision. Revisions are immutable, and today the first load after launch hashes every skill file again (`catalog.rs:235,253`, `digest.rs:53`).
+- [ ] **Read `choices` and `invocation` once per rebuild**, not once per item and per plan (`project.rs:329`, `planner.rs:174`).
+- [ ] **Memoize `directory_digest_with_leftovers`** (`matching.rs:105`). It re-hashes every edited skill on every rebuild.
+- [ ] **Release `sync_lock` in `run_preflight`** before the network checks (`sync.rs:53-80`), so links and focus syncs don't wait on a slow server.
+- [ ] **Send a small "changed" signal instead of the whole `AppState`** on `scheduled-sync` when nothing but the timestamps moved.
+- [ ] **Compute the program search directories once at startup** (`startup.rs:725-750`).

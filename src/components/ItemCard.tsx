@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, type JSX } from "react";
+import { createContext, memo, useContext, useState, type JSX } from "react";
 import { Badge, Button, Card, DropdownMenu, Heading, Text } from "@radix-ui/themes";
 import { toAppError } from "../ipc/client";
 import type { AppError } from "../ipc/client";
@@ -25,7 +25,7 @@ function isInstalled(status: CatalogItem["status"]): boolean {
   return status === "installed" || status === "updateAvailable" || status === "partiallyInstalled" || status === "modified" || status === "missing";
 }
 
-export function ItemCard({
+export const ItemCard = memo(function ItemCard({
   item,
   busy,
   allBusy,
@@ -173,7 +173,7 @@ export function ItemCard({
       ) : null}
     </Card>
   );
-}
+});
 
 function availableButUnusable(item: CatalogItem): string | null {
   return item.status === "available" ? unusableReason(item) : null;

@@ -1,4 +1,4 @@
-import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { JSX } from "react";
 import { Badge, Button, Callout, Heading, Spinner, Text } from "@radix-ui/themes";
 import { listen } from "@tauri-apps/api/event";
@@ -58,6 +58,7 @@ import type {
   RepositoryState,
   SourceState
 } from "./ipc/schemas";
+import { useStableCallback } from "./lib/stableCallback";
 import { catalogBody, headerProblems, isChecking, isOffline, lastCheckedLabel, missingLinkText, noMatchesText, offlineBanner } from "./lib/connectivity";
 import { bundleMembers, cardDomId, matchesAllWords, ownsSpace, portalUrl, resolveLink } from "./lib/marketplace";
 import type { LinkTarget } from "./lib/marketplace";
@@ -129,6 +130,19 @@ function marked(current: ReadonlyMap<string, SourceAction>, id: string, busy: So
   return next;
 }
 
+/** `next`, with every item equal to one in `current` kept as that object, so a sync or reload that didn't touch a card doesn't re-render it. */
+function withUnchangedItems(current: AppState | null, next: AppState): AppState {
+  if (current === null) {
+    return next;
+  }
+  const before = new Map(current.items.map((item) => [item.id, item]));
+  const items = next.items.map((item) => {
+    const old = before.get(item.id);
+    return old !== undefined && JSON.stringify(old) === JSON.stringify(item) ? old : item;
+  });
+  return { ...next, items };
+}
+
 function backupNotice(lead: string, paths: readonly string[]): InfoNotice {
   return { text: `${lead} ${paths.join(", ")}.`, folder: paths[0] ?? null, caution: false };
 }
@@ -175,6 +189,10 @@ export default function App(): JSX.Element {
   const [appsRequest, setAppsRequest] = useState<AppsRequest | null>(null);
   const [catalogFilter, setCatalogFilter] = useState<CatalogFilter>("all");
   const [catalogSort, setCatalogSort] = useState<CatalogSort>("name");
+  /** A card a link asked for, scrolled to as soon as it is on screen. */
+  const [revealing, setRevealing] = useState<string | null>(null);
+  // Typing stays instant: the field shows `query`, and the catalog catches up with it in the background.
+  const deferredQuery = useDeferredValue(query);
   // Links resolve against the newest state, which an async handler can't read from its closure.
   const stateRef = useRef<AppState | null>(null);
   const linkSeq = useRef(0);
@@ -185,7 +203,7 @@ export default function App(): JSX.Element {
   const applyState = useCallback((next: AppState): void => {
     const fresh = reportNotice(next);
     startTransition(() => {
-      setState(next);
+      setState((current) => withUnchangedItems(current, next));
       if (fresh !== null) {
         setLastReport(fresh);
       }
@@ -230,23 +248,12 @@ export default function App(): JSX.Element {
     }
   }, [applySynced, showSyncError]);
 
-  /** Clears any filter hiding `id`'s card, then scrolls to it and highlights it for a moment. */
+  /** Clears any filter hiding `id`'s card; the effect below scrolls to it once it has rendered. */
   const reveal = useCallback((id: string): void => {
     setQuery("");
     setDriftOnly(false);
     setLinkRequest(null);
-    window.setTimeout(() => {
-      const card = document.getElementById(cardDomId(id));
-      if (card === null) {
-        return;
-      }
-      card.scrollIntoView({ behavior: "smooth", block: "center" });
-      card.classList.add("card-highlight");
-      window.setTimeout(() => {
-        card.classList.remove("card-highlight");
-      }, 2400);
-      // Long enough for the cleared filter (and a just-synced catalog) to render the card.
-    }, 150);
+    setRevealing(id);
   }, []);
 
   /**
@@ -263,7 +270,12 @@ export default function App(): JSX.Element {
       let latest = current;
       let target: LinkTarget | null = current === null || fresh ? null : resolveLink(link, current);
       if (target === null) {
-        latest = await invokeParsed("sync_manifest_state", appStateSchema);
+        setSyncing(true);
+        try {
+          latest = await invokeParsed("sync_manifest_state", appStateSchema);
+        } finally {
+          setSyncing(false);
+        }
         applySynced(latest);
         target = resolveLink(link, latest);
       }
@@ -379,7 +391,7 @@ export default function App(): JSX.Element {
   const itemsBySource = useMemo(() => {
     const grouped = new Map<string, CatalogItem[]>();
     for (const item of state?.items ?? []) {
-      if (!matchesQuery(item, query) || !matchesFilter(item, catalogFilter)) {
+      if (!matchesQuery(item, deferredQuery) || !matchesFilter(item, catalogFilter)) {
         continue;
       }
       if (driftOnly && item.status !== "modified") {
@@ -395,16 +407,34 @@ export default function App(): JSX.Element {
       }
     }
     return grouped;
-  }, [catalogFilter, catalogSort, driftOnly, query, state]);
+  }, [catalogFilter, catalogSort, deferredQuery, driftOnly, state]);
 
-  const filtering = query.trim().length > 0 || driftOnly || catalogFilter !== "all";
+  const filtering = deferredQuery.trim().length > 0 || driftOnly || catalogFilter !== "all";
 
   const visibleBundles = useMemo(() => {
     if (driftOnly || catalogFilter !== "all") {
       return [];
     }
-    return (state?.bundles ?? []).filter((bundle) => matchesAllWords(`${bundle.id} ${bundle.name} ${bundle.description} ${bundle.publisher}`, query));
-  }, [catalogFilter, driftOnly, query, state]);
+    return (state?.bundles ?? []).filter((bundle) => matchesAllWords(`${bundle.id} ${bundle.name} ${bundle.description} ${bundle.publisher}`, deferredQuery));
+  }, [catalogFilter, deferredQuery, driftOnly, state]);
+
+  useEffect(() => {
+    if (revealing === null) {
+      return;
+    }
+    const card = document.getElementById(cardDomId(revealing));
+    if (card === null) {
+      // Not rendered yet: the cleared filter or a just-synced catalog brings it, and this runs again.
+      return;
+    }
+    setRevealing(null);
+    // Instant: a smooth scroll repaints every frame of a long list on a software-rendered VM.
+    card.scrollIntoView({ block: "center" });
+    card.classList.add("card-highlight");
+    window.setTimeout(() => {
+      card.classList.remove("card-highlight");
+    }, 2400);
+  }, [revealing, itemsBySource, visibleBundles]);
 
   const visibleSources = useMemo(() => {
     const sources = state?.sources ?? [];
@@ -783,7 +813,7 @@ export default function App(): JSX.Element {
     setBusyBundles((current) => marked(current, bundle.id, "remove"));
     try {
       await invokeParsed("delete_bundle", unitSchema, { namespace: bundle.namespace, bundleId: bundle.bundleId });
-      await synchronize();
+      settle(synchronize());
     } catch (reason) {
       showActionError(toAppError(reason, `Couldn't delete ${bundle.name}.`));
     } finally {
@@ -959,12 +989,44 @@ export default function App(): JSX.Element {
   const checked = lastCheckedLabel(state);
   const body = catalogBody(state, offlineHint, filtering);
   const view = marketplaceView(state, isOffline(state, offlineHint));
-  const noMatches = noMatchesText(query, driftOnly, visibleSources.length, catalogFilter !== "all");
+  const noMatches = noMatchesText(deferredQuery, driftOnly, visibleSources.length, catalogFilter !== "all");
   const matchCount = [...itemsBySource.values()].reduce((total, items) => total + items.length, 0);
   // With nothing loaded yet, a failure replaces the spinner instead of sitting above it forever.
   const loadFailed = state === null && error !== null && !syncing;
   const report = visibleReport(lastReport, dismissedReport);
   const { items, profiles } = catalogLists(state);
+  // Cards are memoized, so everything they receive keeps its identity across renders.
+  const onItemChange = useStableCallback(changeItem);
+  const onManualChange = useStableCallback(changeManualInvocation);
+  const onBulk = useStableCallback(runBulk);
+  const onRunBundle = useStableCallback(runBundle);
+  const onDeleteBundle = useStableCallback(deleteBundle);
+  const onEditBundle = useStableCallback((bundle: BundleState): void => {
+    setBundleEdit({ bundle });
+  });
+  const onShare = useStableCallback(openShare);
+  const onActionError = useStableCallback(showActionError);
+  const latestExtras = useStableCallback((): CardExtras => cardExtrasFor(view.marketplaceUrl));
+  const hasPortal = view.marketplaceUrl !== null;
+  const cardExtras = useMemo<CardExtras>(
+    () => ({
+      onDetails: hasPortal
+        ? (item) => {
+            latestExtras().onDetails?.(item);
+          }
+        : null,
+      onKeepMine: async (item) => latestExtras().onKeepMine(item),
+      onForceRemove: async (item, componentId) => latestExtras().onForceRemove(item, componentId),
+      onHold: async (item, held) => latestExtras().onHold(item, held),
+      onApps: (item, componentId) => {
+        latestExtras().onApps(item, componentId);
+      },
+      onSettings: (item) => {
+        latestExtras().onSettings(item);
+      }
+    }),
+    [hasPortal, latestExtras]
+  );
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -1090,7 +1152,7 @@ export default function App(): JSX.Element {
           </Button>
         </div>
       ) : (
-        <CardExtrasContext.Provider value={cardExtrasFor(view.marketplaceUrl)}>
+        <CardExtrasContext.Provider value={cardExtras}>
           <div className="sources-list">
             <BundleGroup
               bundles={visibleBundles}
@@ -1099,15 +1161,13 @@ export default function App(): JSX.Element {
               busyBundles={busyBundles}
               busyIds={busyItems}
               allBusy={resetting}
-              onRun={runBundle}
-              onEdit={(bundle) => {
-                setBundleEdit({ bundle });
-              }}
-              onDelete={deleteBundle}
-              onShare={openShare}
-              onItemChange={changeItem}
-              onManualChange={changeManualInvocation}
-              onError={showActionError}
+              onRun={onRunBundle}
+              onEdit={onEditBundle}
+              onDelete={onDeleteBundle}
+              onShare={onShare}
+              onItemChange={onItemChange}
+              onManualChange={onManualChange}
+              onError={onActionError}
             />
             {visibleSources.map((source) => (
               <SourceGroup
@@ -1118,11 +1178,11 @@ export default function App(): JSX.Element {
                 allBusy={resetting || busySources.has(source.sourceId)}
                 running={busySources.get(source.sourceId) ?? null}
                 filtering={filtering}
-                onItemChange={changeItem}
-                onManualChange={changeManualInvocation}
-                onBulk={runBulk}
-                onShare={ownsSpace(view.identity, source.sourceId) ? openShare : undefined}
-                onError={showActionError}
+                onItemChange={onItemChange}
+                onManualChange={onManualChange}
+                onBulk={onBulk}
+                onShare={ownsSpace(view.identity, source.sourceId) ? onShare : undefined}
+                onError={onActionError}
               />
             ))}
           </div>

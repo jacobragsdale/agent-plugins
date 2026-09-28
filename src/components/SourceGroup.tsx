@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import type { JSX } from "react";
 import { Badge, Button, Heading, Text } from "@radix-ui/themes";
 import { toAppError } from "../ipc/client";
@@ -65,6 +66,16 @@ export function SourceGroup({
   const canInstall = !filtering && items.some((item) => supportsBulkAction(item.status, "install"));
   const canReplace = !filtering && items.some((item) => supportsBulkAction(item.status, "replace"));
   const canUninstall = !filtering && items.some((item) => supportsBulkAction(item.status, "uninstall"));
+  // One function for every card, so a memoized card doesn't re-render for a new closure.
+  const shareItem = useMemo(
+    () =>
+      onShare === undefined
+        ? undefined
+        : (shared: CatalogItem): void => {
+            onShare(shared.id, shared.name);
+          },
+    [onShare]
+  );
   return (
     <section className="source-group" id={cardDomId(source.sourceId)}>
       <div className="source-heading">
@@ -153,13 +164,7 @@ export function SourceGroup({
             onChange={onItemChange}
             onManualChange={onManualChange}
             anchor
-            onShare={
-              onShare === undefined || item.marketplace === null
-                ? undefined
-                : (shared) => {
-                    onShare(shared.id, shared.name);
-                  }
-            }
+            onShare={item.marketplace === null ? undefined : shareItem}
             onError={onError}
           />
         ))}

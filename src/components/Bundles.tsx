@@ -55,6 +55,8 @@ export function BundleGroup({
   onManualChange: (item: CatalogItem, manual: boolean, componentId?: string) => Promise<void>;
   onError: (error: AppError) => void;
 }>): JSX.Element | null {
+  // Member cards mount only while their bundle is open: each is a full card with its own menu.
+  const [openBundles, setOpenBundles] = useState<ReadonlySet<string>>(new Set());
   if (bundles.length === 0) {
     return null;
   }
@@ -157,18 +159,35 @@ export function BundleGroup({
                   </Button>
                 </div>
               </div>
-              <details className="component-list">
+              <details
+                className="component-list"
+                open={openBundles.has(bundle.id)}
+                onToggle={(event) => {
+                  const open = event.currentTarget.open;
+                  setOpenBundles((current) => {
+                    const next = new Set(current);
+                    if (open) {
+                      next.add(bundle.id);
+                    } else {
+                      next.delete(bundle.id);
+                    }
+                    return next;
+                  });
+                }}
+              >
                 <summary>Show its skills</summary>
-                <div className="bundle-members">
-                  {summary.members.map((item) => (
-                    <ItemCard key={item.id} item={item} busy={busyIds.has(item.id)} allBusy={busy} anchor={false} onChange={onItemChange} onManualChange={onManualChange} onError={onError} />
-                  ))}
-                  {summary.missing > 0 ? (
-                    <Text as="p" color="gray" size="1">
-                      {String(summary.missing)} more {summary.missing === 1 ? "isn't" : "aren't"} available to you yet.
-                    </Text>
-                  ) : null}
-                </div>
+                {openBundles.has(bundle.id) ? (
+                  <div className="bundle-members">
+                    {summary.members.map((item) => (
+                      <ItemCard key={item.id} item={item} busy={busyIds.has(item.id)} allBusy={busy} anchor={false} onChange={onItemChange} onManualChange={onManualChange} onError={onError} />
+                    ))}
+                    {summary.missing > 0 ? (
+                      <Text as="p" color="gray" size="1">
+                        {String(summary.missing)} more {summary.missing === 1 ? "isn't" : "aren't"} available to you yet.
+                      </Text>
+                    ) : null}
+                  </div>
+                ) : null}
               </details>
             </Card>
           );

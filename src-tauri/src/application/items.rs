@@ -1,4 +1,4 @@
-use super::RuntimeState;
+use super::{run_blocking, RuntimeState};
 use crate::app_state::{BulkAction, BulkFailure, BulkPlan, BulkPlanEntry, BulkResult, ItemsPlan};
 use crate::catalog::{CatalogComponentKind, CatalogItem};
 use crate::executor::ContentState;
@@ -85,6 +85,19 @@ fn report_operation(kind: BulkAction, canonical_ids: &[String]) {
     marketplace::send_events_background(events);
 }
 
+/// Holds `operation_lock` while `task` runs on a blocking worker. Installs
+/// read and write files that antivirus scans, and `fs_retry` sleeps while a
+/// file is locked; neither may occupy one of the few async workers a small VM
+/// has, which every other command needs.
+async fn locked<T, F>(runtime: &RuntimeState, context: &'static str, task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let _guard = runtime.operation_lock.lock().await;
+    run_blocking(context, task).await
+}
+
 pub(crate) async fn install_item(
     runtime: &RuntimeState,
     source_id: &str,
@@ -93,21 +106,31 @@ pub(crate) async fn install_item(
     shown: Option<&Shown>,
     component_id: Option<&str>,
 ) -> Result<OperationOutcome, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
-    check_shown(&item, trust_approved, shown)?;
-    refuse_if_gone(&paths, &cache_base_dir()?, &source, &item)?;
-    let ids = requested_component_ids(&item, component_id)?;
-    let outcome = install::install_item_components_approved(
-        &paths,
-        &source,
-        &snapshot,
-        &item,
-        trust_approved,
-        ids.as_deref(),
-    )?;
-    report_operation(BulkAction::Install, std::slice::from_ref(&item.id));
-    Ok(outcome)
+    let source_id = source_id.to_string();
+    let local_id = local_id.to_string();
+    let shown = shown.cloned();
+    let component_id = component_id.map(str::to_string);
+    locked(runtime, "Install", move || {
+        let source_id = source_id.as_str();
+        let local_id = local_id.as_str();
+        let shown = shown.as_ref();
+        let component_id = component_id.as_deref();
+        let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
+        check_shown(&item, trust_approved, shown)?;
+        refuse_if_gone(&paths, &cache_base_dir()?, &source, &item)?;
+        let ids = requested_component_ids(&item, component_id)?;
+        let outcome = install::install_item_components_approved(
+            &paths,
+            &source,
+            &snapshot,
+            &item,
+            trust_approved,
+            ids.as_deref(),
+        )?;
+        report_operation(BulkAction::Install, std::slice::from_ref(&item.id));
+        Ok(outcome)
+    })
+    .await
 }
 
 pub(crate) async fn replace_item(
@@ -118,21 +141,31 @@ pub(crate) async fn replace_item(
     shown: Option<&Shown>,
     component_id: Option<&str>,
 ) -> Result<OperationOutcome, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
-    check_shown(&item, trust_approved, shown)?;
-    refuse_if_gone(&paths, &cache_base_dir()?, &source, &item)?;
-    let ids = requested_component_ids(&item, component_id)?;
-    let outcome = install::replace_item_components_approved(
-        &paths,
-        &source,
-        &snapshot,
-        &item,
-        trust_approved,
-        ids.as_deref(),
-    )?;
-    report_operation(BulkAction::Replace, std::slice::from_ref(&item.id));
-    Ok(outcome)
+    let source_id = source_id.to_string();
+    let local_id = local_id.to_string();
+    let shown = shown.cloned();
+    let component_id = component_id.map(str::to_string);
+    locked(runtime, "Replace", move || {
+        let source_id = source_id.as_str();
+        let local_id = local_id.as_str();
+        let shown = shown.as_ref();
+        let component_id = component_id.as_deref();
+        let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
+        check_shown(&item, trust_approved, shown)?;
+        refuse_if_gone(&paths, &cache_base_dir()?, &source, &item)?;
+        let ids = requested_component_ids(&item, component_id)?;
+        let outcome = install::replace_item_components_approved(
+            &paths,
+            &source,
+            &snapshot,
+            &item,
+            trust_approved,
+            ids.as_deref(),
+        )?;
+        report_operation(BulkAction::Replace, std::slice::from_ref(&item.id));
+        Ok(outcome)
+    })
+    .await
 }
 
 /// Saves whether the package's skills (or one of them) run only when asked,
@@ -145,57 +178,65 @@ pub(crate) async fn set_manual_invocation(
     component_id: Option<&str>,
     manual: bool,
 ) -> Result<OperationOutcome, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
-    if let Some(component_id) = component_id {
-        crate::planner::validate_component_id(&item, component_id)?;
-    }
-    let skills = item
-        .components
-        .iter()
-        .filter(|component| {
-            component.kind == CatalogComponentKind::Skill
-                && component_id.is_none_or(|id| component.id == id)
-        })
-        .collect::<Vec<_>>();
-    if skills.is_empty() {
-        return Err(format!("{} has no skill to change.", item.id));
-    }
-    let previous = crate::invocation::read(&paths)?;
-    let mut next = previous.clone();
-    for component in &skills {
-        crate::invocation::set(&mut next, &item.id, component, manual);
-    }
-    if next == previous {
-        return Ok(OperationOutcome::default());
-    }
-    crate::invocation::write(&paths, &next)?;
-    let installed = crate::executor::read_ledger(&paths)?
-        .items
-        .get(&item.id)
-        .map(|record| planner::selected_component_ids(record, &item))
-        .unwrap_or_default();
-    let reinstall = skills
-        .iter()
-        .filter(|component| installed.contains(&component.id))
-        .map(|component| component.id.clone())
-        .collect::<Vec<_>>();
-    if reinstall.is_empty() {
-        return Ok(OperationOutcome::default());
-    }
-    install::install_item_components_approved(
-        &paths,
-        &source,
-        &snapshot,
-        &item,
-        false,
-        Some(&reinstall),
-    )
-    .inspect_err(|_| {
-        if let Err(error) = crate::invocation::write(&paths, &previous) {
-            eprintln!("Could not restore the skill invocation choices: {error}");
+    let source_id = source_id.to_string();
+    let local_id = local_id.to_string();
+    let component_id = component_id.map(str::to_string);
+    locked(runtime, "Skill invocation change", move || {
+        let source_id = source_id.as_str();
+        let local_id = local_id.as_str();
+        let component_id = component_id.as_deref();
+        let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
+        if let Some(component_id) = component_id {
+            crate::planner::validate_component_id(&item, component_id)?;
         }
+        let skills = item
+            .components
+            .iter()
+            .filter(|component| {
+                component.kind == CatalogComponentKind::Skill
+                    && component_id.is_none_or(|id| component.id == id)
+            })
+            .collect::<Vec<_>>();
+        if skills.is_empty() {
+            return Err(format!("{} has no skill to change.", item.id));
+        }
+        let previous = crate::invocation::read(&paths)?;
+        let mut next = previous.clone();
+        for component in &skills {
+            crate::invocation::set(&mut next, &item.id, component, manual);
+        }
+        if next == previous {
+            return Ok(OperationOutcome::default());
+        }
+        crate::invocation::write(&paths, &next)?;
+        let installed = crate::executor::read_ledger(&paths)?
+            .items
+            .get(&item.id)
+            .map(|record| planner::selected_component_ids(record, &item))
+            .unwrap_or_default();
+        let reinstall = skills
+            .iter()
+            .filter(|component| installed.contains(&component.id))
+            .map(|component| component.id.clone())
+            .collect::<Vec<_>>();
+        if reinstall.is_empty() {
+            return Ok(OperationOutcome::default());
+        }
+        install::install_item_components_approved(
+            &paths,
+            &source,
+            &snapshot,
+            &item,
+            false,
+            Some(&reinstall),
+        )
+        .inspect_err(|_| {
+            if let Err(error) = crate::invocation::write(&paths, &previous) {
+                eprintln!("Could not restore the skill invocation choices: {error}");
+            }
+        })
     })
+    .await
 }
 
 pub(super) fn requested_component_ids(
@@ -220,43 +261,56 @@ pub(crate) async fn uninstall_item(
     component_id: Option<&str>,
     force: bool,
 ) -> Result<OperationOutcome, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let paths = SystemPaths::from_system()?;
-    let config = config_base_dir()?;
-    let canonical_id = format!("{source_id}/{local_id}");
-    // What is installed decides: a package whose source is no longer
-    // configured, or one installed from a local folder, still comes off.
-    let ledger = crate::executor::read_ledger(&paths)?;
-    let source = match (
-        source::configured_source(&config, source_id),
-        ledger.items.get(&canonical_id),
-    ) {
-        (Ok(source), Some(record)) if source.source_key != record.source_key => {
-            super::project::record_source(&[], record)
+    let source_id = source_id.to_string();
+    let local_id = local_id.to_string();
+    let component_id = component_id.map(str::to_string);
+    locked(runtime, "Uninstall", move || {
+        let source_id = source_id.as_str();
+        let local_id = local_id.as_str();
+        let component_id = component_id.as_deref();
+        let paths = SystemPaths::from_system()?;
+        let config = config_base_dir()?;
+        let canonical_id = format!("{source_id}/{local_id}");
+        // What is installed decides: a package whose source is no longer
+        // configured, or one installed from a local folder, still comes off.
+        let ledger = crate::executor::read_ledger(&paths)?;
+        let source = match (
+            source::configured_source(&config, source_id),
+            ledger.items.get(&canonical_id),
+        ) {
+            (Ok(source), Some(record)) if source.source_key != record.source_key => {
+                super::project::record_source(&[], record)
+            }
+            (Ok(source), _) => source,
+            (Err(_), Some(record)) => super::project::record_source(&[], record),
+            (Err(error), None) => return Err(error),
+        };
+        // A component the package doesn't have installed would uninstall nothing and still report success.
+        if let (Some(component), Some(record)) = (component_id, ledger.items.get(&canonical_id)) {
+            let installed = record
+                .binding_ids
+                .iter()
+                .filter_map(|id| ledger.bindings.get(id))
+                .any(|binding| binding.component_id == component);
+            if !installed {
+                return Err(format!("{canonical_id}/{component} is not installed."));
+            }
         }
-        (Ok(source), _) => source,
-        (Err(_), Some(record)) => super::project::record_source(&[], record),
-        (Err(error), None) => return Err(error),
-    };
-    // A component the package doesn't have installed would uninstall nothing and still report success.
-    if let (Some(component), Some(record)) = (component_id, ledger.items.get(&canonical_id)) {
-        let installed = record
-            .binding_ids
-            .iter()
-            .filter_map(|id| ledger.bindings.get(id))
-            .any(|binding| binding.component_id == component);
-        if !installed {
-            return Err(format!("{canonical_id}/{component} is not installed."));
+        let ids = component_id.map(|component_id| vec![component_id.to_string()]);
+        let outcome = install::uninstall_item_components(
+            &paths,
+            &source,
+            &canonical_id,
+            ids.as_deref(),
+            force,
+        )?;
+        if ids.is_none() {
+            forget_hold(&paths, &canonical_id);
+            report_operation(BulkAction::Uninstall, &[canonical_id]);
         }
-    }
-    let ids = component_id.map(|component_id| vec![component_id.to_string()]);
-    let outcome =
-        install::uninstall_item_components(&paths, &source, &canonical_id, ids.as_deref(), force)?;
-    if ids.is_none() {
-        forget_hold(&paths, &canonical_id);
-        report_operation(BulkAction::Uninstall, &[canonical_id]);
-    }
-    Ok(outcome)
+        Ok(outcome)
+    })
+    .await
 }
 
 /// A hold belongs to the install it was set on; installing again starts fresh.
@@ -276,12 +330,18 @@ pub(crate) async fn keep_my_version(
     source_id: &str,
     local_id: &str,
 ) -> Result<(), String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let paths = SystemPaths::from_system()?;
-    let canonical_id = format!("{source_id}/{local_id}");
-    crate::executor::forget(&paths, &canonical_id)?;
-    forget_hold(&paths, &canonical_id);
-    Ok(())
+    let source_id = source_id.to_string();
+    let local_id = local_id.to_string();
+    locked(runtime, "Keep my version", move || {
+        let source_id = source_id.as_str();
+        let local_id = local_id.as_str();
+        let paths = SystemPaths::from_system()?;
+        let canonical_id = format!("{source_id}/{local_id}");
+        crate::executor::forget(&paths, &canonical_id)?;
+        forget_hold(&paths, &canonical_id);
+        Ok(())
+    })
+    .await
 }
 
 /// Holds a package's background updates, or lets them run again.
@@ -291,23 +351,29 @@ pub(crate) async fn set_held(
     local_id: &str,
     held: bool,
 ) -> Result<(), String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let paths = SystemPaths::from_system()?;
-    let mut choices = crate::choices::read(&paths)?;
-    let id = format!("{source_id}/{local_id}");
-    if held {
-        // A hold belongs to an install; one stored ahead of it would hold the next install from the start.
-        if !crate::executor::read_ledger(&paths)?
-            .items
-            .contains_key(&id)
-        {
-            return Err(format!("{id} is not installed."));
+    let source_id = source_id.to_string();
+    let local_id = local_id.to_string();
+    locked(runtime, "Update hold", move || {
+        let source_id = source_id.as_str();
+        let local_id = local_id.as_str();
+        let paths = SystemPaths::from_system()?;
+        let mut choices = crate::choices::read(&paths)?;
+        let id = format!("{source_id}/{local_id}");
+        if held {
+            // A hold belongs to an install; one stored ahead of it would hold the next install from the start.
+            if !crate::executor::read_ledger(&paths)?
+                .items
+                .contains_key(&id)
+            {
+                return Err(format!("{id} is not installed."));
+            }
+            choices.held.insert(id);
+        } else {
+            choices.held.remove(&id);
         }
-        choices.held.insert(id);
-    } else {
-        choices.held.remove(&id);
-    }
-    crate::choices::write(&paths, &choices)
+        crate::choices::write(&paths, &choices)
+    })
+    .await
 }
 
 /// Keeps a component out of some apps and applies it at once. Leaving an app
@@ -322,69 +388,79 @@ pub(crate) async fn set_excluded_apps(
     trust_approved: bool,
     shown: Option<&Shown>,
 ) -> Result<OperationOutcome, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
-    check_shown(&item, trust_approved, shown)?;
-    planner::validate_component_id(&item, component_id)?;
-    // Skills share one folder across apps, so only a connector can be kept out of some (ADR 0008).
-    if item.components.iter().any(|component| {
-        component.id == component_id && component.kind != CatalogComponentKind::McpServer
-    }) {
-        return Err(format!(
-            "{component_id} is a skill; only a connector can be kept out of some apps."
-        ));
-    }
-    if let Some(unknown) = excluded.iter().find(|id| {
-        !crate::agent_profiles::TargetId::ALL
-            .iter()
-            .any(|target| target.as_str() == id.as_str())
-    }) {
-        return Err(format!("{unknown} is not an app Agent Plugins knows."));
-    }
-    let previous = crate::choices::read(&paths)?;
-    let before = previous.excluded(&item.id, component_id);
-    let excluded = excluded.into_iter().collect::<BTreeSet<_>>();
-    let mut next = previous.clone();
-    next.set_excluded(&item.id, component_id, excluded.clone());
-    if next == previous {
-        return Ok(OperationOutcome::default());
-    }
-    crate::choices::write(&paths, &next)?;
-    let restore = |_: &String| {
-        if let Err(error) = crate::choices::write(&paths, &previous) {
-            eprintln!("Could not restore the app choices: {error}");
+    let source_id = source_id.to_string();
+    let local_id = local_id.to_string();
+    let component_id = component_id.to_string();
+    let shown = shown.cloned();
+    locked(runtime, "App choice", move || {
+        let source_id = source_id.as_str();
+        let local_id = local_id.as_str();
+        let component_id = component_id.as_str();
+        let shown = shown.as_ref();
+        let (paths, source, snapshot, item) = item_context(source_id, local_id)?;
+        check_shown(&item, trust_approved, shown)?;
+        planner::validate_component_id(&item, component_id)?;
+        // Skills share one folder across apps, so only a connector can be kept out of some (ADR 0008).
+        if item.components.iter().any(|component| {
+            component.id == component_id && component.kind != CatalogComponentKind::McpServer
+        }) {
+            return Err(format!(
+                "{component_id} is a skill; only a connector can be kept out of some apps."
+            ));
         }
-    };
-
-    let installed = crate::executor::read_ledger(&paths)?
-        .items
-        .get(&item.id)
-        .is_some_and(|record| {
-            planner::selected_component_ids(record, &item)
+        if let Some(unknown) = excluded.iter().find(|id| {
+            !crate::agent_profiles::TargetId::ALL
                 .iter()
-                .any(|id| id == component_id)
-        });
-    if !installed {
-        return Ok(OperationOutcome::default());
-    }
-    // Only keeping it out of more apps: take it out of those, nothing else.
-    if before.iter().all(|app| excluded.contains(app)) {
-        let newly = excluded
-            .into_iter()
-            .filter(|app| !before.contains(app))
-            .collect::<BTreeSet<_>>();
-        return crate::executor::release_component(&paths, &item.id, component_id, &newly)
-            .inspect_err(restore);
-    }
-    install::install_item_components_approved(
-        &paths,
-        &source,
-        &snapshot,
-        &item,
-        trust_approved,
-        Some(&[component_id.to_string()]),
-    )
-    .inspect_err(restore)
+                .any(|target| target.as_str() == id.as_str())
+        }) {
+            return Err(format!("{unknown} is not an app Agent Plugins knows."));
+        }
+        let previous = crate::choices::read(&paths)?;
+        let before = previous.excluded(&item.id, component_id);
+        let excluded = excluded.into_iter().collect::<BTreeSet<_>>();
+        let mut next = previous.clone();
+        next.set_excluded(&item.id, component_id, excluded.clone());
+        if next == previous {
+            return Ok(OperationOutcome::default());
+        }
+        crate::choices::write(&paths, &next)?;
+        let restore = |_: &String| {
+            if let Err(error) = crate::choices::write(&paths, &previous) {
+                eprintln!("Could not restore the app choices: {error}");
+            }
+        };
+
+        let installed = crate::executor::read_ledger(&paths)?
+            .items
+            .get(&item.id)
+            .is_some_and(|record| {
+                planner::selected_component_ids(record, &item)
+                    .iter()
+                    .any(|id| id == component_id)
+            });
+        if !installed {
+            return Ok(OperationOutcome::default());
+        }
+        // Only keeping it out of more apps: take it out of those, nothing else.
+        if before.iter().all(|app| excluded.contains(app)) {
+            let newly = excluded
+                .into_iter()
+                .filter(|app| !before.contains(app))
+                .collect::<BTreeSet<_>>();
+            return crate::executor::release_component(&paths, &item.id, component_id, &newly)
+                .inspect_err(restore);
+        }
+        install::install_item_components_approved(
+            &paths,
+            &source,
+            &snapshot,
+            &item,
+            trust_approved,
+            Some(&[component_id.to_string()]),
+        )
+        .inspect_err(restore)
+    })
+    .await
 }
 
 /// Saves connector settings such as API keys where the person's AI apps read
@@ -396,7 +472,11 @@ pub(crate) async fn save_connector_settings(
         .into_iter()
         .map(|(name, value)| (name, value.trim().to_string()))
         .collect::<Vec<_>>();
-    crate::startup::save_user_variables(&values)
+    // Announcing the change to every window can wait seconds on a hung one.
+    run_blocking("Connector settings", move || {
+        crate::startup::save_user_variables(&values)
+    })
+    .await
 }
 
 pub(crate) async fn bulk_plan(
@@ -404,25 +484,29 @@ pub(crate) async fn bulk_plan(
     source_id: &str,
     action: BulkAction,
 ) -> Result<BulkPlan, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let paths = SystemPaths::from_system()?;
-    let cache = cache_base_dir()?;
-    let config = config_base_dir()?;
-    let source = source::configured_source(&config, source_id)?;
-    let snapshot = source::load_current(&cache, &source)?
-        .ok_or_else(|| format!("{} has no validated revision.", source.source_id))?;
-    let ledger_state = crate::executor::read_ledger(&paths)?;
-    Ok(BulkPlan {
-        entries: plan_entries(
-            &paths,
-            &ledger_state,
-            &snapshot,
-            snapshot.catalog.items.values(),
+    let source_id = source_id.to_string();
+    locked(runtime, "Bulk plan", move || {
+        let source_id = source_id.as_str();
+        let paths = SystemPaths::from_system()?;
+        let cache = cache_base_dir()?;
+        let config = config_base_dir()?;
+        let source = source::configured_source(&config, source_id)?;
+        let snapshot = source::load_current(&cache, &source)?
+            .ok_or_else(|| format!("{} has no validated revision.", source.source_id))?;
+        let ledger_state = crate::executor::read_ledger(&paths)?;
+        Ok(BulkPlan {
+            entries: plan_entries(
+                &paths,
+                &ledger_state,
+                &snapshot,
+                snapshot.catalog.items.values(),
+                action,
+            ),
+            source_id: source.source_id,
             action,
-        ),
-        source_id: source.source_id,
-        action,
+        })
     })
+    .await
 }
 
 /// What `action` does to each of `items`: a whole source's, or the packages a
@@ -538,17 +622,21 @@ pub(crate) async fn plan_items(
     ids: &[String],
     action: BulkAction,
 ) -> Result<ItemsPlan, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let paths = SystemPaths::from_system()?;
-    let ledger_state = crate::executor::read_ledger(&paths)?;
-    let (sources, _) = item_sources(ids)?;
-    let entries = sources
-        .iter()
-        .flat_map(|(_, snapshot, items)| {
-            plan_entries(&paths, &ledger_state, snapshot, items, action)
-        })
-        .collect();
-    Ok(ItemsPlan { action, entries })
+    let ids = ids.to_vec();
+    locked(runtime, "Plan", move || {
+        let ids = ids.as_slice();
+        let paths = SystemPaths::from_system()?;
+        let ledger_state = crate::executor::read_ledger(&paths)?;
+        let (sources, _) = item_sources(ids)?;
+        let entries = sources
+            .iter()
+            .flat_map(|(_, snapshot, items)| {
+                plan_entries(&paths, &ledger_state, snapshot, items, action)
+            })
+            .collect();
+        Ok(ItemsPlan { action, entries })
+    })
+    .await
 }
 
 pub(crate) async fn bulk_run(
@@ -576,61 +664,67 @@ pub(crate) async fn run_items(
     shown: Option<&Shown>,
 ) -> Result<BulkResult, String> {
     let plan = plan_items(runtime, ids, action).await?;
-    let _guard = runtime.operation_lock.lock().await;
-    let paths = SystemPaths::from_system()?;
-    let (sources, missing) = item_sources(ids)?;
-    let mut result = BulkResult {
-        completed: Vec::new(),
-        failures: Vec::new(),
-        backup_paths: Vec::new(),
-    };
-    if action != BulkAction::Uninstall {
-        result.failures = missing
-            .into_iter()
-            .map(|id| BulkFailure {
-                message: format!(
-                    "{id} isn't available on this computer yet. Refresh, then try again."
-                ),
-                id,
-            })
-            .collect();
-    }
-    // Each package is its own transaction, so one that fails its checks
-    // leaves the others to finish and reports its own message.
-    for entry in plan.entries.into_iter().filter(|entry| entry.will_run) {
-        let Some((source, snapshot, _)) = sources
-            .iter()
-            .find(|(_, _, items)| items.iter().any(|item| item.id == entry.id))
-        else {
-            continue;
+    let ids = ids.to_vec();
+    let shown = shown.cloned();
+    locked(runtime, "Batch", move || {
+        let ids = ids.as_slice();
+        let shown = shown.as_ref();
+        let paths = SystemPaths::from_system()?;
+        let (sources, missing) = item_sources(ids)?;
+        let mut result = BulkResult {
+            completed: Vec::new(),
+            failures: Vec::new(),
+            backup_paths: Vec::new(),
         };
-        let outcome = match action {
-            BulkAction::Install | BulkAction::Replace => bulk_install(
-                &paths,
-                source,
-                snapshot,
-                &entry,
-                action,
-                trust_approved,
-                shown,
-            ),
-            BulkAction::Uninstall => {
-                install::uninstall_item_components(&paths, source, &entry.id, None, false)
-            }
-        };
-        match outcome {
-            Ok(outcome) => {
-                result.completed.push(entry.id);
-                result.backup_paths.extend(outcome.backup_paths);
-            }
-            Err(message) => result.failures.push(BulkFailure {
-                id: entry.id,
-                message,
-            }),
+        if action != BulkAction::Uninstall {
+            result.failures = missing
+                .into_iter()
+                .map(|id| BulkFailure {
+                    message: format!(
+                        "{id} isn't available on this computer yet. Refresh, then try again."
+                    ),
+                    id,
+                })
+                .collect();
         }
-    }
-    report_operation(action, &result.completed);
-    Ok(result)
+        // Each package is its own transaction, so one that fails its checks
+        // leaves the others to finish and reports its own message.
+        for entry in plan.entries.into_iter().filter(|entry| entry.will_run) {
+            let Some((source, snapshot, _)) = sources
+                .iter()
+                .find(|(_, _, items)| items.iter().any(|item| item.id == entry.id))
+            else {
+                continue;
+            };
+            let outcome = match action {
+                BulkAction::Install | BulkAction::Replace => bulk_install(
+                    &paths,
+                    source,
+                    snapshot,
+                    &entry,
+                    action,
+                    trust_approved,
+                    shown,
+                ),
+                BulkAction::Uninstall => {
+                    install::uninstall_item_components(&paths, source, &entry.id, None, false)
+                }
+            };
+            match outcome {
+                Ok(outcome) => {
+                    result.completed.push(entry.id);
+                    result.backup_paths.extend(outcome.backup_paths);
+                }
+                Err(message) => result.failures.push(BulkFailure {
+                    id: entry.id,
+                    message,
+                }),
+            }
+        }
+        report_operation(action, &result.completed);
+        Ok(result)
+    })
+    .await
 }
 
 /// What the window's approval dialog showed: the digest of each package in it.
@@ -720,11 +814,15 @@ pub(crate) async fn plan_source_removal(
     runtime: &RuntimeState,
     source_id: &str,
 ) -> Result<SourceRemovalPlan, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let paths = SystemPaths::from_system()?;
-    let config = config_base_dir()?;
-    let source = source::configured_source(&config, source_id)?;
-    install::source_removal_plan(&paths, &source)
+    let source_id = source_id.to_string();
+    locked(runtime, "Source removal plan", move || {
+        let source_id = source_id.as_str();
+        let paths = SystemPaths::from_system()?;
+        let config = config_base_dir()?;
+        let source = source::configured_source(&config, source_id)?;
+        install::source_removal_plan(&paths, &source)
+    })
+    .await
 }
 
 pub(crate) async fn remove_source(
@@ -732,126 +830,133 @@ pub(crate) async fn remove_source(
     source_id: &str,
     acknowledge_modified_paths: bool,
 ) -> Result<BulkResult, String> {
-    let _guard = runtime.operation_lock.lock().await;
-    let paths = SystemPaths::from_system()?;
-    let cache = cache_base_dir()?;
-    let config = config_base_dir()?;
-    let source = source::configured_source(&config, source_id)?;
-    let plan = install::source_removal_plan(&paths, &source)?;
-    if plan
-        .items
-        .iter()
-        .flat_map(|item| &item.paths)
-        .any(|path| path.modified)
-        && !acknowledge_modified_paths
-    {
-        return Err(
+    let source_id = source_id.to_string();
+    locked(runtime, "Source removal", move || {
+        let source_id = source_id.as_str();
+        let paths = SystemPaths::from_system()?;
+        let cache = cache_base_dir()?;
+        let config = config_base_dir()?;
+        let source = source::configured_source(&config, source_id)?;
+        let plan = install::source_removal_plan(&paths, &source)?;
+        if plan
+            .items
+            .iter()
+            .flat_map(|item| &item.paths)
+            .any(|path| path.modified)
+            && !acknowledge_modified_paths
+        {
+            return Err(
             "Source cleanup includes locally modified paths. Confirm the warning before continuing."
                 .to_string(),
         );
-    }
-    let records = crate::executor::read_ledger(&paths)?
-        .items
-        .values()
-        .filter(|record| record.source_key == source.source_key)
-        .map(|record| format!("{}/{}", record.source_id, record.local_id))
-        .collect::<Vec<_>>();
-    let mut result = BulkResult {
-        completed: Vec::new(),
-        failures: Vec::new(),
-        backup_paths: Vec::new(),
-    };
-    for id in records {
-        match install::uninstall_item_components(
-            &paths,
-            &source,
-            &id,
-            None,
-            acknowledge_modified_paths,
-        ) {
-            Ok(outcome) => {
-                result.completed.push(id);
-                result.backup_paths.extend(outcome.backup_paths);
-            }
-            Err(message) => result.failures.push(BulkFailure { id, message }),
         }
-    }
-    report_operation(BulkAction::Uninstall, &result.completed);
-    // The source stays configured while any of its packages is still installed.
-    if !result.failures.is_empty() {
-        return Ok(result);
-    }
-    let mut config_file = source::read_sources_config(&config)?;
-    config_file
-        .sources
-        .retain(|configured| configured.source_key != source.source_key);
-    source::write_sources_config(&config, &config_file)?;
-    // The source is gone once the configuration says so; a cache file held by
-    // antivirus or the indexer is swept by a later sync.
-    if let Err(error) = source::remove_source_cache(&cache, &source.source_key) {
-        eprintln!(
-            "Could not remove the cache of {}: {error}",
-            source.source_id
-        );
-    }
-    Ok(result)
+        let records = crate::executor::read_ledger(&paths)?
+            .items
+            .values()
+            .filter(|record| record.source_key == source.source_key)
+            .map(|record| format!("{}/{}", record.source_id, record.local_id))
+            .collect::<Vec<_>>();
+        let mut result = BulkResult {
+            completed: Vec::new(),
+            failures: Vec::new(),
+            backup_paths: Vec::new(),
+        };
+        for id in records {
+            match install::uninstall_item_components(
+                &paths,
+                &source,
+                &id,
+                None,
+                acknowledge_modified_paths,
+            ) {
+                Ok(outcome) => {
+                    result.completed.push(id);
+                    result.backup_paths.extend(outcome.backup_paths);
+                }
+                Err(message) => result.failures.push(BulkFailure { id, message }),
+            }
+        }
+        report_operation(BulkAction::Uninstall, &result.completed);
+        // The source stays configured while any of its packages is still installed.
+        if !result.failures.is_empty() {
+            return Ok(result);
+        }
+        let mut config_file = source::read_sources_config(&config)?;
+        config_file
+            .sources
+            .retain(|configured| configured.source_key != source.source_key);
+        source::write_sources_config(&config, &config_file)?;
+        // The source is gone once the configuration says so; a cache file held by
+        // antivirus or the indexer is swept by a later sync.
+        if let Err(error) = source::remove_source_cache(&cache, &source.source_key) {
+            eprintln!(
+                "Could not remove the cache of {}: {error}",
+                source.source_id
+            );
+        }
+        Ok(result)
+    })
+    .await
 }
 
 pub(crate) async fn reset_app(runtime: &RuntimeState) -> Result<BulkResult, String> {
     let _sync_guard = runtime.sync_lock.lock().await;
     let _guard = runtime.operation_lock.lock().await;
     discard_pending(runtime).await;
-    let paths = SystemPaths::from_system()?;
-    let cache = cache_base_dir()?;
-    let config = config_base_dir()?;
-    let sources = source::read_sources_config(&config)?
-        .sources
-        .into_iter()
-        .map(|source| {
-            let snapshot = source::load_current(&cache, &source).ok().flatten();
-            (source, snapshot)
-        })
-        .collect::<Vec<_>>();
-    // Reset must work when the ledger cannot be read; the executor then
-    // removes what it can find and the state wipe takes the rest.
-    let records = crate::executor::read_ledger(&paths)
-        .map(|ledger| ledger.items.into_keys().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let outcome = match crate::executor::reset_app(&paths, &sources) {
-        Ok(outcome) => outcome,
-        Err(message) => {
-            let failures = records
-                .into_iter()
-                .map(|id| BulkFailure {
-                    id,
-                    message: format!("App reset transaction rolled back: {message}"),
-                })
-                .collect();
+    run_blocking("Reset", move || {
+        let paths = SystemPaths::from_system()?;
+        let cache = cache_base_dir()?;
+        let config = config_base_dir()?;
+        let sources = source::read_sources_config(&config)?
+            .sources
+            .into_iter()
+            .map(|source| {
+                let snapshot = source::load_current(&cache, &source).ok().flatten();
+                (source, snapshot)
+            })
+            .collect::<Vec<_>>();
+        // Reset must work when the ledger cannot be read; the executor then
+        // removes what it can find and the state wipe takes the rest.
+        let records = crate::executor::read_ledger(&paths)
+            .map(|ledger| ledger.items.into_keys().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let outcome = match crate::executor::reset_app(&paths, &sources) {
+            Ok(outcome) => outcome,
+            Err(message) => {
+                let failures = records
+                    .into_iter()
+                    .map(|id| BulkFailure {
+                        id,
+                        message: format!("App reset transaction rolled back: {message}"),
+                    })
+                    .collect();
+                return Ok(BulkResult {
+                    completed: Vec::new(),
+                    failures,
+                    backup_paths: Vec::new(),
+                });
+            }
+        };
+        if crate::executor::read_ledger(&paths)
+            .is_ok_and(|ledger| !ledger.read_only && !ledger.items.is_empty())
+        {
             return Ok(BulkResult {
                 completed: Vec::new(),
-                failures,
+                failures: vec![BulkFailure {
+                    id: "app".to_string(),
+                    message: "Resources were reset, but ledger cleanup was incomplete.".to_string(),
+                }],
                 backup_paths: Vec::new(),
             });
         }
-    };
-    if crate::executor::read_ledger(&paths)
-        .is_ok_and(|ledger| !ledger.read_only && !ledger.items.is_empty())
-    {
-        return Ok(BulkResult {
-            completed: Vec::new(),
-            failures: vec![BulkFailure {
-                id: "app".to_string(),
-                message: "Resources were reset, but ledger cleanup was incomplete.".to_string(),
-            }],
-            backup_paths: Vec::new(),
-        });
-    }
-    wipe_app_state(&paths)?;
-    Ok(BulkResult {
-        completed: records,
-        failures: Vec::new(),
-        backup_paths: outcome.backup_paths,
+        wipe_app_state(&paths)?;
+        Ok(BulkResult {
+            completed: records,
+            failures: Vec::new(),
+            backup_paths: outcome.backup_paths,
+        })
     })
+    .await
 }
 
 async fn discard_pending(runtime: &RuntimeState) {

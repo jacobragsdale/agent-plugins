@@ -137,7 +137,7 @@ async fn synchronize(runtime: &RuntimeState) -> Result<AppState, String> {
     };
     let fetched = run_blocking("Source download", move || {
         // A sync is the app looking at the machine again, agents included.
-        agent_profiles::clear_detection_cache();
+        agent_profiles::expire_detection_cache();
         crate::marketplace::reset_http_clients();
         Ok(fetch_all(&cache_base_dir()?, config))
     })

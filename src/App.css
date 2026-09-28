@@ -11,7 +11,6 @@
   color: #f5f7f8;
   background: #08090a;
   font-synthesis: none;
-  text-rendering: optimizeLegibility;
   --canvas: #08090a;
   --surface: #101315;
   --surface-raised: #171b1e;
@@ -47,7 +46,7 @@ button {
 #root > .radix-themes {
   min-height: 100vh;
   color: var(--text);
-  background: radial-gradient(circle at 15% 0%, rgba(36, 158, 216, 0.13), transparent 34rem), linear-gradient(180deg, #0b0d0f, var(--canvas) 72%);
+  background: var(--canvas);
   --default-font-family: "Helvetica Neue", "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif;
   --heading-font-family: var(--default-font-family);
 }
@@ -202,7 +201,7 @@ button {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: rgba(16, 19, 21, 0.94);
+  background: var(--surface);
 }
 
 .source-heading {
@@ -396,13 +395,22 @@ button {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    scroll-behavior: auto !important;
-    transition-duration: 0.01ms !important;
-  }
+/*
+  Weak Windows VMs often composite in software, so every animated frame
+  repaints. Nothing here animates except the spinner: dialogs and menus open
+  and close at once, and Radix's presence logic sees no animation to wait for.
+*/
+*:not(.rt-SpinnerLeaf),
+*::before,
+*::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+/* Radix paints each card's background and border as two extra layers; every card here draws its own. */
+.rt-Card::before,
+.rt-Card::after {
+  content: none;
 }
 
 .marketplace-meta {
@@ -576,7 +584,6 @@ button {
 .card-highlight {
   outline: 2px solid var(--accent-9);
   outline-offset: 2px;
-  transition: outline-color 0.4s ease;
 }
 
 .form-grid {

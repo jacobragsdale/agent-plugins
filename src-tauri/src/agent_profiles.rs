@@ -16,7 +16,7 @@ const PROFILES_FILE: &str = "agent-profiles.json";
 const PROFILES_BACKUP_FILE: &str = "agent-profiles.json.previous";
 const PROFILES_VERSION: u8 = 1;
 const DETECTION_TIMEOUT: Duration = Duration::from_secs(3);
-const DETECTION_CACHE_TTL: Duration = Duration::from_secs(60);
+const DETECTION_FRESH_FOR: Duration = Duration::from_secs(60);
 
 /// MSIX package family of Claude Desktop on Windows.
 pub(crate) const CLAUDE_DESKTOP_MSIX: &str = "Claude_pzs8sxrjxfjjc";
@@ -345,9 +345,10 @@ struct Detection {
     inconclusive: bool,
 }
 
-/// Detection runs `<agent> --version` for most targets, so a burst of state
-/// reloads would spawn a process per agent per reload. Remember what it found
-/// for a short while; a sync or an on-demand preflight starts over.
+/// Detection runs `<agent> --version` for most targets, and under antivirus
+/// each launch can take seconds. What it found is kept until a sync, a window
+/// focus, or diagnostics looks again, so reloading the window's state after a
+/// click never launches a process.
 fn detection_cache() -> &'static Mutex<BTreeMap<TargetId, (Instant, Detection)>> {
     static CACHE: OnceLock<Mutex<BTreeMap<TargetId, (Instant, Detection)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
@@ -360,12 +361,19 @@ pub(crate) fn clear_detection_cache() {
     }
 }
 
+/// Forgets detections older than a minute. A sync right after the window
+/// opened or regained focus reuses what that just found instead of launching
+/// every agent a second time.
+pub(crate) fn expire_detection_cache() {
+    if let Ok(mut cache) = detection_cache().lock() {
+        cache.retain(|_, (found_at, _)| found_at.elapsed() < DETECTION_FRESH_FOR);
+    }
+}
+
 fn detect(target: TargetId) -> Detection {
     if let Ok(cache) = detection_cache().lock() {
-        if let Some((found_at, detection)) = cache.get(&target) {
-            if found_at.elapsed() < DETECTION_CACHE_TTL {
-                return detection.clone();
-            }
+        if let Some((_, detection)) = cache.get(&target) {
+            return detection.clone();
         }
     }
     let detection = detect_now(target);
