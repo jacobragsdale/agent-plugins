@@ -277,9 +277,10 @@ pub fn discover(input: &Path, namespace: &str) -> Result<Discovery, String> {
                         });
                     }
                 }
-                Err(error) => discovery
-                    .errors
-                    .push((path, error.replace(&format!("{}/", root.display()), ""))),
+                Err(error) => discovery.errors.push((
+                    path,
+                    error.replace(&skill_md.display().to_string(), &relative(&skill_md)),
+                )),
             }
             continue;
         }
