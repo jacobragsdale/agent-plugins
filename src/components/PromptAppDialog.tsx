@@ -8,7 +8,10 @@ import { returnFocus } from "../lib/returnFocus";
 export type PromptPurpose = "tutorial" | "create";
 
 const COPY: Readonly<Record<PromptPurpose, Readonly<{ title: string; description: string }>>> = {
-  tutorial: { title: "Try a skill", description: "Agent Plugins adds a small sample skill, then opens the app you pick with a message that uses it. Nothing is closed." },
+  tutorial: {
+    title: "Try a skill",
+    description: "Agent Plugins adds a sample skill, then opens the app you pick with a message that uses it. The skill walks you through making and sharing your own. Nothing is closed."
+  },
   create: {
     title: "Create a skill",
     description: "Pick the AI app that will help you write the skill. It asks what the skill should do, writes it, and shares it on the marketplace when you're ready."

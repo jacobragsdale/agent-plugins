@@ -28,7 +28,7 @@ export function TutorialNotice({ visible, onStart, onDismiss }: Readonly<{ visib
   return (
     <Callout.Root className="app-callout" color="blue" role="status">
       <div className="callout-content">
-        <Callout.Text>New to skills? See one work: Agent Plugins adds a sample skill and opens one of your AI apps with a message that uses it.</Callout.Text>
+        <Callout.Text>New to skills? Agent Plugins adds a sample skill and opens one of your AI apps with it, which walks you through making a skill of your own and sharing it.</Callout.Text>
         <div className="callout-actions">
           <Button className="callout-action" size="1" onClick={onStart}>
             Show me

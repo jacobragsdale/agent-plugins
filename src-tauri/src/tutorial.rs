@@ -1,5 +1,6 @@
 //! Opening an AI app with a prompt: which detected apps can take one, the
-//! skill tutorial (a sample skill, then a prompt that uses it), and **Create a
+//! skill tutorial (a sample skill that walks the person through making and
+//! publishing their own, then a prompt that uses it), and **Create a
 //! skill** (a prompt that has the app's agent write and publish one). No app
 //! is closed first: every one of them picks up a new skill while it runs.
 
@@ -30,7 +31,11 @@ description: Answers a message that calls the agent-plugins-tutorial skill by na
 
 Greet the person in one short sentence. Then explain, in two plain sentences, that
 Agent Plugins installed this skill a moment ago and that skills teach the AI app how
-to do a particular job.
+to do a particular job. Say that this one walks them through making a skill of their
+own and sharing it, then ask the first question of step 1 below.
+
+From there, do what this request asks, as if the person had sent it:
+
 ";
 /// Everything the agent needs to interview the person, write a skill, and
 /// publish it; `create_prompt` fills in `{cli}` and `{skill}`. The app gets it
@@ -97,10 +102,15 @@ fn label(app: App) -> &'static str {
 /// skill. Returns what the person does next.
 pub(crate) fn run(paths: &SystemPaths, app: App) -> Result<String, String> {
     let program = program(app)?;
-    write_skill(&skills_root(app, paths)?)?;
+    let skills = skills_root(app, paths)?;
+    let text = format!("{SKILL}{}", create_prompt(&skills, &command_line()?));
+    write_skill(&skills, &text)?;
     open(app, &program, &tutorial_prompt(app), paths)?;
     dismiss(paths)?;
-    Ok(next_step(app))
+    Ok(format!(
+        "{} It will show you how to make a skill of your own, one question at a time.",
+        next_step(app)
+    ))
 }
 
 /// Stops offering the tutorial, after it ran or when the person says not now.
@@ -179,11 +189,11 @@ fn tutorial_prompt(app: App) -> String {
 /// Writes the sample skill into a sibling folder and renames it into `root`,
 /// replacing any earlier copy: VS Code watches `root` alone, so it would miss
 /// a SKILL.md written into a folder it has already seen appear.
-fn write_skill(root: &Path) -> Result<(), String> {
+fn write_skill(root: &Path, text: &str) -> Result<(), String> {
     let skill = root.join(SKILL_NAME);
     let staging = crate::sources::temporary_path(root, SKILL_NAME);
     let written = fs_retry::create_dir_all(&staging)
-        .and_then(|()| fs_retry::write_synced(&staging.join("SKILL.md"), SKILL.as_bytes()))
+        .and_then(|()| fs_retry::write_synced(&staging.join("SKILL.md"), text.as_bytes()))
         .and_then(|()| remove_if_present(&skill))
         .and_then(|()| fs_retry::rename(&staging, &skill));
     if written.is_err() {
@@ -680,7 +690,7 @@ mod tests {
         let old = skills.join(SKILL_NAME);
         std::fs::create_dir_all(&old).expect("old skill");
         std::fs::write(old.join("notes.txt"), "old").expect("old file");
-        write_skill(&skills).expect("write");
+        write_skill(&skills, SKILL).expect("write");
         assert_eq!(
             std::fs::read_to_string(old.join("SKILL.md")).expect("skill"),
             SKILL
