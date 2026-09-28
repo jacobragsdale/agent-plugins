@@ -243,16 +243,6 @@ export async function reviewReset(): Promise<boolean> {
   });
 }
 
-// Closing the app is the one thing here that can cost the person work, so they agree to it first.
-export async function reviewTutorial(app: string): Promise<boolean> {
-  return confirm(`This closes ${app} if it's open, adds a small tutorial skill, then reopens ${app} with a prompt that uses it. Save your work in ${app} first.`, {
-    title: "Try a skill",
-    kind: "info",
-    okLabel: `Close and reopen ${app}`,
-    cancelLabel: "Cancel"
-  });
-}
-
 export async function reviewBulk(source: SourceState, action: BulkAction, plan: BulkPlan): Promise<boolean> {
   const eligible = plan.entries.filter((entry) => entry.willRun);
   const labels = bulkLabels(action);

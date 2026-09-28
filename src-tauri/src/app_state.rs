@@ -276,8 +276,10 @@ pub(crate) struct AppState {
     pub(crate) items: Vec<CatalogItemState>,
     pub(crate) bundles: Vec<BundleState>,
     pub(crate) agent_profiles: Vec<AgentProfileState>,
-    /// The detected app the skill tutorial can demonstrate, until it has run.
-    pub(crate) tutorial: Option<crate::agent_profiles::TargetId>,
+    /// Offer the skill tutorial: it hasn't run, and some app can take a prompt.
+    pub(crate) tutorial_offered: bool,
+    /// Detected apps that can be opened with a prompt, in picker order.
+    pub(crate) prompt_apps: Vec<PromptApp>,
     pub(crate) marketplace_url: Option<String>,
     /// Where a person downloads a newer client, when the build configures one.
     pub(crate) download_url: Option<String>,
@@ -287,6 +289,15 @@ pub(crate) struct AppState {
     pub(crate) notifications: Vec<crate::marketplace::Notification>,
     /// Where the app writes its log, for "Open logs".
     pub(crate) log_path: Option<String>,
+}
+
+/// An app the tutorial and **Create a skill** can open with a prompt.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PromptApp {
+    pub(crate) id: crate::app_locations::App,
+    pub(crate) target_id: crate::agent_profiles::TargetId,
+    pub(crate) label: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -706,7 +717,19 @@ mod tests {
                     true,
                 ),
             ],
-            tutorial: Some(TargetId::Cursor),
+            tutorial_offered: true,
+            prompt_apps: vec![
+                PromptApp {
+                    id: crate::app_locations::App::Cursor,
+                    target_id: TargetId::Cursor,
+                    label: "Cursor",
+                },
+                PromptApp {
+                    id: crate::app_locations::App::ClaudeDesktop,
+                    target_id: TargetId::ClaudeDesktop,
+                    label: "Claude Desktop",
+                },
+            ],
             marketplace_url: Some(text("https://marketplace.ragsdale.dev")),
             download_url: None,
             identity: Some(MarketplaceIdentity {
@@ -850,7 +873,8 @@ mod tests {
                 marketplace: None,
             }],
             agent_profiles: Vec::new(),
-            tutorial: None,
+            tutorial_offered: false,
+            prompt_apps: Vec::new(),
             marketplace_url: None,
             download_url: None,
             identity: None,

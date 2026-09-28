@@ -483,7 +483,56 @@ pub(crate) fn save_user_variables(values: &[(String, String)]) -> Result<(), Str
 }
 
 pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
-    find_tool(&LiveHost, name)
+    find_tool(&LiveHost, name).or_else(|| {
+        login_shell_path()
+            .iter()
+            .find_map(|dir| find_tool_in_dir(&LiveHost, dir, name))
+    })
+}
+
+/// A Finder-launched app gets launchd's bare PATH, and `launchctl getenv
+/// PATH` holds at most what Agent Plugins put there, so programs from version
+/// managers (nvm, volta, fnm) and custom npm prefixes are missed. Ask the
+/// login shell once, as VS Code does; one that hangs or prints nothing adds
+/// nothing. Only asked when the usual places come up empty.
+#[cfg(target_os = "macos")]
+fn login_shell_path() -> &'static [PathBuf] {
+    static PATH: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let shell = std::env::var_os("SHELL")
+            .filter(|shell| !shell.is_empty())
+            .unwrap_or_else(|| OsString::from("/bin/zsh"));
+        let mut command = crate::process::command(Path::new(&shell));
+        // Interactive as well, since many people set PATH in .zshrc. The
+        // markers skip whatever the startup files print.
+        command.args([
+            "-l",
+            "-i",
+            "-c",
+            r#"printf '\n__AP_PATH__%s__AP_END__\n' "$PATH""#,
+        ]);
+        let Ok(output) = crate::process::run(command, "login shell PATH", Duration::from_secs(5))
+        else {
+            return Vec::new();
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        marked_path(&text)
+            .map(|path| split_paths(OsStr::new(path), ':'))
+            .unwrap_or_default()
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn login_shell_path() -> &'static [PathBuf] {
+    &[]
+}
+
+/// The PATH between the markers `login_shell_path` prints.
+#[cfg(any(test, target_os = "macos"))]
+fn marked_path(output: &str) -> Option<&str> {
+    let start = output.rfind("__AP_PATH__")? + "__AP_PATH__".len();
+    let end = start + output[start..].find("__AP_END__")?;
+    Some(&output[start..end]).filter(|path| !path.is_empty())
 }
 
 pub(crate) fn prepare_with(host: &mut impl Host) -> StartupReport {
@@ -742,11 +791,26 @@ fn candidate_search_dirs(host: &impl Host) -> Vec<PathBuf> {
         .chain(host.additional_search_dirs())
         .chain(host.extra_search_roots())
     {
-        if !dir.as_os_str().is_empty() {
+        if !dir.as_os_str().is_empty() && !is_msix_package_dir(host, &dir) {
             push_unique_dir(host, &mut dirs, &dir);
         }
     }
     dirs
+}
+
+/// `%ProgramFiles%\WindowsApps` holds MSIX packages, whose programs refuse to
+/// start from outside their package, so no copy there is one to run.
+fn is_msix_package_dir(host: &impl Host, dir: &Path) -> bool {
+    let Some(program_files) = env_utf8(host, "ProgramFiles") else {
+        return false;
+    };
+    let packages = format!(
+        "{}\\windowsapps",
+        program_files.trim_end_matches('\\').to_ascii_lowercase()
+    );
+    let dir = dir.to_string_lossy().to_ascii_lowercase();
+    dir.strip_prefix(&packages)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('\\'))
 }
 
 fn find_tool_in_dir(host: &impl Host, dir: &Path, name: &str) -> Option<PathBuf> {
@@ -1435,6 +1499,17 @@ fn live_search_roots() -> Vec<PathBuf> {
         roots.push(home.join(".asdf").join("shims"));
         roots.push(home.join(".local").join("share").join("mise").join("shims"));
         roots.push(home.join("scoop").join("shims"));
+        // The official installers of Grok Build, OpenCode, and pi put them
+        // here, and some add the folder to PATH only in a shell's startup file.
+        roots.push(home.join(".grok").join("bin"));
+        roots.push(home.join(".opencode").join("bin"));
+        roots.push(home.join(".pi").join("agent").join("bin"));
+        #[cfg(unix)]
+        {
+            roots.push(home.join(".bun").join("bin"));
+            roots.push(home.join(".volta").join("bin"));
+            roots.push(home.join(".npm-global").join("bin"));
+        }
     }
     #[cfg(unix)]
     {
@@ -1446,9 +1521,11 @@ fn live_search_roots() -> Vec<PathBuf> {
         roots.push(PathBuf::from(r"C:\ProgramData\chocolatey\bin"));
         if let Some(local) = dirs::data_local_dir() {
             roots.push(local.join("Microsoft").join("WinGet").join("Links"));
+            roots.push(local.join(r"Programs\OpenAI\Codex\bin"));
             push_python_script_dirs(&mut roots, &local.join("Programs").join("Python"));
         }
         if let Some(roaming) = dirs::data_dir() {
+            roots.push(roaming.join("npm"));
             push_python_script_dirs(&mut roots, &roaming.join("Python"));
         }
     }
@@ -1522,7 +1599,7 @@ fn windows_env_value(
 }
 
 #[cfg(windows)]
-fn windows_app_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn windows_app_path(name: &str) -> Option<PathBuf> {
     let file = format!("{name}.exe");
     let relative = format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{file}");
     for hive in [
@@ -3183,6 +3260,40 @@ mod tests {
                 .and_then(|tool| tool.path.as_ref()),
             Some(&uv)
         );
+    }
+
+    #[test]
+    fn programs_inside_msix_packages_are_never_the_ones_found() {
+        let packaged = PathBuf::from(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.1.0.0_x64__2p2nqsd0c76g0\app\resources",
+        );
+        let installed = PathBuf::from(r"C:\Users\me\AppData\Local\Programs\OpenAI\Codex\bin");
+        let mut host = FakeHost::new()
+            .with_env("ProgramFiles", r"C:\Program Files")
+            .with_root(packaged.to_str().expect("utf8"))
+            .with_root(installed.to_str().expect("utf8"));
+        host.executables
+            .insert(packaged.join(tool_file_name("codex")));
+        host.executables
+            .insert(installed.join(tool_file_name("codex")));
+        assert_eq!(
+            find_tool(&host, "codex"),
+            Some(installed.join(tool_file_name("codex")))
+        );
+        assert!(!is_msix_package_dir(
+            &host,
+            Path::new(r"C:\Program Files\WindowsAppsExtra\bin")
+        ));
+    }
+
+    #[test]
+    fn the_login_shell_path_is_read_between_its_markers() {
+        assert_eq!(
+            marked_path("Last login: today\n\n__AP_PATH__/opt/homebrew/bin:/usr/bin__AP_END__\n"),
+            Some("/opt/homebrew/bin:/usr/bin")
+        );
+        assert_eq!(marked_path("__AP_PATH____AP_END__"), None);
+        assert_eq!(marked_path("zsh: command not found"), None);
     }
 
     #[test]

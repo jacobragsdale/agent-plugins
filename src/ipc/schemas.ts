@@ -256,6 +256,8 @@ export const preflightReportSchema = z
     checks: z.array(preflightCheckSchema).readonly()
   })
   .readonly();
+/** An installed app the tutorial or **Create a skill** can open with a prompt; `run_tutorial` and `create_skill` take its `id`. */
+export const promptAppSchema = z.object({ id: z.string().min(1), targetId: targetIdSchema, label: z.string().min(1) }).readonly();
 export const appStateSchema = z
   .object({
     /** The last sync that reached the servers; 0 when none has yet. */
@@ -269,8 +271,10 @@ export const appStateSchema = z
     items: tolerantArray(itemSchema, "package"),
     bundles: tolerantArray(bundleStateSchema, "bundle").default([]),
     agentProfiles: z.array(agentProfileSchema).readonly(),
-    /** The detected app the skill tutorial can demonstrate, until it has run. */
-    tutorial: targetIdSchema.nullable().default(null),
+    /** Offer the skill tutorial: it hasn't run, and some app can take a prompt. */
+    tutorialOffered: z.boolean().default(false),
+    /** Detected apps that can be opened with a prompt, in picker order. */
+    promptApps: z.array(promptAppSchema).readonly().default([]),
     marketplaceUrl: z.string().min(1).nullable().default(null),
     downloadUrl: z.string().min(1).nullable().default(null),
     identity: identitySchema.nullable().default(null),
@@ -374,6 +378,7 @@ export type BulkPlan = z.infer<typeof bulkPlanSchema>;
 export type BulkPlanEntry = z.infer<typeof bulkPlanEntrySchema>;
 export type BulkResult = z.infer<typeof bulkResultSchema>;
 export type AgentProfile = z.infer<typeof agentProfileSchema>;
+export type PromptApp = z.infer<typeof promptAppSchema>;
 export type TargetId = z.infer<typeof targetIdSchema>;
 export type AppIdentity = z.infer<typeof identitySchema>;
 export type BundleState = z.infer<typeof bundleStateSchema>;

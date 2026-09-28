@@ -106,20 +106,22 @@ pub(crate) async fn marketplace_call(
     .await
 }
 
-/// Closes the app, gives it the tutorial skill, and reopens it with the tutorial prompt.
+/// Gives the app the tutorial skill and opens it with the tutorial prompt.
+/// Returns what the person does next.
 #[cfg(feature = "app")]
-pub(crate) async fn run_tutorial(target: crate::agent_profiles::TargetId) -> Result<(), String> {
+pub(crate) async fn run_tutorial(app: crate::app_locations::App) -> Result<String, String> {
     run_blocking("Tutorial", move || {
-        crate::tutorial::run(&crate::paths::SystemPaths::from_system()?, target)
+        crate::tutorial::run(&crate::paths::SystemPaths::from_system()?, app)
     })
     .await
 }
 
-/// Opens the app with a prompt that writes a skill with the person and publishes it.
+/// Opens the app with a prompt that writes a skill with the person and
+/// publishes it. Returns what the person does next.
 #[cfg(feature = "app")]
-pub(crate) async fn create_skill(target: crate::agent_profiles::TargetId) -> Result<(), String> {
+pub(crate) async fn create_skill(app: crate::app_locations::App) -> Result<String, String> {
     run_blocking("Create a skill", move || {
-        crate::tutorial::create_skill(&crate::paths::SystemPaths::from_system()?, target)
+        crate::tutorial::create_skill(&crate::paths::SystemPaths::from_system()?, app)
     })
     .await
 }

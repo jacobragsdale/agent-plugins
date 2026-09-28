@@ -1,7 +1,7 @@
 //! Thin Tauri command surface for the desktop UI. Every command rejects with
 //! an [`IpcError`], classified here from the internal message.
 
-use crate::agent_profiles::TargetId;
+use crate::app_locations::App;
 use crate::app_state::{AppState, BulkAction, BulkPlan, BulkResult, ItemsPlan, PreparedSource};
 use crate::application::{self, RuntimeState};
 use crate::install::{OperationOutcome, SourceRemovalPlan};
@@ -262,17 +262,13 @@ pub(crate) async fn reset_app(runtime: State<'_, RuntimeState>) -> Result<BulkRe
 }
 
 #[tauri::command]
-pub(crate) async fn run_tutorial(target_id: TargetId) -> Result<(), IpcError> {
-    application::run_tutorial(target_id)
-        .await
-        .map_err(IpcError::from)
+pub(crate) async fn run_tutorial(app: App) -> Result<String, IpcError> {
+    application::run_tutorial(app).await.map_err(IpcError::from)
 }
 
 #[tauri::command]
-pub(crate) async fn create_skill(target_id: TargetId) -> Result<(), IpcError> {
-    application::create_skill(target_id)
-        .await
-        .map_err(IpcError::from)
+pub(crate) async fn create_skill(app: App) -> Result<String, IpcError> {
+    application::create_skill(app).await.map_err(IpcError::from)
 }
 
 #[tauri::command]

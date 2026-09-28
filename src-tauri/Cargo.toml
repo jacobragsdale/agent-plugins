@@ -113,8 +113,14 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# Reads app bundles' Info.plist. Already built for Tauri; the tests check the
+# macOS lookup on every system.
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1.10"
+
 [dev-dependencies]
 tempfile = "3"
+plist = "1.10"
 
 # Same gate as CI `cargo clippy -- -D warnings`. Applies to rustc and to
 # clippy, so `cargo check`, `cargo test`, and rust-analyzer fail locally

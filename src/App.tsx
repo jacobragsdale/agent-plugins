@@ -18,11 +18,13 @@ import { ShareDialog } from "./components/ShareDialog";
 import type { ShareTarget } from "./components/ShareDialog";
 import { TeamsDialog } from "./components/TeamsDialog";
 import { ManageSourcesDialog } from "./components/ManageSourcesDialog";
+import { PromptAppDialog } from "./components/PromptAppDialog";
+import type { PromptPurpose } from "./components/PromptAppDialog";
 import { ErrorMessage, Notices, OfflineBanner } from "./components/Notice";
 import type { InfoNotice } from "./components/Notice";
 import { SourceGroup } from "./components/SourceGroup";
 import type { SourceAction } from "./components/SourceGroup";
-import { CatalogFilters, CatalogToolbar, CreateSkillButton, StatusButton, SyncMeta } from "./components/CatalogToolbar";
+import { CatalogFilters, CatalogToolbar, StatusButton, SyncMeta } from "./components/CatalogToolbar";
 import { diagnosticsFailure, diagnosticsResult, seriousProblems, SystemStatusDialog } from "./components/SystemStatusDialog";
 import { DEEP_LINK_EVENT, errorResponse, explainAfterRetry, invokeParsed, SCHEDULED_SYNC_EVENT, toAppError, withRetry } from "./ipc/client";
 import type { AppError } from "./ipc/client";
@@ -38,6 +40,7 @@ import {
   preparedSourceSchema,
   scheduledSyncSchema,
   sourceRemovalPlanSchema,
+  textSchema,
   unitSchema
 } from "./ipc/schemas";
 import type { DiagnosticsResult } from "./components/SystemStatusDialog";
@@ -55,6 +58,7 @@ import type {
   ListedSource,
   PreflightCheck,
   PreflightReport,
+  PromptApp,
   RepositoryState,
   SourceState
 } from "./ipc/schemas";
@@ -79,7 +83,6 @@ import {
   reviewBundleUninstall,
   reviewReset,
   reviewSourceRemoval,
-  reviewTutorial,
   shownDigests,
   uninstalledNotice
 } from "./lib/status";
@@ -167,8 +170,9 @@ export default function App(): JSX.Element {
   const [busyItems, setBusyItems] = useState<ReadonlySet<string>>(new Set());
   const [busySources, setBusySources] = useState<ReadonlyMap<string, SourceAction>>(new Map());
   const [resetting, setResetting] = useState(false);
-  const [tutorialRunning, setTutorialRunning] = useState(false);
-  const [creatingSkill, setCreatingSkill] = useState(false);
+  /** What the app picker is open for; null while it is closed. */
+  const [promptPurpose, setPromptPurpose] = useState<PromptPurpose | null>(null);
+  const [promptRunning, setPromptRunning] = useState(false);
   const [statusDialogOpen, setStatusDialogOpen] = useState(false);
   const [preflightRunning, setPreflightRunning] = useState(false);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
@@ -880,41 +884,27 @@ export default function App(): JSX.Element {
     }
   }
 
-  async function runTutorial({ targetId, displayName: app }: AgentProfile): Promise<void> {
-    // Busy before the confirmation, so a double-click cannot open a second one.
-    setTutorialRunning(true);
-    try {
-      if (!(await reviewTutorial(app))) {
-        return;
-      }
-      setError(null);
-      setInfo(null);
-      await invokeParsed("run_tutorial", unitSchema, { targetId });
-      setInfo(infoText(`Reopening ${app}. Choose Create Chat, then send the message to see the skill work.`));
-    } catch (reason) {
-      showActionError(toAppError(reason, `Couldn't start the ${app} tutorial.`));
-    } finally {
-      setTutorialRunning(false);
-      await refreshAfterOperation();
-    }
-  }
-
-  async function createSkill({ targetId, displayName: app }: AgentProfile): Promise<void> {
-    setCreatingSkill(true);
+  /** Opens the app picked in the picker with the tutorial or create-a-skill prompt; the backend says what to do next. */
+  async function openWithPrompt(purpose: PromptPurpose, app: PromptApp): Promise<void> {
+    const tutorial = purpose === "tutorial";
+    setPromptRunning(true);
     setError(null);
     setInfo(null);
     try {
-      await invokeParsed("create_skill", unitSchema, { targetId });
-      setInfo(infoText(`Opening ${app}. Choose Create Chat, then send the message to start making your skill. If ${app} asks you to log in, do that first, then choose Create a skill again.`));
+      setInfo(infoText(await invokeParsed(tutorial ? "run_tutorial" : "create_skill", textSchema, { app: app.id })));
     } catch (reason) {
-      showActionError(toAppError(reason, `Couldn't open ${app}.`));
+      showActionError(toAppError(reason, tutorial ? `Couldn't start the tutorial in ${app.label}.` : `Couldn't open ${app.label}.`));
     } finally {
-      setCreatingSkill(false);
+      setPromptRunning(false);
+      setPromptPurpose(null);
+      if (tutorial) {
+        await refreshAfterOperation();
+      }
     }
   }
 
   async function dismissTutorial(): Promise<void> {
-    setState((current) => (current === null ? current : { ...current, tutorial: null }));
+    setState((current) => (current === null ? current : { ...current, tutorialOffered: false }));
     try {
       await invokeParsed("dismiss_tutorial", unitSchema);
     } finally {
@@ -994,7 +984,7 @@ export default function App(): JSX.Element {
   // With nothing loaded yet, a failure replaces the spinner instead of sitting above it forever.
   const loadFailed = state === null && error !== null && !syncing;
   const report = visibleReport(lastReport, dismissedReport);
-  const { items, profiles } = catalogLists(state);
+  const { items, profiles, promptApps } = catalogLists(state);
   // Cards are memoized, so everything they receive keeps its identity across renders.
   const onItemChange = useStableCallback(changeItem);
   const onManualChange = useStableCallback(changeManualInvocation);
@@ -1037,12 +1027,11 @@ export default function App(): JSX.Element {
         </div>
         <HeaderActions
           view={view}
-          skillProfile={skillCreatorProfile(state)}
-          creatingSkill={creatingSkill}
+          canPromptApp={promptApps.length > 0}
           syncing={syncing}
           resetting={resetting}
-          onCreateSkill={(profile) => {
-            settle(createSkill(profile));
+          onCreateSkill={() => {
+            setPromptPurpose("create");
           }}
           onTeams={() => {
             setTeamsOpen(true);
@@ -1125,10 +1114,9 @@ export default function App(): JSX.Element {
       </div>
       {/* An invitation, not a notice: it scrolls away with the page instead of staying pinned over it. */}
       <TutorialNotice
-        profile={tutorialProfile(state)}
-        running={tutorialRunning}
-        onStart={(profile) => {
-          settle(runTutorial(profile));
+        visible={state?.tutorialOffered === true && promptApps.length > 0}
+        onStart={() => {
+          setPromptPurpose("tutorial");
         }}
         onDismiss={() => {
           settle(dismissTutorial());
@@ -1243,6 +1231,17 @@ export default function App(): JSX.Element {
         onShow={reveal}
       />
       <ApprovalDialog request={approvalRequest} onResolve={answerConnectors} />
+      <PromptAppDialog
+        purpose={promptPurpose}
+        apps={promptApps}
+        running={promptRunning}
+        onOpen={(purpose, app) => {
+          settle(openWithPrompt(purpose, app));
+        }}
+        onClose={() => {
+          setPromptPurpose(null);
+        }}
+      />
       <AppsDialog
         request={appsRequest}
         profiles={profiles}
@@ -1335,8 +1334,7 @@ function MarketplaceButtons({
 /** The header's buttons: making a skill, marketplace news and teams, status, help, and refresh. */
 function HeaderActions({
   view,
-  skillProfile,
-  creatingSkill,
+  canPromptApp,
   syncing,
   resetting,
   onCreateSkill,
@@ -1346,11 +1344,11 @@ function HeaderActions({
   onError
 }: Readonly<{
   view: MarketplaceView;
-  skillProfile: AgentProfile | null;
-  creatingSkill: boolean;
+  /** Some detected app can be opened with a prompt, so **Create a skill** asks which one. */
+  canPromptApp: boolean;
   syncing: boolean;
   resetting: boolean;
-  onCreateSkill: (profile: AgentProfile) => void;
+  onCreateSkill: () => void;
   onTeams: () => void;
   onStatus: () => void;
   onRefresh: () => void;
@@ -1359,11 +1357,13 @@ function HeaderActions({
   const portal = view.marketplaceUrl;
   return (
     <div className="catalog-actions">
-      {skillProfile === null && portal !== null ? (
-        // Only Cursor can be opened with a prompt; everyone else writes the skill in the portal.
+      {canPromptApp ? (
+        <Button variant="soft" onClick={onCreateSkill}>
+          Create a skill
+        </Button>
+      ) : portal === null ? null : (
+        // With no app to open, the skill is written in the portal instead.
         <PortalButton label="Create a skill" url={portalUrl(portal, "/publish")} onError={onError} />
-      ) : (
-        <CreateSkillButton profile={skillProfile} running={creatingSkill} onClick={onCreateSkill} />
       )}
       <MarketplaceButtons identity={view.identity} marketplaceUrl={portal} disabled={resetting} onTeams={onTeams} onError={onError} />
       <StatusButton problems={view.problems} disabled={resetting} onClick={onStatus} />
@@ -1396,8 +1396,8 @@ function PortalButton({ label, url, onError }: Readonly<{ label: string; url: st
   );
 }
 
-function catalogLists(state: AppState | null): Readonly<{ items: readonly CatalogItem[]; profiles: readonly AgentProfile[] }> {
-  return { items: state?.items ?? [], profiles: state?.agentProfiles ?? [] };
+function catalogLists(state: AppState | null): Readonly<{ items: readonly CatalogItem[]; profiles: readonly AgentProfile[]; promptApps: readonly PromptApp[] }> {
+  return { items: state?.items ?? [], profiles: state?.agentProfiles ?? [], promptApps: state?.promptApps ?? [] };
 }
 
 /** Beside the search box: open a link someone sent, and start a bundle when signed in to the marketplace. */
@@ -1414,16 +1414,6 @@ function CatalogActions({ canCreate, onOpenLink, onNewBundle }: Readonly<{ canCr
       ) : null}
     </>
   );
-}
-
-/** The app the skill tutorial is offered for, until it has run once. */
-function tutorialProfile(state: AppState | null): AgentProfile | null {
-  return state?.agentProfiles.find((profile) => profile.targetId === state.tutorial) ?? null;
-}
-
-/** The detected app **Create a skill** opens: Cursor, the one `tutorial.rs` knows how to launch with a prompt. */
-function skillCreatorProfile(state: AppState | null): AgentProfile | null {
-  return state?.agentProfiles.find((profile) => profile.detected && profile.targetId === "cursor") ?? null;
 }
 
 /** The background-update report, unless the person already dismissed this exact one. */

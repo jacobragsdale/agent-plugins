@@ -1,5 +1,6 @@
 //! Detected agent profiles. Detection is the configuration set.
 
+use crate::app_locations::{self, App};
 use crate::fs_retry;
 use crate::paths::SystemPaths;
 use crate::process;
@@ -20,10 +21,6 @@ const DETECTION_FRESH_FOR: Duration = Duration::from_secs(60);
 
 /// MSIX package family of Claude Desktop on Windows.
 pub(crate) const CLAUDE_DESKTOP_MSIX: &str = "Claude_pzs8sxrjxfjjc";
-const CHATGPT_MSIX: [&str; 2] = [
-    "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0",
-    "OpenAI.Codex_2p2nqsd0c76g0",
-];
 /// What to do when no supported app is installed, primary apps first.
 pub(crate) const INSTALL_AN_APP: &str = "Install GitHub Copilot, Cursor, or Claude (Claude Code or Claude Desktop), or another supported app such as OpenCode, pi, Codex, ChatGPT, or Grok Build, then refresh.";
 const NOT_DETECTED: Detection = Detection {
@@ -88,21 +85,6 @@ impl TargetId {
             // The app's skills and MCP servers live in its Codex mode.
             Self::Chatgpt => "ChatGPT (Codex)",
             Self::Pi => "pi",
-        }
-    }
-
-    /// The CLI whose `--version` proves the agent is installed. Desktop apps
-    /// have none and are detected from their installation instead.
-    fn command(self) -> Option<&'static str> {
-        match self {
-            Self::Cursor => Some("cursor"),
-            Self::ClaudeCode => Some("claude"),
-            Self::Codex => Some("codex"),
-            Self::OpenCode => Some("opencode"),
-            Self::GrokBuild => Some("grok"),
-            Self::GithubCopilot => Some("copilot"),
-            Self::Pi => Some("pi"),
-            Self::ClaudeDesktop | Self::Chatgpt => None,
         }
     }
 
@@ -359,6 +341,7 @@ pub(crate) fn clear_detection_cache() {
     if let Ok(mut cache) = detection_cache().lock() {
         cache.clear();
     }
+    app_locations::clear_cache();
 }
 
 /// Forgets detections older than a minute. A sync right after the window
@@ -368,6 +351,7 @@ pub(crate) fn expire_detection_cache() {
     if let Ok(mut cache) = detection_cache().lock() {
         cache.retain(|_, (found_at, _)| found_at.elapsed() < DETECTION_FRESH_FOR);
     }
+    app_locations::expire_cache(DETECTION_FRESH_FOR);
 }
 
 fn detect(target: TargetId) -> Detection {
@@ -383,254 +367,156 @@ fn detect(target: TargetId) -> Detection {
     detection
 }
 
+/// A target counts when one of its apps does, or GitHub Copilot's JetBrains
+/// plugin, or a `cursor` command where none of Cursor's usual folders are.
 fn detect_now(target: TargetId) -> Detection {
-    if let Some(detection) = detect_application(target) {
-        return detection;
-    }
-    detect_command(target)
-}
-
-fn detect_application(target: TargetId) -> Option<Detection> {
-    match target {
-        TargetId::Cursor => detect_cursor_application(),
-        TargetId::GithubCopilot => detect_copilot_application(),
-        TargetId::ClaudeDesktop => Some(detect_claude_desktop_application()),
-        TargetId::Chatgpt => Some(detect_chatgpt_application()),
-        TargetId::Pi => detect_pi_application(),
+    let apps = App::ALL
+        .into_iter()
+        .filter(|app| app.target() == target)
+        .map(detect_app);
+    let other = std::iter::once_with(|| match target {
+        TargetId::GithubCopilot => detect_jetbrains_copilot(),
+        TargetId::Cursor => {
+            crate::startup::find_program("cursor").map(|program| detect_program(&program, target))
+        }
         _ => None,
+    })
+    .flatten();
+    first_detected(apps.chain(other))
+}
+
+/// The first detection that found the agent, else the first that could not
+/// tell, else not detected.
+fn first_detected(detections: impl Iterator<Item = Detection>) -> Detection {
+    let mut fallback = NOT_DETECTED;
+    for detection in detections {
+        if detection.detected {
+            return detection;
+        }
+        if detection.inconclusive && !fallback.inconclusive {
+            fallback = detection;
+        }
+    }
+    fallback
+}
+
+/// Uses the same lookup that opens the app, so a detected app can be opened.
+fn detect_app(app: App) -> Detection {
+    let program = || app_locations::find(app);
+    match app {
+        App::Vscode | App::VscodeInsiders => detect_vscode_copilot(app),
+        App::Cursor => program()
+            .and_then(|program| detect_cursor(&program))
+            .unwrap_or(NOT_DETECTED),
+        App::ClaudeDesktop => detect_claude_desktop(),
+        App::Chatgpt => detect_chatgpt(),
+        App::Pi => detect_pi(dirs::home_dir().as_deref(), program().as_deref()),
+        App::CopilotCli => github_copilot_cli(program().map_or(NOT_DETECTED, |program| {
+            detect_program(&program, app.target())
+        })),
+        App::ClaudeCode | App::OpenCode | App::Codex | App::GrokBuild => program()
+            .map_or(NOT_DETECTED, |program| {
+                detect_program(&program, app.target())
+            }),
     }
 }
 
-fn detect_claude_desktop_application() -> Detection {
-    detect_msix_from(
-        &msix_package_full_names(),
-        &msix_packages_dir(),
-        &[CLAUDE_DESKTOP_MSIX],
-    )
-    .or_else(|| {
-        let local = dirs::data_local_dir()?;
-        detect_squirrel_claude_from(&local.join("AnthropicClaude"))
-    })
-    .or_else(|| detect_app_bundle(Path::new("/Applications/Claude.app")))
-    .unwrap_or(NOT_DETECTED)
+fn found(version: Option<String>) -> Detection {
+    Detection {
+        detected: true,
+        version,
+        message: None,
+        inconclusive: false,
+    }
 }
 
-fn detect_chatgpt_application() -> Detection {
-    detect_msix_from(
-        &msix_package_full_names(),
-        &msix_packages_dir(),
-        &CHATGPT_MSIX,
-    )
-    .or_else(|| detect_app_bundle(Path::new("/Applications/ChatGPT.app")))
-    .unwrap_or(NOT_DETECTED)
+/// The Microsoft Store (MSIX) build or the Squirrel build winget still
+/// installs on Windows; the app bundle on macOS; the beta package on Linux.
+fn detect_claude_desktop() -> Detection {
+    // Registered counts even with its `claude-desktop` alias switched off.
+    if let Some(package) = app_locations::msix_package(CLAUDE_DESKTOP_MSIX) {
+        return found(app_locations::msix_version(&package));
+    }
+    let Some(program) = app_locations::find(App::ClaudeDesktop) else {
+        return NOT_DETECTED;
+    };
+    found(if cfg!(windows) {
+        program.parent().and_then(newest_squirrel_version)
+    } else {
+        app_locations::bundle_version(&program)
+    })
+}
+
+/// Squirrel keeps each version in `app-<version>` until it cleans up, so the
+/// first folder listed can be an old one.
+fn newest_squirrel_version(root: &Path) -> Option<String> {
+    read_child_paths(root)
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            path.file_name()?
+                .to_str()?
+                .strip_prefix("app-")
+                .map(str::to_string)
+        })
+        .max_by_key(|version| {
+            version
+                .split('.')
+                .map(|part| part.parse::<u64>().unwrap_or(0))
+                .collect::<Vec<_>>()
+        })
+}
+
+/// Only the ChatGPT app with Codex counts; ChatGPT Classic has no Codex mode.
+fn detect_chatgpt() -> Detection {
+    match app_locations::find(App::Chatgpt) {
+        // The package folder is named for the package's full name.
+        Some(package) if cfg!(windows) => found(
+            package
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(app_locations::msix_version),
+        ),
+        Some(bundle) => found(app_locations::bundle_version(&bundle)),
+        None => NOT_DETECTED,
+    }
 }
 
 /// `pi` is a common word, so a command alone is not proof: pi creates
-/// `~/.pi/agent` on its first run. Without it, pi is not set up here; with it,
-/// the command only supplies the version.
-fn detect_pi_application() -> Option<Detection> {
-    Some(detect_pi_from(dirs::home_dir().as_deref()))
-}
-
-fn detect_pi_from(home: Option<&Path>) -> Detection {
-    if !home.is_some_and(|home| home.join(".pi").join("agent").is_dir()) {
-        return NOT_DETECTED;
-    }
-    let detection = detect_command(TargetId::Pi);
-    Detection {
-        detected: true,
-        inconclusive: false,
-        message: None,
-        ..detection
-    }
-}
-
-/// MSIX packages registered for this user, as full names such as
-/// `Claude_1.8555.2.0_x64__pzs8sxrjxfjjc`. Reading the repository key needs
-/// no subprocess, unlike `Get-AppxPackage`.
-#[cfg(windows)]
-fn msix_package_full_names() -> Vec<String> {
-    winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-        .open_subkey(
-            r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages",
-        )
-        .map(|key| key.enum_keys().flatten().collect())
-        .unwrap_or_default()
-}
-
-#[cfg(not(windows))]
-fn msix_package_full_names() -> Vec<String> {
-    Vec::new()
-}
-
-fn msix_packages_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .map(|local| local.join("Packages"))
-        .unwrap_or_default()
-}
-
-/// A family is `<name>_<publisher>`; a registered full name is
-/// `<name>_<version>_<arch>__<publisher>`. The family folder under Packages
-/// appears on first launch and counts without a version.
-fn detect_msix_from(
-    full_names: &[String],
-    packages_dir: &Path,
-    families: &[&str],
-) -> Option<Detection> {
-    families.iter().find_map(|family| {
-        let (name, publisher) = family.rsplit_once('_')?;
-        let version = full_names.iter().find_map(|full| {
-            let rest = full.strip_prefix(name)?.strip_prefix('_')?;
-            let (version, _) = rest.split_once('_')?;
-            full.ends_with(&format!("__{publisher}"))
-                .then(|| version.to_string())
-        });
-        (version.is_some() || packages_dir.join(family).is_dir()).then_some(Detection {
-            detected: true,
-            version,
-            message: None,
-            inconclusive: false,
-        })
-    })
-}
-
-/// The Squirrel installer Anthropic used before February 2026.
-fn detect_squirrel_claude_from(root: &Path) -> Option<Detection> {
-    root.join("claude.exe").is_file().then(|| Detection {
-        detected: true,
-        version: first_dir_with_prefix(root, "app-").and_then(|dir| {
-            dir.file_name()?
-                .to_str()
-                .map(|name| name["app-".len()..].to_string())
-        }),
-        message: None,
-        inconclusive: false,
-    })
-}
-
-fn detect_app_bundle(app: &Path) -> Option<Detection> {
-    app.is_dir().then_some(Detection {
-        detected: true,
-        version: None,
-        message: None,
-        inconclusive: false,
-    })
-}
-
-fn detect_cursor_application() -> Option<Detection> {
-    detect_cursor_application_from(&cursor_install_roots())
-}
-
-fn detect_cursor_application_from(roots: &[PathBuf]) -> Option<Detection> {
-    roots.iter().find_map(|root| {
-        let product = find_vscode_like_product_json(root)?;
-        Some(Detection {
-            detected: true,
-            version: read_json_string_field(&product, "version"),
-            message: None,
-            inconclusive: false,
-        })
-    })
-}
-
-/// Folders Cursor may be installed in, most likely first.
-pub(crate) fn cursor_install_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    #[cfg(target_os = "macos")]
-    {
-        roots.push(PathBuf::from("/Applications/Cursor.app"));
-        if let Some(home) = dirs::home_dir() {
-            roots.push(home.join("Applications/Cursor.app"));
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(local) = dirs::data_local_dir() {
-            roots.push(local.join("Programs").join("cursor"));
-        }
-        if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            roots.push(PathBuf::from(program_files).join("Cursor"));
-        }
-        if let Some(program_files) = std::env::var_os("ProgramFiles(x86)") {
-            roots.push(PathBuf::from(program_files).join("Cursor"));
-        }
-        roots.extend(registered_install_roots("Cursor", "cursor"));
-        // The `cursor` command on PATH is `<install>\resources\app\bin\cursor.cmd`.
-        if let Some(path) = std::env::var_os("PATH") {
-            roots.extend(
-                std::env::split_paths(&path)
-                    .filter(|dir| dir.join("cursor.cmd").is_file())
-                    .filter_map(|bin| bin.ancestors().nth(3).map(Path::to_path_buf)),
-            );
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        roots.push(PathBuf::from("/usr/share/cursor"));
-        roots.push(PathBuf::from("/opt/Cursor"));
-        if let Some(home) = dirs::home_dir() {
-            roots.push(home.join(".local/share/cursor"));
-        }
-    }
-    roots
-}
-
-/// Where Windows records an app outside its default folders: its uninstall
-/// entries, per user and per machine (`Cursor (User)` for a per-user install),
-/// and the program registered for its link scheme, which a portable copy sets
-/// on first launch.
-#[cfg(windows)]
-fn registered_install_roots(display_name: &str, scheme: &str) -> Vec<PathBuf> {
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
-    use winreg::RegKey;
-    let mut roots = Vec::new();
-    for (hive, uninstall) in [
-        (
-            HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
-        ),
-        (
-            HKEY_LOCAL_MACHINE,
-            r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
-        ),
-        (
-            HKEY_LOCAL_MACHINE,
-            r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
-        ),
-    ] {
-        let Ok(uninstall) = RegKey::predef(hive).open_subkey(uninstall) else {
-            continue;
-        };
-        for entry in uninstall
-            .enum_keys()
-            .flatten()
-            .filter_map(|name| uninstall.open_subkey(name).ok())
-        {
-            let name: String = entry.get_value("DisplayName").unwrap_or_default();
-            if name == display_name || name.starts_with(&format!("{display_name} (")) {
-                if let Ok(location) = entry.get_value::<String, _>("InstallLocation") {
-                    roots.push(PathBuf::from(location));
-                }
+/// `~/.pi/agent` on its first run. The folder without the command is what an
+/// uninstall leaves. The command only supplies the version.
+fn detect_pi(home: Option<&Path>, program: Option<&Path>) -> Detection {
+    match program {
+        Some(program) if home.is_some_and(|home| home.join(".pi").join("agent").is_dir()) => {
+            Detection {
+                detected: true,
+                inconclusive: false,
+                message: None,
+                ..detect_program(program, TargetId::Pi)
             }
         }
+        _ => NOT_DETECTED,
     }
-    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
-        // Such as `"C:\...\Cursor.exe" --open-url -- "%1"`.
-        let Ok(command) = RegKey::predef(hive)
-            .open_subkey(format!(r"Software\Classes\{scheme}\shell\open\command"))
-            .and_then(|key| key.get_value::<String, _>(""))
-        else {
-            continue;
-        };
-        let program = match command.strip_prefix('"') {
-            Some(quoted) => quoted.split('"').next(),
-            None => command.split_whitespace().next(),
-        };
-        if let Some(folder) = program.and_then(|program| Path::new(program).parent()) {
-            roots.push(folder.to_path_buf());
-        }
+}
+
+/// AWS's Copilot CLI is also called `copilot`; GitHub's says
+/// `GitHub Copilot CLI 1.0.88.`
+fn github_copilot_cli(detection: Detection) -> Detection {
+    // No version means the probe timed out, which says nothing against it.
+    let other = detection
+        .version
+        .as_deref()
+        .is_some_and(|version| !version.starts_with("GitHub Copilot CLI"));
+    if detection.detected && other {
+        return NOT_DETECTED;
     }
-    roots
+    detection
+}
+
+/// Cursor counts with its `product.json`, which a leftover folder lacks.
+fn detect_cursor(program: &Path) -> Option<Detection> {
+    let product = find_vscode_like_product_json(app_locations::editor_root(program)?)?;
+    Some(found(read_json_string_field(&product, "version")))
 }
 
 fn find_vscode_like_product_json(root: &Path) -> Option<PathBuf> {
@@ -660,103 +546,34 @@ fn read_json_string_field(path: &Path, field: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn detect_copilot_application() -> Option<Detection> {
+fn detect_jetbrains_copilot() -> Option<Detection> {
     let home = dirs::home_dir()?;
-    detect_vscode_copilot_from(&vscode_editions(&home)).or_else(|| {
-        detect_jetbrains_copilot_from(&jetbrains_app_roots(&home), &jetbrains_config_roots(&home))
-    })
+    detect_jetbrains_copilot_from(&jetbrains_app_roots(&home), &jetbrains_config_roots(&home))
 }
 
-struct VscodeEdition {
-    app_roots: Vec<PathBuf>,
-    extensions: PathBuf,
+fn detect_vscode_copilot(app: App) -> Detection {
+    let extensions = if app == App::Vscode {
+        ".vscode/extensions"
+    } else {
+        ".vscode-insiders/extensions"
+    };
+    dirs::home_dir()
+        .zip(app_locations::find(app))
+        .and_then(|(home, program)| detect_vscode_copilot_at(&program, &home.join(extensions)))
+        .unwrap_or(NOT_DETECTED)
 }
 
-fn vscode_editions(home: &Path) -> Vec<VscodeEdition> {
-    vec![
-        VscodeEdition {
-            app_roots: vscode_stable_app_roots(home),
-            extensions: home.join(".vscode/extensions"),
-        },
-        VscodeEdition {
-            app_roots: vscode_insiders_app_roots(home),
-            extensions: home.join(".vscode-insiders/extensions"),
-        },
-    ]
-}
-
-fn vscode_stable_app_roots(home: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    #[cfg(target_os = "macos")]
-    {
-        roots.push(PathBuf::from("/Applications/Visual Studio Code.app"));
-        roots.push(home.join("Applications/Visual Studio Code.app"));
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(local) = dirs::data_local_dir() {
-            roots.push(local.join("Programs").join("Microsoft VS Code"));
-        }
-        if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            roots.push(PathBuf::from(program_files).join("Microsoft VS Code"));
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        roots.push(PathBuf::from("/usr/share/code"));
-        roots.push(home.join(".local/share/code"));
-    }
-    let _ = home;
-    roots
-}
-
-fn vscode_insiders_app_roots(home: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    #[cfg(target_os = "macos")]
-    {
-        roots.push(PathBuf::from(
-            "/Applications/Visual Studio Code - Insiders.app",
-        ));
-        roots.push(home.join("Applications/Visual Studio Code - Insiders.app"));
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(local) = dirs::data_local_dir() {
-            roots.push(local.join("Programs").join("Microsoft VS Code Insiders"));
-        }
-        if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            roots.push(PathBuf::from(program_files).join("Microsoft VS Code Insiders"));
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        roots.push(PathBuf::from("/usr/share/code-insiders"));
-        roots.push(home.join(".local/share/code-insiders"));
-    }
-    let _ = home;
-    roots
-}
-
-fn detect_vscode_copilot_from(editions: &[VscodeEdition]) -> Option<Detection> {
-    editions.iter().find_map(|edition| {
-        let product = edition
-            .app_roots
-            .iter()
-            .find_map(|root| find_vscode_like_product_json(root))?;
-        // VS Code now ships Copilot Chat built in; older installs have it as a user extension.
-        let builtin = product
-            .parent()
-            .map(|app| app.join("extensions/copilot"))
-            .filter(|dir| dir.join("package.json").is_file());
-        builtin
-            .or_else(|| first_dir_with_prefix(&edition.extensions, "github.copilot"))
-            .map(|dir| Detection {
-                detected: true,
-                version: read_json_string_field(&dir.join("package.json"), "version"),
-                message: None,
-                inconclusive: false,
-            })
-    })
+/// VS Code now ships Copilot Chat built in; older installs have it as a user
+/// extension, which counts only while the editor is installed.
+fn detect_vscode_copilot_at(program: &Path, extensions: &Path) -> Option<Detection> {
+    let product = find_vscode_like_product_json(app_locations::editor_root(program)?)?;
+    let builtin = product
+        .parent()
+        .map(|app| app.join("extensions/copilot"))
+        .filter(|dir| dir.join("package.json").is_file());
+    builtin
+        .or_else(|| first_dir_with_prefix(extensions, "github.copilot"))
+        .map(|dir| found(read_json_string_field(&dir.join("package.json"), "version")))
 }
 
 fn detect_jetbrains_copilot_from(
@@ -921,6 +738,8 @@ fn first_dir_with_prefix(parent: &Path, prefix: &str) -> Option<PathBuf> {
     })
 }
 
+/// A program that isn't there, or, on Windows, one this app may not start,
+/// such as a copy inside another app's MSIX package: not installed for us.
 fn is_missing_program_error(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("no such file")
@@ -928,36 +747,35 @@ fn is_missing_program_error(error: &str) -> bool {
         || error.contains("cannot find the file")
         || error.contains("cannot find the path")
         || error.contains("the system cannot find")
+        || (cfg!(windows) && error.contains("(os error 5)"))
 }
 
-fn detect_command(target: TargetId) -> Detection {
-    let Some(program) = target.command() else {
-        return NOT_DETECTED;
-    };
-    // The PATH this process started with misses anything installed since, and
-    // `Command` does not resolve `.cmd` shims on Windows, so look it up fresh.
-    let Some(program) = crate::startup::find_program(program) else {
-        return NOT_DETECTED;
-    };
-    let mut command = process::command(&program);
+/// Runs `<program> --version`. The program's own folder goes first on PATH:
+/// an npm command is a script that needs the `node` installed beside it.
+fn detect_program(program: &Path, target: TargetId) -> Detection {
+    let mut command = process::command(program);
     command.arg("--version");
+    if let Some(folder) = program.parent() {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        if let Ok(path) = std::env::join_paths(
+            std::iter::once(folder.to_path_buf()).chain(std::env::split_paths(&path)),
+        ) {
+            command.env("PATH", path);
+        }
+    }
     match process::run(
         command,
         &format!("{} detection", target.display_name()),
         DETECTION_TIMEOUT,
     ) {
-        Ok(output) if output.status.success() => {
-            let version =
-                first_nonempty_line(&output.stdout).or_else(|| first_nonempty_line(&output.stderr));
-            Detection {
-                detected: true,
-                version,
-                message: None,
-                inconclusive: false,
-            }
-        }
+        Ok(output) if output.status.success() => found(
+            first_nonempty_line(&output.stdout).or_else(|| first_nonempty_line(&output.stderr)),
+        ),
         Ok(_) => NOT_DETECTED,
         Err(error) if is_missing_program_error(&error) => NOT_DETECTED,
+        // The program is there: under antivirus its first start can outlast
+        // the probe, which must not make the app vanish until the next one.
+        Err(error) if error.contains("timed out") => found(None),
         Err(error) => Detection {
             detected: false,
             version: None,
@@ -1267,10 +1085,9 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let empty = root.path().join("Cursor.app");
         fs::create_dir_all(&empty).expect("empty app");
-        assert!(detect_cursor_application_from(std::slice::from_ref(&empty)).is_none());
+        assert!(detect_cursor(&empty).is_none());
         write_vscode_like_product_json(&empty, "3.15.6");
-        let detection =
-            detect_cursor_application_from(std::slice::from_ref(&empty)).expect("detected");
+        let detection = detect_cursor(&empty).expect("detected");
         assert!(detection.detected);
         assert_eq!(detection.version.as_deref(), Some("3.15.6"));
     }
@@ -1283,17 +1100,11 @@ mod tests {
         fs::create_dir_all(&extensions).expect("extension");
         fs::write(extensions.join("package.json"), r#"{"version":"1.372.0"}"#).expect("manifest");
         let missing_app = root.path().join("Visual Studio Code.app");
-        assert!(detect_vscode_copilot_from(&[VscodeEdition {
-            app_roots: vec![missing_app.clone()],
-            extensions: home.join(".vscode/extensions"),
-        }])
-        .is_none());
+        let code = missing_app.join("Contents/Resources/app/bin/code");
+        let extensions = home.join(".vscode/extensions");
+        assert!(detect_vscode_copilot_at(&code, &extensions).is_none());
         write_vscode_like_product_json(&missing_app, "1.128.0");
-        let detection = detect_vscode_copilot_from(&[VscodeEdition {
-            app_roots: vec![missing_app],
-            extensions: home.join(".vscode/extensions"),
-        }])
-        .expect("detected");
+        let detection = detect_vscode_copilot_at(&code, &extensions).expect("detected");
         assert!(detection.detected);
         assert_eq!(detection.version.as_deref(), Some("1.372.0"));
     }
@@ -1312,10 +1123,10 @@ mod tests {
             r#"{"name":"copilot-chat","publisher":"GitHub","version":"0.67.0"}"#,
         )
         .expect("manifest");
-        let detection = detect_vscode_copilot_from(&[VscodeEdition {
-            app_roots: vec![root.path().join("Microsoft VS Code")],
-            extensions: root.path().join("home/.vscode/extensions"),
-        }])
+        let detection = detect_vscode_copilot_at(
+            &root.path().join("Microsoft VS Code/Code.exe"),
+            &root.path().join("home/.vscode/extensions"),
+        )
         .expect("detected");
         assert_eq!(detection.version.as_deref(), Some("0.67.0"));
     }
@@ -1413,50 +1224,85 @@ mod tests {
         ));
         assert!(is_missing_program_error("No such file or directory"));
         assert!(!is_missing_program_error("timed out after 3 seconds"));
+        // A program inside another app's MSIX package.
+        assert_eq!(
+            is_missing_program_error(
+                "Codex detection: could not start the process: Access is denied. (os error 5)"
+            ),
+            cfg!(windows)
+        );
     }
 
     #[test]
-    fn msix_detection_reads_the_version_from_the_package_repository() {
+    fn squirrel_claude_reports_its_newest_version() {
         let root = tempfile::tempdir().expect("root");
-        let names = [
-            "Other_1.0.0.0_x64__zzz".to_string(),
-            "Claude_1.8555.2.0_x64__pzs8sxrjxfjjc".to_string(),
-        ];
-        let detection =
-            detect_msix_from(&names, root.path(), &[CLAUDE_DESKTOP_MSIX]).expect("detected");
-        assert!(detection.detected);
-        assert_eq!(detection.version.as_deref(), Some("1.8555.2.0"));
-        assert!(detect_msix_from(&names, root.path(), &["Nope_abc"]).is_none());
-        assert!(detect_msix_from(&names, root.path(), &["Claude_otherpublisher"]).is_none());
+        for version in ["app-1.9.0", "app-1.10.2", "app-1.10.10"] {
+            fs::create_dir_all(root.path().join(version)).expect("app dir");
+        }
+        fs::write(root.path().join("app-9.9.9.log"), b"").expect("file");
+        assert_eq!(
+            newest_squirrel_version(root.path()).as_deref(),
+            Some("1.10.10")
+        );
     }
 
     #[test]
-    fn msix_detection_accepts_the_packages_folder_without_a_version() {
+    fn pi_needs_both_its_agent_folder_and_its_command() {
         let root = tempfile::tempdir().expect("root");
-        assert!(detect_msix_from(&[], root.path(), &CHATGPT_MSIX).is_none());
-        fs::create_dir_all(root.path().join(CHATGPT_MSIX[1])).expect("packages dir");
-        let detection = detect_msix_from(&[], root.path(), &CHATGPT_MSIX).expect("detected");
-        assert!(detection.detected);
+        // Its `--version` fails, which only costs the version.
+        let pi = root.path().join("pi");
+        assert!(!detect_pi(None, Some(&pi)).detected);
+        assert!(!detect_pi(Some(root.path()), Some(&pi)).detected);
+        fs::create_dir_all(root.path().join(".pi/agent")).expect("pi folder");
+        assert!(!detect_pi(Some(root.path()), None).detected);
+        let detection = detect_pi(Some(root.path()), Some(&pi));
+        assert!(detection.detected && !detection.inconclusive);
+    }
+
+    #[test]
+    fn only_github_copilot_cli_counts_as_copilot() {
+        assert!(github_copilot_cli(found(Some("GitHub Copilot CLI 1.0.88.".into()))).detected);
+        assert!(!github_copilot_cli(found(Some("copilot version: v1.34.0".into()))).detected);
+        // Found, but too slow to say its version.
+        assert!(github_copilot_cli(found(None)).detected);
+        let failed = Detection {
+            detected: false,
+            version: None,
+            message: Some("access denied".into()),
+            inconclusive: true,
+        };
+        assert!(github_copilot_cli(failed).inconclusive);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_too_slow_to_say_its_version_still_counts() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().expect("root");
+        let program = root.path().join("opencode");
+        fs::write(&program, "#!/bin/sh\nsleep 10\n").expect("script");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("mode");
+        let detection = detect_program(&program, TargetId::OpenCode);
+        assert!(detection.detected && !detection.inconclusive);
         assert_eq!(detection.version, None);
     }
 
     #[test]
-    fn squirrel_claude_detection_needs_the_executable() {
-        let root = tempfile::tempdir().expect("root");
-        fs::create_dir_all(root.path().join("app-1.2.3")).expect("app dir");
-        assert!(detect_squirrel_claude_from(root.path()).is_none());
-        fs::write(root.path().join("claude.exe"), b"").expect("exe");
-        let detection = detect_squirrel_claude_from(root.path()).expect("detected");
-        assert_eq!(detection.version.as_deref(), Some("1.2.3"));
-    }
-
-    #[test]
-    fn pi_counts_only_once_its_agent_folder_exists() {
-        let root = tempfile::tempdir().expect("root");
-        assert!(!detect_pi_from(None).detected);
-        assert!(!detect_pi_from(Some(root.path())).detected);
-        fs::create_dir_all(root.path().join(".pi/agent")).expect("pi folder");
-        assert!(detect_pi_from(Some(root.path())).detected);
+    fn a_target_takes_its_first_detected_app_then_an_inconclusive_one() {
+        let unsure = |message: &str| Detection {
+            detected: false,
+            version: None,
+            message: Some(message.into()),
+            inconclusive: true,
+        };
+        let detection =
+            first_detected([NOT_DETECTED, unsure("first"), found(Some("1.0".into()))].into_iter());
+        assert_eq!(detection.version.as_deref(), Some("1.0"));
+        let detection =
+            first_detected([NOT_DETECTED, unsure("first"), unsure("second")].into_iter());
+        assert!(!detection.detected && detection.inconclusive);
+        assert_eq!(detection.message.as_deref(), Some("first"));
+        assert!(!first_detected(std::iter::empty()).detected);
     }
 
     #[test]

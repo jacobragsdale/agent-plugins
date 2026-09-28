@@ -101,6 +101,7 @@ pub(super) fn build_app_state(
             .then_with(|| left.repository_id.cmp(&right.repository_id))
     });
     let agent_profiles = agent_profiles::states(paths)?;
+    let prompt_apps = crate::tutorial::prompt_apps(&agent_profiles);
     Ok(AppState {
         checked_at_epoch_seconds: checked,
         connectivity: Connectivity::Online,
@@ -111,7 +112,8 @@ pub(super) fn build_app_state(
         sources,
         items,
         bundles: Vec::new(),
-        tutorial: crate::tutorial::offer(paths, &agent_profiles),
+        tutorial_offered: crate::tutorial::offer(paths, &prompt_apps),
+        prompt_apps,
         agent_profiles,
         marketplace_url: None,
         download_url: crate::locator::download_url().map(str::to_string),

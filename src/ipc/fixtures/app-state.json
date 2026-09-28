@@ -360,7 +360,11 @@
       "skillDirectoryShared": true
     }
   ],
-  "tutorial": "cursor",
+  "tutorialOffered": true,
+  "promptApps": [
+    { "id": "cursor", "targetId": "cursor", "label": "Cursor" },
+    { "id": "claude-desktop", "targetId": "claude-desktop", "label": "Claude Desktop" }
+  ],
   "marketplaceUrl": "https://marketplace.ragsdale.dev",
   "downloadUrl": null,
   "identity": {

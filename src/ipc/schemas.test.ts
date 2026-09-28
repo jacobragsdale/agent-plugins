@@ -84,6 +84,12 @@ describe("AppState contract", () => {
     expect(state.items.every((item) => item.marketplace?.sharedWithYou !== true)).toBe(true);
   });
 
+  it("drops the old single tutorial app and offers nothing until the backend says so", () => {
+    const state = appStateSchema.parse({ ...without(fixture, ["tutorialOffered", "promptApps"]), tutorial: "cursor" });
+    expect(state.tutorialOffered).toBe(false);
+    expect(state.promptApps).toEqual([]);
+  });
+
   it("reads the links the app is opened with", () => {
     expect(pendingLinkSchema.parse(null)).toBeNull();
     expect(pendingLinkSchema.parse({ kind: "install", namespace: "team-data", id: "kit", component: null })).toEqual({ kind: "install", namespace: "team-data", id: "kit", component: null });

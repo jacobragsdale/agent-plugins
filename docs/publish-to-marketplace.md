@@ -4,7 +4,7 @@ This tutorial publishes a skill to the company marketplace. It takes a minute, a
 
 ## From scratch, in the web portal
 
-No skill yet? Open the marketplace in your browser, choose **Share a skill**, then **Write it here**. Give it a **Name**, say **When should the assistant use it?** in a sentence or two, and write the **Instructions**. **Create a skill** in the app opens this page when Cursor isn't installed.
+No skill yet? Open the marketplace in your browser, choose **Share a skill**, then **Write it here**. Give it a **Name**, say **When should the assistant use it?** in a sentence or two, and write the **Instructions**. **Create a skill** in the app opens this page when it finds no AI app it can open.
 
 Choose where it goes under **Publish to**, and **Who can install it**:
 
@@ -14,9 +14,9 @@ Choose where it goes under **Publish to**, and **Who can install it**:
 
 To fix a typo later, choose **Edit** on the skill's page; it opens the editor filled in from the published `SKILL.md` and publishes the next version.
 
-## From scratch, in Cursor
+## From scratch, in your AI app
 
-With Cursor installed, **Create a skill** in Agent Plugins opens Cursor and offers to create a chat with a prompt; choose **Create Chat**, then send it. The agent asks what the skill should do, writes it where Cursor reads skills so you can try it, and publishes it once you say it's ready. "Just for me" publishes it privately.
+With an AI app such as GitHub Copilot, Cursor, or Claude installed, **Create a skill** in Agent Plugins asks which app to use, then opens it with a message; the window says what to do next, such as pressing Enter to send it. The agent asks what the skill should do, writes it where that app reads skills so you can try it, and publishes it once you say it's ready. "Just for me" publishes it privately.
 
 ## From files, in the web portal
 

@@ -2,6 +2,7 @@
 
 mod adapters;
 mod agent_profiles;
+mod app_locations;
 mod app_state;
 mod application;
 mod artifact;

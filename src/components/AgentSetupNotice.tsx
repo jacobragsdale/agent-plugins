@@ -1,6 +1,5 @@
 import type { JSX } from "react";
 import { Button, Callout } from "@radix-ui/themes";
-import type { AgentProfile } from "../ipc/schemas";
 
 export function AgentSetupNotice({ visible, onChoose }: Readonly<{ visible: boolean; onChoose: () => void }>): JSX.Element | null {
   if (!visible) {
@@ -21,36 +20,20 @@ export function AgentSetupNotice({ visible, onChoose }: Readonly<{ visible: bool
   );
 }
 
-/** Offers the skill tutorial for one detected app until it has run once or the person says not now. */
-export function TutorialNotice({
-  profile,
-  running,
-  onStart,
-  onDismiss
-}: Readonly<{ profile: AgentProfile | null; running: boolean; onStart: (profile: AgentProfile) => void; onDismiss: () => void }>): JSX.Element | null {
-  if (profile === null) {
+/** Offers the skill tutorial until it has run once or the person says not now; **Show me** asks which app. */
+export function TutorialNotice({ visible, onStart, onDismiss }: Readonly<{ visible: boolean; onStart: () => void; onDismiss: () => void }>): JSX.Element | null {
+  if (!visible) {
     return null;
   }
-  const app = profile.displayName;
   return (
     <Callout.Root className="app-callout" color="blue" role="status">
       <div className="callout-content">
-        <Callout.Text>
-          New to skills? See one work in {app}: Agent Plugins adds a sample skill and opens {app} with a prompt that uses it.
-        </Callout.Text>
+        <Callout.Text>New to skills? See one work: Agent Plugins adds a sample skill and opens one of your AI apps with a message that uses it.</Callout.Text>
         <div className="callout-actions">
-          <Button
-            className="callout-action"
-            size="1"
-            loading={running}
-            disabled={running}
-            onClick={() => {
-              onStart(profile);
-            }}
-          >
+          <Button className="callout-action" size="1" onClick={onStart}>
             Show me
           </Button>
-          <Button className="callout-action" size="1" variant="soft" disabled={running} onClick={onDismiss}>
+          <Button className="callout-action" size="1" variant="soft" onClick={onDismiss}>
             Not now
           </Button>
         </div>
