@@ -62,7 +62,7 @@ runs:
             if head -c 3 "$report" | grep -q '###'; then
               cat "$report" >> "$GITHUB_STEP_SUMMARY"
               cat "$report"
-              echo "::error::Some skills failed the marketplace's checks, so nothing was published. The summary says which."
+              echo "::error::Some skills failed the marketplace's checks. The summary says which, and nothing was published."
             else
               echo "::error::$(jq -r '[.title, .detail] | map(select(.)) | join(" ")' "$report")"
             fi

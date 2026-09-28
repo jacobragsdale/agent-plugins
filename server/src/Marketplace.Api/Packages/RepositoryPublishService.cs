@@ -142,7 +142,9 @@ public sealed class RepositoryPublishService(
         var unchanged = report.Packages.Count(package => package.Status == "unchanged");
         var published = report.Packages.Count(package => package.Published);
         var headline = failed > 0 && published > 0 ? $"published {published}, {failed} failed"
+            : failed > 0 && report.DryRun ? $"{failed} of {report.Packages.Length} failed (dry run)"
             : failed > 0 ? $"{failed} of {report.Packages.Length} failed, so nothing was published"
+            : going == 0 ? $"nothing to publish, {unchanged} unchanged"
             : report.DryRun ? $"{going} to publish, {unchanged} unchanged (dry run)"
             : $"published {published}, {unchanged} unchanged";
         var text = new StringBuilder($"### {report.Namespace}: {headline}\n\n| Package | Version | Change |\n| --- | --- | --- |\n");

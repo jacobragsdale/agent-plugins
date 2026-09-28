@@ -106,8 +106,10 @@ public sealed partial class MarketplaceApiTests
         // A rerun changes nothing; an edited skill goes out as its next patch, and the report reads as Markdown.
         using (var form = RepositoryForm(files))
         {
-            var report = await (await pipeline.PostAsync("/api/namespaces/ci-team/publish", form, ct)).Content.ReadFromJsonAsync<JsonElement>(Json, ct);
-            Assert.Equal(["notes unchanged 1.0.0", "review unchanged 1.0.0"], Statuses(report));
+            using var request = new HttpRequestMessage(HttpMethod.Post, "/api/namespaces/ci-team/publish") { Content = form };
+            request.Headers.Accept.ParseAdd("text/markdown");
+            var markdown = await (await pipeline.SendAsync(request, ct)).Content.ReadAsStringAsync(ct);
+            Assert.StartsWith("### ci-team: nothing to publish, 2 unchanged", markdown);
         }
 
         files["skills/review/SKILL.md"] = Skill("review", "Follow the longer checklist.");

@@ -67,7 +67,7 @@ steps:
           Write-Host $text
           Write-Host "##vso[task.uploadsummary]$report"
           if ($status -eq '200') { exit 0 }
-          Write-Host "##vso[task.logissue type=error]Some skills failed the marketplace's checks, so nothing was published. The summary says which."
+          Write-Host "##vso[task.logissue type=error]Some skills failed the marketplace's checks. The summary says which, and nothing was published."
           exit 1
         }
 

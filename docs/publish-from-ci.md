@@ -143,7 +143,7 @@ A pull request build uses the same account as the merge build, so anyone who can
 
 ## Set it up on Azure DevOps
 
-> The Azure DevOps template follows Microsoft's documented service connection flow, but it hasn't yet been run against a real Entra tenant.
+> The Azure DevOps template follows Microsoft's documented service connection flow, but it hasn't yet been run against a real Entra tenant. The GitHub Actions path has been run end to end.
 
 The marketplace admins do step 1 once. Each team does the rest.
 
@@ -225,6 +225,8 @@ Template parameters:
 
    `id-token: write` lets the job ask GitHub for a token. GitHub never gives one to a pull request from a fork, so forks can't publish or dry-run.
 
+   If the marketplace can only be reached from inside your network, run the job on a self-hosted runner there (`runs-on: self-hosted`). GitHub issues the token all the same.
+
 3. **Run it once**, and add the account it names, `github:<owner>/<repo>`, to the team the same way.
 
 Action inputs: `marketplace` and `namespace` (required), `path` (default `.`), `dry-run` (default `auto`, a dry run for `pull_request` events), and `audience` (default: the marketplace URL).
@@ -271,7 +273,7 @@ The pipeline log and summary say what went wrong. The common cases:
 | `The token comes from X, which this marketplace does not trust.`               | The issuer isn't in `Auth:Machines`. Ask the marketplace admins.                                                                    |
 | `This token belongs to a person.`                                              | The token was issued for a person, not the service connection. Use the service connection's own identity.                           |
 | `The job can't sign in to the marketplace. Add 'permissions: id-token: write'` | GitHub only. Add the permission to the job.                                                                                         |
-| `Some skills failed the marketplace's checks, so nothing was published.`       | The summary names each folder and what's wrong with it, the same messages `agent-plugins validate` prints. Fix them and push again. |
+| `Some skills failed the marketplace's checks.`                                 | The summary names each folder and what's wrong with it, the same messages `agent-plugins validate` prints. Fix them and push again. |
 | `A CI pipeline can only publish.`                                              | The pipeline tried something else, such as sharing. Do that from the portal.                                                        |
 | `HTTP 413: The repository is larger than the 50 MB limit.`                     | Set `path` to the folder that holds the skills, or mark the rest `export-ignore` in `.gitattributes`.                               |
 | `HTTP 429: Too many changes in a short time.`                                  | The pipeline ran more than `RateLimits:UploadsPerHour` times in an hour. Wait for the time it gives.                                |
