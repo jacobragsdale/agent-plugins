@@ -36,6 +36,8 @@ Production registers only `Negotiate` (Kerberos). The container needs:
 
 Negotiate on Linux is Kerberos-only: clients must use the fully qualified name in the URL, and clocks must agree within five minutes. The app's preflight checks both.
 
+CI pipelines sign in with a bearer token from an issuer listed in `Auth__Machines__N__*` (Entra ID or GitHub Actions) and can only read and publish; see [Publish skills from CI](../docs/publish-from-ci.md).
+
 `Auth__AllowDevHeader=true` trusts `X-Dev-User`; use it only where a domain is unavailable (the home lab). `ASPNETCORE_ENVIRONMENT=Development` turns it on regardless. Outside Development beside Negotiate the server logs a startup warning, because anyone who can reach it can then claim any account. `Auth__EnableNegotiate=false` exists for the test host.
 
 ## Configuration

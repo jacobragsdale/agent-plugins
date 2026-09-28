@@ -74,6 +74,28 @@ public sealed class AuthOptions
     /// account, so it is only for a server without a domain (the home lab); startup logs a warning.
     /// </summary>
     public bool AllowDevHeader { get; set; }
+
+    /// <summary>
+    /// Token issuers whose app-only tokens sign in CI pipelines. Each becomes a JwtBearer scheme; the
+    /// caller's account is <see cref="MachineIssuer.Prefix"/> plus the value of <see cref="MachineIssuer.AccountClaim"/>.
+    /// </summary>
+    public MachineIssuer[] Machines { get; set; } = [];
+}
+
+/// <summary>An OIDC issuer CI pipelines sign in with, such as Entra ID or GitHub Actions.</summary>
+public sealed class MachineIssuer
+{
+    /// <summary>The issuer, whose <c>/.well-known/openid-configuration</c> names its signing keys.</summary>
+    public string Authority { get; set; } = string.Empty;
+
+    /// <summary>The audience tokens must be minted for: the marketplace's app ID URI, or the URL GitHub is asked for.</summary>
+    public string Audience { get; set; } = string.Empty;
+
+    /// <summary>The claim that names the pipeline: <c>oid</c> on Entra ID, <c>repository</c> on GitHub.</summary>
+    public string AccountClaim { get; set; } = string.Empty;
+
+    /// <summary>Put before the claim value, such as <c>app:</c> or <c>github:</c>, so a machine never looks like a person.</summary>
+    public string Prefix { get; set; } = string.Empty;
 }
 
 public sealed class ClientOptions

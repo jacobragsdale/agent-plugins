@@ -68,8 +68,9 @@ export class PeoplePicker {
     const people = found.people.map((person) => ({ value: { kind: "user" as const, ...person }, label: person.displayName, detail: person.account }));
     const teams = this.teams() ? found.teams.map((team) => ({ value: { kind: "team" as const, ...team }, label: team.displayName, detail: "Team" })) : [];
     const exact = found.people.some((person) => person.account.toLowerCase() === typed.toLowerCase());
-    // Someone who never signed in isn't in the directory yet; their Windows account still works.
-    const raw = typed.length > 0 && typed.length <= 256 && !exact ? [{ value: { kind: "user" as const, account: typed, displayName: typed }, label: `Add “${typed}”`, detail: "Windows account" }] : [];
+    // Someone who never signed in isn't in the directory yet; their Windows account still works. A CI pipeline's account has a prefix, as in github:owner/repo.
+    const detail = typed.includes(":") ? "CI pipeline" : "Windows account";
+    const raw = typed.length > 0 && typed.length <= 256 && !exact ? [{ value: { kind: "user" as const, account: typed, displayName: typed }, label: `Add “${typed}”`, detail }] : [];
     return [...people, ...teams, ...raw];
   });
 

@@ -15,6 +15,7 @@ using Marketplace.Api.Packages;
 using Marketplace.Api.Storage;
 using Marketplace.Api.Teams;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authentication.Negotiate;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -69,6 +70,11 @@ if (devHeader)
     schemes.Add(DevHeaderAuthenticationHandler.SchemeName);
 }
 
+if (authOptions.Machines.Length > 0)
+{
+    schemes.Add(JwtBearerDefaults.AuthenticationScheme);
+}
+
 if (schemes.Count == 0)
 {
     throw new InvalidOperationException("No authentication scheme is enabled: set Auth:EnableNegotiate or run in Development.");
@@ -83,10 +89,12 @@ var authentication = builder.Services.AddAuthentication(options =>
 authentication.AddPolicyScheme(forwardingScheme, forwardingScheme, options =>
 {
     options.ForwardDefaultSelector = context =>
-        devHeader && (!authOptions.EnableNegotiate || context.Request.Headers.ContainsKey(DevHeaderAuthenticationHandler.UserHeader))
+        MachineAuthentication.SelectScheme(context, authOptions.Machines)
+        ?? (devHeader && (!authOptions.EnableNegotiate || context.Request.Headers.ContainsKey(DevHeaderAuthenticationHandler.UserHeader))
             ? DevHeaderAuthenticationHandler.SchemeName
-            : NegotiateDefaults.AuthenticationScheme;
+            : NegotiateDefaults.AuthenticationScheme);
 });
+authentication.AddMachines(authOptions.Machines);
 if (authOptions.EnableNegotiate)
 {
     authentication.AddNegotiate(options =>
@@ -140,6 +148,7 @@ builder.Services.AddScoped<EventsService>();
 builder.Services.AddScoped<TeamService>();
 builder.Services.AddScoped<SuggestionService>();
 builder.Services.AddScoped<BundleService>();
+builder.Services.AddScoped<RepositoryPublishService>();
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<ProblemExceptionHandler>();
 // Malformed bodies and route values throw so ProblemExceptionHandler can say what was wrong, in every environment.
@@ -166,7 +175,7 @@ builder.Services.AddRateLimiter(options =>
         }
 
         var path = request.Path.Value ?? string.Empty;
-        var upload = HttpMethods.IsPost(request.Method) && (path.EndsWith("/versions", StringComparison.Ordinal) || path.EndsWith("/suggestions", StringComparison.Ordinal));
+        var upload = HttpMethods.IsPost(request.Method) && (path.EndsWith("/versions", StringComparison.Ordinal) || path.EndsWith("/suggestions", StringComparison.Ordinal) || path.EndsWith("/publish", StringComparison.Ordinal));
         return upload
             ? RateLimitPartition.GetFixedWindowLimiter("upload:" + account.ToLowerInvariant(), _ => new FixedWindowRateLimiterOptions { PermitLimit = limits.UploadsPerHour, Window = TimeSpan.FromHours(1) })
             : RateLimitPartition.GetFixedWindowLimiter("write:" + account.ToLowerInvariant(), _ => new FixedWindowRateLimiterOptions { PermitLimit = limits.WritesPerMinute, Window = TimeSpan.FromMinutes(1) });

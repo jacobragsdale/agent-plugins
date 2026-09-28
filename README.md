@@ -221,6 +221,7 @@ Agent Plugins is at version 0.2.2. The desktop app is built for Windows, and the
 
 - [Install your first package](docs/install-a-package.md) — from a fresh install to a skill your agent uses, and an MCP server after it.
 - [Publish to the marketplace](docs/publish-to-marketplace.md) — publish a skill from your machine with the CLI or the `publish` skill.
+- [Publish skills from CI](docs/publish-from-ci.md) — let a repository's pipeline publish what changed on every merge, with a plan on every pull request.
 - [Publish a source](docs/publish-source.md) — write a portable package by hand and publish it as a zip.
 - [Publish a source repository](docs/publish-source-repository.md) — publish a browseable catalog outside the marketplace server.
 

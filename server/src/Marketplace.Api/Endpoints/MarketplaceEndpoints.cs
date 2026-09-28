@@ -83,6 +83,12 @@ public static class MarketplaceEndpoints
                 throw new ProblemException(403, "Your account is blocked from changing anything in the marketplace. Contact the marketplace admins.");
             }
 
+            if (invocation.HttpContext.MarketplaceIdentity().IsMachine && !HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method)
+                && invocation.HttpContext.GetEndpoint()?.Metadata.GetMetadata<IEndpointNameMetadata>()?.EndpointName is not ("Publish" or "PublishRepository"))
+            {
+                throw new ProblemException(403, "A CI pipeline can only publish. Anything else takes a person signed in.");
+            }
+
             return await next(invocation);
         });
 
@@ -215,6 +221,56 @@ public static class MarketplaceEndpoints
             .DisableAntiforgery()
             .WithMetadata(new RequestSizeLimitAttribute(MaxUploadRequestBytes))
             .ProducesProblem(403).ProducesProblem(409).ProducesProblem(413).ProducesProblem(415).ProducesProblem(422).ProducesProblem(503);
+
+        // CI publishes a whole repository at once: every package whose files changed goes out as its next patch.
+        authenticated.MapPost("/namespaces/{ns}/publish", async Task<Results<Ok<RepositoryPublish>, UnprocessableEntity<RepositoryPublish>, ContentHttpResult>> (string ns, HttpContext context, RepositoryPublishService repository, CancellationToken cancellationToken) =>
+        {
+            if (!context.Request.HasFormContentType)
+            {
+                throw new ProblemException(415, "Upload with multipart/form-data: the repository as a zip in archive, plus optional dryRun and changelog.");
+            }
+
+            IFormCollection form;
+            try
+            {
+                form = await context.Request.ReadFormAsync(cancellationToken);
+            }
+            catch (InvalidDataException error)
+            {
+                throw new ProblemException(400, $"The upload form could not be read: {error.Message}");
+            }
+
+            if (form.Files.GetFile("archive") is not { Length: > 0 } file)
+            {
+                throw new ProblemException(422, "The form has no archive. Send the repository as a zip, for example from git archive --format=zip HEAD.");
+            }
+
+            if (file.Length > ArchiveInspector.MaxArchiveBytes)
+            {
+                throw new ProblemException(413, $"The repository is larger than the {ArchiveInspector.MaxArchiveBytes / 1024 / 1024} MB limit. Archive only the folder that holds the skills.");
+            }
+
+            byte[] archive;
+            await using (var stream = file.OpenReadStream())
+            {
+                using var buffer = new MemoryStream((int)file.Length);
+                await stream.CopyToAsync(buffer, cancellationToken);
+                archive = buffer.ToArray();
+            }
+
+            var report = await repository.PublishAsync(context.MarketplaceIdentity(), ns, archive, Optional(form["changelog"]), Optional(form["dryRun"]) is "true", cancellationToken);
+            var status = report.Failed ? StatusCodes.Status422UnprocessableEntity : StatusCodes.Status200OK;
+            if (context.Request.GetTypedHeaders().Accept.Any(accept => accept.MediaType.Equals("text/markdown", StringComparison.OrdinalIgnoreCase)))
+            {
+                return TypedResults.Text(repository.Markdown(report), "text/markdown", System.Text.Encoding.UTF8, status);
+            }
+
+            return report.Failed ? TypedResults.UnprocessableEntity(report) : TypedResults.Ok(report);
+        })
+            .WithName("PublishRepository")
+            .DisableAntiforgery()
+            .WithMetadata(new RequestSizeLimitAttribute(MaxUploadRequestBytes))
+            .ProducesProblem(403).ProducesProblem(413).ProducesProblem(415).ProducesProblem(503);
 
         authenticated.MapPut("/packages/{ns}/{packageId}/versions/{version}/yank", async Task<NoContent> (string ns, string packageId, string version, HttpContext context, PublishService publish, CancellationToken cancellationToken) =>
         {

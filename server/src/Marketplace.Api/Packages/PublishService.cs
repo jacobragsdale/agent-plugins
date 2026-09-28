@@ -154,6 +154,30 @@ public sealed partial class PublishService(
         return inspected;
     }
 
+    /// <summary>The live version of <c>ns/packageId</c> when <paramref name="archive"/> holds exactly its files, else null.</summary>
+    public async Task<string?> UnchangedVersionAsync(string ns, string packageId, byte[] archive, CancellationToken cancellationToken)
+    {
+        var package = await db.Packages.AsNoTracking()
+            .Include(candidate => candidate.Versions)
+            .SingleOrDefaultAsync(candidate => candidate.Namespace == ns && candidate.PackageId == packageId, cancellationToken);
+        if (package is null || LatestVersion(package) is not { } live)
+        {
+            return null;
+        }
+
+        var proposed = ArchiveInspector.ReadFiles(archive);
+        var current = ArchiveInspector.ReadFiles(await store.GetAsync(live.StoragePath, cancellationToken));
+        return proposed.Count == current.Count && proposed.All(file => current.TryGetValue(file.Key, out var bytes) && bytes.AsSpan().SequenceEqual(file.Value))
+            ? live.Version
+            : null;
+    }
+
+    /// <summary>The version a new publish of <c>ns/packageId</c> takes: 1.0.0, or the patch after the highest ever used.</summary>
+    public async Task<string> NextVersionAsync(string ns, string packageId, CancellationToken cancellationToken) =>
+        NextPatch(await db.Packages.AsNoTracking()
+            .Include(candidate => candidate.Versions)
+            .SingleOrDefaultAsync(candidate => candidate.Namespace == ns && candidate.PackageId == packageId, cancellationToken)).ToString();
+
     /// <summary>
     /// Stores a checked archive as a new version and makes it live. <paramref name="identity"/> is who acts
     /// (the owner, or an owner accepting a suggestion); <paramref name="publishedBy"/> is who it is credited to.
@@ -303,6 +327,8 @@ public sealed partial class PublishService(
         if (dryRun)
         {
             await transaction.RollbackAsync(cancellationToken);
+            // The rolled-back rows are still tracked as saved; a publish later in this scope must not find them.
+            db.ChangeTracker.Clear();
             return (new CommitResult(View(package, version, waiting, warnings), Created: true), previous);
         }
 
@@ -849,12 +875,18 @@ public sealed partial class PublishService(
 
     public static void CheckTarget(MarketplaceIdentity identity, string ns, string packageId)
     {
+        CheckOwner(identity, ns);
+        CheckIds(ns, packageId);
+    }
+
+    public static void CheckOwner(MarketplaceIdentity identity, string ns)
+    {
         if (!identity.Owns(ns))
         {
-            throw ProblemException.NotOwner(identity.Account, ns);
+            throw identity.IsMachine
+                ? new ProblemException(403, $"{identity.Account} is not a member of {ns}. A {ns} owner adds {identity.Account} under Members on the team's page in the marketplace, then this pipeline can publish there.")
+                : ProblemException.NotOwner(identity.Account, ns);
         }
-
-        CheckIds(ns, packageId);
     }
 
     private static void CheckIds(string ns, string packageId)

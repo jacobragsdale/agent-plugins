@@ -1,0 +1,82 @@
+# Publishes every skill in the repository whose files changed to a marketplace team. A pull request build
+# only shows what would publish. Use it from the skills repository's pipeline:
+#
+#   resources:
+#     repositories:
+#       - repository: agent-plugins
+#         type: git
+#         name: <project>/agent-plugins
+#   steps:
+#     - template: ci/publish-skills/azure-pipelines.yml@agent-plugins
+#       parameters:
+#         namespace: data-team
+#         serviceConnection: skills-publish
+#
+# See docs/publish-from-ci.md.
+parameters:
+  - name: namespace
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: marketplace
+    type: string
+    default: https://marketplace.corp.example
+  - name: audience
+    displayName: The marketplace's app ID URI in Entra ID
+    type: string
+    default: api://agent-plugins-marketplace
+  - name: path
+    type: string
+    default: .
+  - name: dryRun
+    type: string
+    default: auto
+    values: [auto, "true", "false"]
+
+steps:
+  - task: AzureCLI@2
+    displayName: Publish skills to ${{ parameters.namespace }}
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: pscore
+      scriptLocation: inlineScript
+      inlineScript: |
+        $ErrorActionPreference = 'Stop'
+        $token = az account get-access-token --resource $env:AUDIENCE --query accessToken -o tsv
+        if ($LASTEXITCODE -ne 0 -or -not $token) {
+          Write-Host "##vso[task.logissue type=error]The service connection could not get a token for $env:AUDIENCE."
+          exit 1
+        }
+
+        $dry = ($env:DRY_RUN -eq 'true') -or ($env:DRY_RUN -eq 'auto' -and $env:BUILD_REASON -eq 'PullRequest')
+        $archive = Join-Path $env:AGENT_TEMPDIRECTORY 'skills.zip'
+        $report = Join-Path $env:AGENT_TEMPDIRECTORY 'marketplace-report.md'
+        git archive --format=zip -o $archive HEAD -- $env:SKILLS_PATH
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+
+        $curl = if ($IsWindows) { 'curl.exe' } else { 'curl' }
+        $changelog = git log -1 --format=%s
+        $status = & $curl -sS -o $report -w '%{http_code}' `
+          -H "Authorization: Bearer $token" -H 'Accept: text/markdown' `
+          -F "archive=@$archive;type=application/zip" -F "dryRun=$($dry.ToString().ToLower())" `
+          --form-string "changelog=$changelog" `
+          "$($env:MARKETPLACE.TrimEnd('/'))/api/namespaces/$env:NAMESPACE/publish"
+
+        $text = Get-Content -Raw $report
+        if ($status -eq '200' -or ($status -eq '422' -and $text.StartsWith('###'))) {
+          Write-Host $text
+          Write-Host "##vso[task.uploadsummary]$report"
+          if ($status -eq '200') { exit 0 }
+          Write-Host "##vso[task.logissue type=error]Some skills failed the marketplace's checks, so nothing was published. The summary says which."
+          exit 1
+        }
+
+        try { $problem = $text | ConvertFrom-Json; $text = "$($problem.title) $($problem.detail)".Trim() } catch { }
+        Write-Host "##vso[task.logissue type=error]HTTP ${status}: $text"
+        exit 1
+    env:
+      MARKETPLACE: ${{ parameters.marketplace }}
+      AUDIENCE: ${{ parameters.audience }}
+      NAMESPACE: ${{ parameters.namespace }}
+      SKILLS_PATH: ${{ parameters.path }}
+      DRY_RUN: ${{ parameters.dryRun }}

@@ -204,6 +204,123 @@ fn stage_in(
     })
 }
 
+/// A package found in a repository: `path` is relative to the repository with forward slashes,
+/// empty for the root, and staging it with `package_id` publishes it.
+pub struct DiscoveredPackage {
+    pub path: String,
+    pub package_id: String,
+}
+
+/// Every package a repository publishes, and the skill folders that could not be read.
+pub struct Discovery {
+    pub packages: Vec<DiscoveredPackage>,
+    /// `(path, message)` for each skill folder that is not a package.
+    pub errors: Vec<(String, String)>,
+}
+
+/// Finds what a repository publishes: the packages its `agent-plugins.json` declares, or else
+/// every folder with a `SKILL.md` in it as a package of its own. A skill's subfolders belong to
+/// it, so discovery does not look inside one.
+pub fn discover(input: &Path, namespace: &str) -> Result<Discovery, String> {
+    let root = input
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", input.display()))?;
+    let manifest = root.join(crate::manifest::SOURCE_MANIFEST_FILE);
+    if manifest.is_file() {
+        let bytes = std::fs::read(&manifest).map_err(|error| error.to_string())?;
+        let crate::manifest::SourceManifest::V2(manifest) =
+            crate::manifest::SourceManifest::from_slice(&bytes)?;
+        return Ok(Discovery {
+            packages: manifest
+                .packages
+                .into_iter()
+                .map(|package| DiscoveredPackage {
+                    path: String::new(),
+                    package_id: package.id,
+                })
+                .collect(),
+            errors: Vec::new(),
+        });
+    }
+    let relative = |path: &Path| {
+        path.strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    let mut discovery = Discovery {
+        packages: Vec::new(),
+        errors: Vec::new(),
+    };
+    let mut found: BTreeMap<String, String> = BTreeMap::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let path = relative(&dir);
+        if let Some(skill_md) = skill_file(&dir) {
+            match skill_frontmatter(&skill_md) {
+                Ok((name, _)) => {
+                    let id = skill_id(namespace, &name);
+                    if let Some(first) = found.get(&id) {
+                        discovery.errors.push((
+                            path.clone(),
+                            format!(
+                                "Two skills are named {id}: {} and {}. Rename one.",
+                                display_folder(first),
+                                display_folder(&path)
+                            ),
+                        ));
+                    } else {
+                        found.insert(id.clone(), path.clone());
+                        discovery.packages.push(DiscoveredPackage {
+                            path,
+                            package_id: id,
+                        });
+                    }
+                }
+                Err(error) => discovery
+                    .errors
+                    .push((path, error.replace(&format!("{}/", root.display()), ""))),
+            }
+            continue;
+        }
+        let mut children = std::fs::read_dir(&dir)
+            .map_err(|error| format!("{path}: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        // Popped from the end, so reverse order visits folders alphabetically.
+        children.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
+        for entry in children {
+            let skip = entry
+                .file_name()
+                .to_str()
+                .is_none_or(crate::digest::is_tool_leftover);
+            if !skip
+                && entry
+                    .file_type()
+                    .map_err(|error| error.to_string())?
+                    .is_dir()
+            {
+                stack.push(entry.path());
+            }
+        }
+    }
+    if discovery.packages.is_empty() && discovery.errors.is_empty() {
+        return Err(
+            "No skills found: nothing here has a SKILL.md file, and there is no agent-plugins.json."
+                .to_string(),
+        );
+    }
+    Ok(discovery)
+}
+
+fn display_folder(path: &str) -> &str {
+    if path.is_empty() {
+        "the top folder"
+    } else {
+        path
+    }
+}
+
 /// A skill pack: every subdirectory is one skill, published together as one package.
 fn stage_pack(
     input: &Path,
@@ -775,6 +892,92 @@ mod tests {
             format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
         )
         .expect("write");
+    }
+
+    #[test]
+    fn discovers_every_skill_folder_in_a_repository() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path();
+        write_skill(
+            &repo.join("skills/review"),
+            "team-review",
+            "Reviews a change.",
+        );
+        write_skill(&repo.join(".claude/skills/notes"), "notes", "Takes notes.");
+        // A skill's own subfolders belong to it, and tool leftovers are never searched.
+        write_skill(
+            &repo.join("skills/review/examples/inner"),
+            "inner",
+            "Nested.",
+        );
+        write_skill(&repo.join("node_modules/pkg"), "vendored", "Not ours.");
+        std::fs::create_dir_all(repo.join("skills/broken")).expect("dir");
+        std::fs::write(repo.join("skills/broken/SKILL.md"), "# no header\n").expect("write");
+        write_skill(&repo.join("other/review"), "review", "Same name again.");
+
+        let discovery = discover(repo, "team").expect("discover");
+        let found = discovery
+            .packages
+            .iter()
+            .map(|package| (package.path.as_str(), package.package_id.as_str()))
+            .collect::<Vec<_>>();
+        // Folders are searched alphabetically, so the first of two same-named skills wins.
+        assert_eq!(
+            found,
+            [
+                (".claude/skills/notes", "notes"),
+                ("other/review", "review")
+            ]
+        );
+        let errors = discovery
+            .errors
+            .iter()
+            .map(|(path, message)| format!("{path}: {message}"))
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(
+            errors[0].starts_with("skills/broken: skills/broken/SKILL.md must start with a header"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[1].starts_with(
+                "skills/review: Two skills are named review: other/review and skills/review."
+            ),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn discovers_a_single_skill_or_a_declared_source() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill = temp.path().join("one");
+        write_skill(&skill, "one", "The only skill.");
+        let discovery = discover(&skill, "team").expect("discover");
+        assert_eq!(discovery.packages.len(), 1);
+        assert_eq!(discovery.packages[0].path, "");
+
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&source).expect("dir");
+        std::fs::write(
+            source.join("agent-plugins.json"),
+            r#"{"version":2,"source":{"id":"acme","name":"Acme","description":"Acme."},"packages":[
+                {"id":"a","components":[{"kind":"skill","path":"skills/a"}]},
+                {"id":"b","components":[{"kind":"skill","path":"skills/b"}]}]}"#,
+        )
+        .expect("manifest");
+        let ids = discover(&source, "team")
+            .expect("discover")
+            .packages
+            .into_iter()
+            .map(|package| package.package_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["a", "b"]);
+
+        let empty = temp.path().join("empty");
+        std::fs::create_dir_all(&empty).expect("dir");
+        assert!(discover(&empty, "team")
+            .err()
+            .is_some_and(|error| error.starts_with("No skills found")));
     }
 
     #[test]

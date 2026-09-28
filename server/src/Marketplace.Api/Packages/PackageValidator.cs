@@ -16,6 +16,12 @@ public sealed record ValidationOutcome(bool Accepted, IReadOnlyList<ValidationEr
 /// <summary>What <c>validate-source stage</c> wraps into a one-package source zip at <see cref="OutputZip"/>.</summary>
 public sealed record StagingRequest(string InputDirectory, string OutputZip, string Namespace, string PackageId, string? Name, string? Description);
 
+/// <summary>A package <c>validate-source discover</c> found: <see cref="Path"/> is relative to the repository, empty for its root.</summary>
+public sealed record DiscoveredPackage(string Path, string PackageId);
+
+/// <summary>What a repository publishes, and the skill folders that are not packages (<see cref="ValidationError.Path"/> is the folder).</summary>
+public sealed record Discovery(IReadOnlyList<DiscoveredPackage> Packages, IReadOnlyList<ValidationError> Errors);
+
 public interface IPackageValidator
 {
     /// <summary>Validates a source tree and scans it for files that look like credentials.</summary>
@@ -23,6 +29,9 @@ public interface IPackageValidator
 
     /// <summary>Wraps a skill, a folder of skills, an MCP document, or a source tree; throws a 422 <see cref="ProblemException"/> when it cannot.</summary>
     Task StageAsync(StagingRequest request, CancellationToken cancellationToken);
+
+    /// <summary>Finds the packages in a repository; throws a 422 <see cref="ProblemException"/> when it holds none.</summary>
+    Task<Discovery> DiscoverAsync(string repositoryDirectory, string ns, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -71,6 +80,25 @@ public sealed class ProcessPackageValidator(IOptions<ValidatorOptions> options, 
         {
             throw new InvalidOperationException($"The validator did not stage the upload: {stderr}");
         }
+    }
+
+    public async Task<Discovery> DiscoverAsync(string repositoryDirectory, string ns, CancellationToken cancellationToken)
+    {
+        var (stdout, stderr) = await RunAsync(["discover", "--namespace", ns, repositoryDirectory], cancellationToken);
+        if (stdout.Length == 0)
+        {
+            throw new InvalidOperationException($"The validator found nothing to report: {stderr}");
+        }
+
+        var report = JsonSerializer.Deserialize<DiscoveryReport>(stdout, JsonOptions) ?? throw new InvalidOperationException("The validator produced malformed output.");
+        if (report.Fatal is { } fatal)
+        {
+            throw new ProblemException(422, Relative(fatal, repositoryDirectory));
+        }
+
+        return new Discovery(
+            report.Packages.Select(package => new DiscoveredPackage(package.Path, package.PackageId)).ToArray(),
+            report.Errors.Select(error => new ValidationError(error.Path, error.Message)).ToArray());
     }
 
     /// <summary>The server's scratch folder means nothing to the person uploading, so paths are shown relative to their upload.</summary>
@@ -158,6 +186,18 @@ public sealed class ProcessPackageValidator(IOptions<ValidatorOptions> options, 
     {
         [JsonPropertyName("validInstalls")]
         public int ValidInstalls { get; init; }
+
+        [JsonPropertyName("errors")]
+        public ValidatorError[] Errors { get; init; } = [];
+
+        [JsonPropertyName("fatal")]
+        public string? Fatal { get; init; }
+    }
+
+    private sealed class DiscoveryReport
+    {
+        [JsonPropertyName("packages")]
+        public DiscoveredPackage[] Packages { get; init; } = [];
 
         [JsonPropertyName("errors")]
         public ValidatorError[] Errors { get; init; } = [];

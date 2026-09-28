@@ -28,6 +28,12 @@ public sealed record MarketplaceIdentity(
     /// <summary>An admin blocked the account: it may read, but not change anything.</summary>
     public bool IsBlocked { get; init; }
 
+    /// <summary>
+    /// A CI pipeline signed in with a machine token (<see cref="MachineAuthentication"/>). It has no personal namespace,
+    /// is never an admin, and may only read and publish to the teams it is a member of.
+    /// </summary>
+    public bool IsMachine { get; init; }
+
     public bool Owns(string ns) => Namespaces.Contains(ns, StringComparer.Ordinal) || IsAdmin;
 
     public bool InTeam(string ns) => Teams.Any(team => team.Namespace == ns);
@@ -50,6 +56,13 @@ public static partial class IdentityResolver
         if (string.IsNullOrEmpty(account))
         {
             throw new InvalidOperationException("The authenticated principal has no name.");
+        }
+
+        if (principal.HasClaim(claim => claim.Type == MachineAuthentication.MachineClaim))
+        {
+            // Machines match only by their exact name: no username rule, no admin, no personal namespace.
+            List<string> official = options.OfficialPublishers.Any(candidate => IsClaimant(candidate.Trim(), account)) ? [MarketplaceIdentity.OfficialNamespace] : [];
+            return new MarketplaceIdentity(account, string.Empty, account, IsAdmin: false, official, []) { IsMachine = true };
         }
 
         var username = Username(account);
@@ -88,6 +101,11 @@ public static partial class IdentityResolver
     /// </summary>
     public static async Task<MarketplaceIdentity> SettleAsync(MarketplaceIdentity identity, MarketplaceDbContext db, CancellationToken cancellationToken)
     {
+        if (identity.IsMachine)
+        {
+            return await SettleMachineAsync(identity, db, cancellationToken);
+        }
+
         var plain = identity.Namespace;
         var prefixed = NamespaceFor("u-" + Username(identity.Account));
         var derived = await db.Publishers.AnyAsync(publisher => publisher.Namespace == plain && publisher.Kind == PublisherKind.Team, cancellationToken)
@@ -128,6 +146,23 @@ public static partial class IdentityResolver
             Namespaces = [.. personal, .. identity.Namespaces.Skip(1), .. memberships.Select(team => team.Namespace)],
             Teams = memberships,
             IsBlocked = blocked && !identity.IsAdmin,
+        };
+    }
+
+    /// <summary>A machine's teams, matched by its exact name, and whether an admin blocked it.</summary>
+    private static async Task<MarketplaceIdentity> SettleMachineAsync(MarketplaceIdentity identity, MarketplaceDbContext db, CancellationToken cancellationToken)
+    {
+        var joined = await db.TeamMembers.AsNoTracking()
+            .Where(member => member.Account.ToLower() == identity.Account.ToLower())
+            .Join(db.Publishers, member => member.Namespace, publisher => publisher.Namespace, (member, publisher) => new TeamMembership(member.Namespace, publisher.DisplayName, false))
+            .ToListAsync(cancellationToken);
+        var blocks = await db.Blocks.AsNoTracking().Select(block => block.Account).ToListAsync(cancellationToken);
+        var memberships = joined.DistinctBy(team => team.Namespace).OrderBy(team => team.Namespace, StringComparer.Ordinal).ToArray();
+        return identity with
+        {
+            Namespaces = [.. identity.Namespaces, .. memberships.Select(team => team.Namespace)],
+            Teams = memberships,
+            IsBlocked = blocks.Any(block => IsClaimant(block.Trim(), identity.Account)),
         };
     }
 

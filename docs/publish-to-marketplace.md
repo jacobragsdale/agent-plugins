@@ -30,6 +30,10 @@ Install the official `publish` skill from the marketplace (search for `official/
 
 The skill validates the package, proposes a better description and tags, runs a dry run, and publishes with your confirmation. Ask for it "just for me" and it publishes privately. The rest of this page is what it does by hand.
 
+## From a repository, in CI
+
+A team whose skills live in Git can have its pipeline publish them: every merge to `main` publishes the skills that changed, and every pull request shows what would publish. [Publish skills from CI](publish-from-ci.md) sets it up for Azure Pipelines and GitHub Actions.
+
 ## From a terminal
 
 `agent-plugins` is the Agent Plugins executable. The app adds its folder to your user PATH when it starts; until then, run it as `"%LOCALAPPDATA%\Agent Plugins\agent-plugins.com"`.

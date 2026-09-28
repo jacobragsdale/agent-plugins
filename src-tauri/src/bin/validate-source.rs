@@ -6,6 +6,12 @@ fn main() {
             Err(()) => usage(),
         }
     }
+    if args.first().is_some_and(|command| command == "discover") {
+        match &args[1..] {
+            [flag, namespace, input] if flag == "--namespace" => discover(namespace, input),
+            _ => usage(),
+        }
+    }
     match parse_args(args) {
         Ok(Arguments {
             input,
@@ -154,6 +160,35 @@ fn stage(args: &StageArguments) -> ! {
     }
 }
 
+/// Prints the packages a repository publishes as `{ packages: [{ path, packageId }], errors:
+/// [{ path, message }] }`, or `{ fatal }`. The marketplace server parses it.
+fn discover(namespace: &str, input: &str) -> ! {
+    match agent_plugins_lib::staging::discover(std::path::Path::new(input), namespace) {
+        Ok(discovery) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "packages": discovery
+                        .packages
+                        .iter()
+                        .map(|package| serde_json::json!({ "path": package.path, "packageId": package.package_id }))
+                        .collect::<Vec<_>>(),
+                    "errors": discovery
+                        .errors
+                        .iter()
+                        .map(|(path, message)| serde_json::json!({ "path": path, "message": message }))
+                        .collect::<Vec<_>>(),
+                })
+            );
+            std::process::exit(0);
+        }
+        Err(error) => {
+            println!("{}", fatal_json(&error));
+            std::process::exit(1);
+        }
+    }
+}
+
 fn finish(result: Result<agent_plugins_lib::SourceValidationReport, String>, json: bool) {
     match result {
         Ok(report) if json => {
@@ -207,5 +242,6 @@ fn fatal_json(message: &str) -> String {
 fn usage() -> ! {
     eprintln!("usage: validate-source [--json] [--secrets] PATH-OR-HTTPS-URL");
     eprintln!("       validate-source stage --namespace NS --package-id ID [--name TEXT] [--description TEXT] INPUT OUT.zip");
+    eprintln!("       validate-source discover --namespace NS REPOSITORY");
     std::process::exit(2);
 }

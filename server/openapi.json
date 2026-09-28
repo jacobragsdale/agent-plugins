@@ -158,6 +158,21 @@
         }
       }
     },
+    "/api/namespaces/{ns}/publish": {
+      "post": {
+        "tags": ["Marketplace.Api"],
+        "operationId": "PublishRepository",
+        "parameters": [{ "name": "ns", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RepositoryPublish" } } } },
+          "422": { "description": "Unprocessable Entity", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RepositoryPublish" } } } },
+          "403": { "description": "Forbidden", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "413": { "description": "Payload Too Large", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "415": { "description": "Unsupported Media Type", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } },
+          "503": { "description": "Service Unavailable", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDetails" } } } }
+        }
+      }
+    },
     "/api/packages/{ns}/{packageId}/versions/{version}/yank": {
       "put": {
         "tags": ["Marketplace.Api"],
@@ -1243,6 +1258,32 @@
           "note": { "type": ["null", "string"] }
         }
       },
+      "RepositoryPackage": {
+        "required": ["packageId", "path", "status", "version", "liveVersion", "published", "files", "errors", "warnings"],
+        "type": "object",
+        "properties": {
+          "packageId": { "type": ["null", "string"] },
+          "path": { "type": "string" },
+          "status": { "type": "string" },
+          "version": { "type": ["null", "string"] },
+          "liveVersion": { "type": ["null", "string"] },
+          "published": { "type": "boolean" },
+          "files": { "type": "array", "items": { "$ref": "#/components/schemas/DryRunFile" } },
+          "errors": { "type": "array", "items": { "$ref": "#/components/schemas/ValidationError" } },
+          "warnings": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "RepositoryPublish": {
+        "required": ["namespace", "dryRun", "packages", "elsewhere"],
+        "type": "object",
+        "properties": {
+          "namespace": { "type": "string" },
+          "dryRun": { "type": "boolean" },
+          "packages": { "type": "array", "items": { "$ref": "#/components/schemas/RepositoryPackage" } },
+          "elsewhere": { "type": "array", "items": { "type": "string" } },
+          "failed": { "type": "boolean" }
+        }
+      },
       "ReviewRequest": {
         "required": ["decision", "note"],
         "type": "object",
@@ -1380,6 +1421,7 @@
         "properties": { "id": { "type": "string" }, "installedBase": { "pattern": "^-?(?:0|[1-9]\\d*)$", "type": ["integer", "string"], "format": "int32" } }
       },
       "TransferRequest": { "required": ["account"], "type": "object", "properties": { "account": { "type": ["null", "string"] } } },
+      "ValidationError": { "required": ["path", "message"], "type": "object", "properties": { "path": { "type": "string" }, "message": { "type": "string" } } },
       "VersionView": {
         "required": ["version", "archiveDigest", "sizeBytes", "publishedBy", "publishedAt", "changelog", "yanked", "componentKinds", "purged"],
         "type": "object",

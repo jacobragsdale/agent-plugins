@@ -1,10 +1,15 @@
 using System.Security.Cryptography;
 using Marketplace.Api.Packages;
 using Marketplace.Api.Storage;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.IdentityModel.JsonWebTokens;
+using Microsoft.IdentityModel.Protocols;
+using Microsoft.IdentityModel.Protocols.OpenIdConnect;
+using Microsoft.IdentityModel.Tokens;
 using Npgsql;
 using Testcontainers.PostgreSql;
 using Xunit;
@@ -23,6 +28,17 @@ public sealed class MarketplaceApiFactory : WebApplicationFactory<Program>, IAsy
         .WithUsername("marketplace")
         .WithPassword("marketplace")
         .Build();
+
+    /// <summary>A CI issuer shaped like GitHub Actions: the account is <c>github:</c> plus the repository.</summary>
+    public const string GitHubIssuer = "https://ci.test";
+
+    /// <summary>A CI issuer shaped like Entra ID: the account is <c>app:</c> plus the service principal's object ID.</summary>
+    public const string EntraIssuer = "https://login.test/tenant/v2.0";
+
+    public const string MachineAudience = "https://marketplace.test";
+
+    /// <summary>Signs the machine tokens both test issuers publish, so no discovery document is fetched.</summary>
+    private static readonly SymmetricSecurityKey SigningKey = new(RandomNumberGenerator.GetBytes(32));
 
     public InMemoryArtifactStore Store { get; } = new();
 
@@ -65,6 +81,16 @@ public sealed class MarketplaceApiFactory : WebApplicationFactory<Program>, IAsy
         builder.UseSetting("Auth:EnableNegotiate", "false");
         builder.UseSetting("Auth:AdminAccounts:0", "TEST\\admin");
         builder.UseSetting("Auth:OfficialPublishers:0", "TEST\\curator");
+        // A machine named like an admin is still no admin.
+        builder.UseSetting("Auth:AdminAccounts:1", "github:acme/admin");
+        builder.UseSetting("Auth:Machines:0:Authority", GitHubIssuer);
+        builder.UseSetting("Auth:Machines:0:Audience", MachineAudience);
+        builder.UseSetting("Auth:Machines:0:AccountClaim", "repository");
+        builder.UseSetting("Auth:Machines:0:Prefix", "github:");
+        builder.UseSetting("Auth:Machines:1:Authority", EntraIssuer);
+        builder.UseSetting("Auth:Machines:1:Audience", "api://marketplace");
+        builder.UseSetting("Auth:Machines:1:AccountClaim", "oid");
+        builder.UseSetting("Auth:Machines:1:Prefix", "app:");
         builder.UseSetting("Client:MinimumVersion", "0.1.0");
         builder.UseSetting("Client:LatestVersion", "0.2.0");
         builder.UseSetting("RateLimits:WritesPerMinute", "100000");
@@ -76,6 +102,16 @@ public sealed class MarketplaceApiFactory : WebApplicationFactory<Program>, IAsy
 
         builder.ConfigureServices(services =>
         {
+            foreach (var (scheme, issuer) in new[] { ("Machine0", GitHubIssuer), ("Machine1", EntraIssuer) })
+            {
+                services.PostConfigure<JwtBearerOptions>(scheme, options =>
+                {
+                    var configuration = new OpenIdConnectConfiguration { Issuer = issuer };
+                    configuration.SigningKeys.Add(SigningKey);
+                    options.ConfigurationManager = new StaticConfigurationManager<OpenIdConnectConfiguration>(configuration);
+                });
+            }
+
             services.RemoveAll<IArtifactStore>();
             services.AddSingleton<IArtifactStore>(Store);
             if (ValidatorPath is null)
@@ -96,6 +132,29 @@ public sealed class MarketplaceApiFactory : WebApplicationFactory<Program>, IAsy
         }
 
         return client;
+    }
+
+    /// <summary>A client signed in as a CI pipeline, with a token from <paramref name="issuer"/> carrying <paramref name="claims"/>.</summary>
+    public HttpClient ClientForMachine(IReadOnlyDictionary<string, object> claims, string issuer = GitHubIssuer, string audience = MachineAudience, DateTime? expires = null)
+    {
+        var client = CreateClient();
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", MachineToken(claims, issuer, audience, expires));
+        return client;
+    }
+
+    public static string MachineToken(IReadOnlyDictionary<string, object> claims, string issuer = GitHubIssuer, string audience = MachineAudience, DateTime? expires = null)
+    {
+        var until = expires ?? DateTime.UtcNow.AddMinutes(10);
+        return new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor
+        {
+            Issuer = issuer,
+            Audience = audience,
+            Claims = claims.ToDictionary(),
+            NotBefore = until.AddMinutes(-20),
+            IssuedAt = until.AddMinutes(-20),
+            Expires = until,
+            SigningCredentials = new SigningCredentials(SigningKey, SecurityAlgorithms.HmacSha256),
+        });
     }
 
     private static string? LocateValidator()
@@ -207,4 +266,7 @@ public sealed class PermissiveValidator : IPackageValidator
 
     public Task StageAsync(StagingRequest request, CancellationToken cancellationToken) =>
         throw new NotSupportedException("Wrapping uploads needs the Rust validator; build validate-source.");
+
+    public Task<Discovery> DiscoverAsync(string repositoryDirectory, string ns, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("Finding a repository's packages needs the Rust validator; build validate-source.");
 }

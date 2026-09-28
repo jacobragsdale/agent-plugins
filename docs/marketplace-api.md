@@ -10,10 +10,13 @@ JSON is camelCase and timestamps are ISO 8601 UTC. An `account` is a Windows acc
 
 Every endpoint except `GET /api/health` and the OpenAPI document at `/openapi/v1.json` requires an authenticated principal.
 
-| Scheme      | When                                          | Header                                                 |
-| ----------- | --------------------------------------------- | ------------------------------------------------------ |
-| `Negotiate` | Production. Kerberos validated with a keytab. | `Authorization: Negotiate <token>`                     |
-| `DevHeader` | Development, or `Auth:AllowDevHeader`.        | `X-Dev-User: <username>`, optional `X-Dev-Groups: a,b` |
+| Scheme      | When                                                | Header                                                 |
+| ----------- | --------------------------------------------------- | ------------------------------------------------------ |
+| `Negotiate` | Production. Kerberos validated with a keytab.       | `Authorization: Negotiate <token>`                     |
+| `DevHeader` | Development, or `Auth:AllowDevHeader`.              | `X-Dev-User: <username>`, optional `X-Dev-Groups: a,b` |
+| `Bearer`    | CI pipelines, when `Auth:Machines` lists an issuer. | `Authorization: Bearer <app-only OIDC token>`          |
+
+A bearer token signs in a CI pipeline as a machine account: the entry's `Prefix` plus the value of its `AccountClaim`, such as `app:<oid>` or `github:owner/repo`. A machine account publishes to the teams it is a member of, matched by its exact name, and may call only `GET` routes and the two publish routes. It is never an admin and has no personal namespace, so `GET /api/me` answers `namespace: ""`. A token with an `scp` claim belongs to a person and is refused. A refused token answers `401` with a `detail` that names the problem: expired, the wrong audience, an untrusted issuer, or the missing account claim. [Publish skills from CI](publish-from-ci.md) explains the setup.
 
 `Auth:AllowDevHeader` beside Negotiate outside Development logs a startup warning: anyone who can reach the server can claim any account. The server still starts, because the home lab runs that way on purpose.
 
@@ -322,6 +325,47 @@ With `dryRun=true` the answer is `200` and nothing is stored or claimed:
 
 `files` compares the upload with the live version: `new`, `changed`, `removed`, or `same`. Every error a real publish would answer, it answers the same way.
 
+### `POST /api/namespaces/{namespace}/publish`
+
+Publishes every package in a repository to one namespace, the way CI does on each merge. Multipart form: `archive` (a zip of the repository, such as `git archive --format=zip HEAD`), optional `dryRun`, and optional `changelog`, recorded against every version it publishes. It counts against `RateLimits:UploadsPerHour` as one upload.
+
+The server finds the packages with `validate-source discover`: the packages `agent-plugins.json` declares when it is at the root, and otherwise every folder with a `SKILL.md` as a skill package of its own, named by its header without a `<namespace>-` prefix. It doesn't look inside a skill folder or in tool leftovers such as `node_modules`. Each package is staged like an upload and compared file by file with its live version:
+
+| `status`    | Meaning                                                                                                                                                      |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `new`       | Not in the namespace yet. It takes `1.0.0`.                                                                                                                  |
+| `changed`   | Its files differ from the live version. It takes the patch after the highest version ever used, and `files` lists the difference as a dry run does.          |
+| `unchanged` | It holds exactly the live version's files. Nothing is published.                                                                                             |
+| `failed`    | It failed a check a publish runs, or it is a skill folder that isn't a package (a duplicate name, an unreadable header). `packageId` is null for the latter. |
+
+Every package is checked, with the same checks and dry run as [a single publish](#post-apipackagesnamespacepackageidversions), before any is published. When one fails, nothing is published, and the answer is `422` with the whole report. Otherwise the answer is `200`, and without `dryRun` every `new` and `changed` package is published with `published: true`. A publish that fails at that point, such as a version another publish took a moment earlier, marks only that package `failed` and answers `422`; a rerun publishes what is still different.
+
+```json
+{
+  "namespace": "data-team",
+  "dryRun": false,
+  "failed": false,
+  "packages": [
+    {
+      "packageId": "review",
+      "path": "skills/review",
+      "status": "changed",
+      "version": "1.2.1",
+      "liveVersion": "1.2.0",
+      "published": true,
+      "files": [{ "path": "skills/review/SKILL.md", "status": "changed" }],
+      "errors": [],
+      "warnings": []
+    }
+  ],
+  "elsewhere": ["by-hand"]
+}
+```
+
+`elsewhere` lists the namespace's packages that the repository doesn't hold. They are left as they are.
+
+With `Accept: text/markdown`, the same status codes carry the report as Markdown for a job summary: a heading such as `### data-team: published 1, 1 unchanged`, a table of packages, versions, and changed files, then each failure and warning. A caller that doesn't own the namespace gets `403`; for a machine account, the `title` names the account a team owner should add.
+
 ### `PUT` and `DELETE /api/packages/{namespace}/{packageId}/versions/{version}/yank`
 
 `PUT` withdraws a version: it leaves the namespace archive, the catalog, and the index. `DELETE` restores it. Both return `204` and are idempotent. Withdrawing the live version makes the version below it live, and PCs move to it at their next sync like any other change to the live version; when that changes an MCP server, each person is asked first. The package's name, description, and tags follow whichever version is live afterwards. A purged version cannot be restored (`409`). Owner or admin only (`403`); `404` when the version does not exist.
@@ -591,7 +635,8 @@ Errors are RFC 9457 problem documents. `title` is a full sentence written for th
 | `Auth:LdapMachineAccountName` / `LdapMachineAccountPassword` | Optional. The account LDAP binds as. Unset, it binds with the Kerberos client keytab in `KRB5_CLIENT_KTNAME` or the ticket cache.                                                                                                                                        |
 | `Auth:AdminGroup`                                            | AD group whose members may call `/api/admin/*`.                                                                                                                                                                                                                          |
 | `Auth:AdminAccounts`                                         | Accounts that may call `/api/admin/*`. An entry with a domain matches that account only.                                                                                                                                                                                 |
-| `Auth:OfficialPublishers`                                    | Principals that may publish under `official`. Matched like `AdminAccounts`.                                                                                                                                                                                              |
+| `Auth:OfficialPublishers`                                    | Principals that may publish under `official`. Matched like `AdminAccounts`; a machine account only by its exact name.                                                                                                                                                    |
+| `Auth:Machines`                                              | Token issuers CI pipelines sign in with: a list of `{ Authority, Audience, AccountClaim, Prefix }`. See [Publish skills from CI](publish-from-ci.md#server-configuration).                                                                                               |
 | `Client:MinimumVersion` / `LatestVersion`                    | Returned by `/api/health`. Older clients get `426` (defaults `0.2.0` and `0.2.2`).                                                                                                                                                                                       |
 | `RateLimits:WritesPerMinute` / `UploadsPerHour`              | Per-account limits on changes and on publishes and suggestions. Defaults `120` and `60`.                                                                                                                                                                                 |
 | `Notifications:WebhookUrl`                                   | Optional. Receives `POST { "text", "link" }` for each publish that puts a package in the MCP review queue and each problem report, for example a Teams or Slack incoming webhook.                                                                                        |

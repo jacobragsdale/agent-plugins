@@ -76,7 +76,7 @@ Every command, and a failed `scheduled-sync` event, rejects with `{ kind, messag
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `agent-plugins`              | The app. A recognized first argument runs a CLI verb headless instead (`cli.rs`).                                                                                                      |
 | `agent-plugins-console`      | Windows installs it as `agent-plugins.com`, the console twin shells wait for; it runs the app with its console and returns the exit code. `windows/installer-hooks.nsh` puts it there. |
-| `validate-source`            | Validates a source tree or archive. The marketplace server shells out to this binary.                                                                                                  |
+| `validate-source`            | Validates a source tree or archive, stages uploads, and finds a repository's packages (`discover`). The marketplace server shells out to this binary.                                  |
 | `validate-source-repository` | Validates a catalog document.                                                                                                                                                          |
 | `generate-schema`            | Regenerates the checked-in JSON Schemas from the Rust types.                                                                                                                           |
 
