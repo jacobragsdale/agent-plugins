@@ -399,14 +399,14 @@ pub(super) fn stage_documents(
                         owned.format,
                         std::slice::from_ref(&owned.key_path),
                     )
-                    .map_err(&named)?;
+                    .map_err(named)?;
                 }
                 OwnedResource::TextBlock(owned) => {
                     updated = managed_documents::remove_text_blocks(
                         &updated,
                         std::slice::from_ref(&owned.marker_id),
                     )
-                    .map_err(&named)?;
+                    .map_err(named)?;
                 }
                 OwnedResource::Path(_) => {}
             }
@@ -427,7 +427,7 @@ pub(super) fn stage_documents(
                             desired.format,
                             &desired.key_path,
                         )
-                        .map_err(&named)?
+                        .map_err(named)?
                         .is_some_and(|value| value != desired.value);
                     if unmanaged && !replace_unmanaged {
                         return Err(format!(
@@ -442,12 +442,12 @@ pub(super) fn stage_documents(
                         desired.format,
                         &[(desired.key_path.clone(), desired.value.clone())],
                     )
-                    .map_err(&named)?;
+                    .map_err(named)?;
                 }
                 DesiredResource::TextBlock(desired) if desired.document_path == path => {
                     let unmanaged = !owned
                         && managed_documents::text_block_body(&updated, &desired.marker_id)
-                            .map_err(&named)?
+                            .map_err(named)?
                             .is_some();
                     if unmanaged && !replace_unmanaged {
                         return Err(format!(
@@ -461,7 +461,7 @@ pub(super) fn stage_documents(
                         &updated,
                         &[(desired.marker_id.clone(), desired.body.clone())],
                     )
-                    .map_err(&named)?;
+                    .map_err(named)?;
                 }
                 _ => {}
             }
