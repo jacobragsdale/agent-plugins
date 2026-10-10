@@ -1,46 +1,60 @@
 # Find skills at scale: implementation plan
 
-**Status:** Ready to implement<br>
+**Status:** Part 1 ready to implement; Part 2 deferred<br>
 **Date:** 2026-10-10<br>
 **Written against:** upstream commit `db77bc5` (version 0.2.2)<br>
 **For:** an agent working in the internal (work) fork of this repository
 
-The marketplace will hold hundreds to thousands of skills. Today the desktop app lists every space alphabetically with every card on the page, so a person scrolls past everyone else's skills to reach their own, and search only helps someone who already knows a name. This plan changes the order things appear in, lets sections collapse, makes search ranked and forgiving, and lets each person follow or hide spaces.
+The marketplace will hold hundreds to thousands of skills. Today the desktop app lists every space alphabetically with every card on the page, so a person scrolls past everyone else's skills to reach their own, and search only helps someone who already knows a name.
+
+**Part 1 is what to build now.** It is one desktop release that changes only the window's TypeScript: spaces in a better order, collapsible groups, ranked search, and follow and hide. It needs no Rust change, no server change, no database migration, and no portal change.
+
+**Part 2 is deferred.** It holds everything that needs the server, the Rust core, or the portal, kept here so nothing is lost. Don't build it until Jacob asks.
 
 Nothing in this plan is implemented upstream. Upstream holds only this document and the measurements in [section 4](#4-measurements).
 
 ## 1. Rules for the agent
 
-1. **Find code by symbol, not by line.** Your fork differs from upstream: the portal was rebuilt on the internal UI framework, sign-in uses the internal system, and there are fixes around connectivity and installing. Every reference here names a file and a symbol as they are upstream. [Appendix A](#appendix-a-symbol-map) lists them all. If a symbol is missing in the fork, find the code with the same job and write the mapping in your progress notes before you change anything.
-2. **Behavior is the spec; markup is not.** Where this plan shows React or Angular, build the same behavior with the fork's components. The two pure modules, [`feed`](#53-the-feed-module) and [`search`](#63-the-search-module), are specified as functions with test tables. Port those exactly, tests included.
-3. **Commit straight to `main`, one phase at a time.** No branches and no pull requests; Jacob decided this. A phase can be several commits, but every commit must leave `main` working, so run the gates before each push. Each phase ends with a **Checkpoint**. Don't start the next phase until it passes.
-4. **No user-facing label for the ranking.** No "For you", "Recommended", or "Suggested" anywhere. The order is simply better; Jacob decided this.
-5. **No new dependencies.** No fuzzy-search library, no virtual-list library, no state library. Everything here is a few plain functions.
-6. **Leave install, sync, and planning code alone.** This work touches how the catalog is presented, one small server table, a few index fields, and the CLI's search order. If you find yourself editing `sync.rs`, `items.rs`, `planner.rs`, or the executor, stop and re-read the phase.
-7. **Keep the fork's gates green.** Upstream's are in `AGENTS.md` and `.github/workflows/ci.yml`: typecheck, ESLint with zero warnings, Vitest, Prettier, `cargo fmt`, clippy with warnings denied, `cargo test`, the server build with warnings as errors, the `server/openapi.json` drift check, and the server integration tests.
-8. **ASK marks a question for Jacob.** [Section 12](#12-open-questions) gives a default for each one; use it and keep going. The one question that blocks says so.
+1. **Find code by symbol, not by line.** Your fork differs from upstream: the portal was rebuilt on the internal UI framework, sign-in uses the internal system, and there are fixes around connectivity and installing. Every reference here names a file and a symbol as they are upstream. [Appendix A](#appendix-a-symbol-map) lists them; Part 1 needs only its first table. If a symbol is missing in the fork, find the code with the same job and write the mapping in your progress notes before you change anything.
+2. **Behavior is the spec; markup is not.** Where this plan shows React, build the same behavior with the fork's components. The two pure modules, [`feed`](#53-the-feed-module) and [`search`](#63-the-search-module), are specified as functions with test tables. Port those exactly, tests included.
+3. **Part 1 is one release, committed straight to `main`.** No branches and no pull requests; Jacob decided this. Use as many commits as you like, but every commit must leave `main` working. Build the installer once, when Part 1 is complete, and run the [checklist](#8-finish-docs-and-one-checklist) once on that build.
+4. **Stop at the end of Part 1.** Part 2 is reference, not instructions.
+5. **Change only the window.** Part 1 touches files under `src/` and two docs. If you find yourself editing anything under `src-tauri/`, `server/`, or `website/`, stop: that work belongs to Part 2.
+6. **Run only the checks this change can break:** the window's typecheck, ESLint, unit tests, Prettier, and build. Nothing the Rust tests, the generated fixture, the server tests, or the `server/openapi.json` check cover is changing, so don't spend time on them beyond what your pipeline runs on every push anyway.
+7. **No user-facing label for the ranking.** No "For you", "Recommended", or "Suggested" anywhere. The order is simply better; Jacob decided this.
+8. **No new dependencies.** No fuzzy-search library, no virtual-list library, no state library. Everything here is a few plain functions.
+9. **ASK marks a question for Jacob.** [Section 16](#16-open-questions) gives a default for each one; use it and keep going.
 
-## 2. Goals and non-goals
+## 2. Scope
 
-Goals:
+Part 1 has five goals:
 
 1. A person who opens the app sees their own spaces first, without scrolling past anyone else's.
 2. Sections collapse, and the app remembers which ones.
 3. Search works for someone who doesn't know the skill's name: results are ranked, flat, and tolerant of word forms and partial matches.
-4. A person can follow a space to keep it on top, or hide one. The choice is stored on the server, so a second PC and the portal agree.
+4. A person can follow a space to keep it on top, or hide one.
 5. The window stays fast at 3,000 skills on a weak PC.
 
-Non-goals are in [section 11](#11-not-doing), each with the condition that would bring it back.
+Every piece of the original design, what it needs, and where it landed:
 
-Phases at a glance:
+| Piece                                                                           | What it solves                                      | What it needs                                                      | Decision                                                   |
+| ------------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------- |
+| Order spaces so a person's own come first                                       | Scrolling past everyone else's skills               | Window                                                             | Part 1                                                     |
+| Collapsible groups that create cards only when open                             | Page length and slow first paint                    | Window                                                             | Part 1                                                     |
+| Page the long tail; show 12 cards of an open group                              | Page length                                         | Window                                                             | Part 1                                                     |
+| Ranked flat search with word forms and close matches                            | Not knowing a skill's name                          | Window                                                             | Part 1                                                     |
+| Follow and hide, kept on the PC                                                 | Customizing the order                               | Window                                                             | Part 1                                                     |
+| Follows stored on the server                                                    | The same order on a second PC and in the portal     | A server table and migration, endpoints, OpenAPI, Rust, the portal | Part 2, [section 9](#9-follows-on-the-server)              |
+| Team-usage counts, "New", follower counts, a usage cache                        | Finer order inside a group; a cheaper index request | Server and Rust                                                    | Part 2, [section 10](#10-better-signals)                   |
+| The same ranking in `agent-plugins search`                                      | Better results when an agent searches               | Rust, and republishing the official skill                          | Part 2, [section 11](#11-cli-search)                       |
+| Portal order, shelves, and search                                               | The portal matching the app                         | The rebuilt portal                                                 | Part 2, [section 12](#12-portal)                           |
+| Bundle ordering, Collapse all, clickable tags, Ctrl+F, remembered Show and Sort | Polish                                              | Window, but each adds something to check                           | Left out, [section 13](#13-small-items-left-out-of-part-1) |
 
-| Phase | What                        | Touches                 | Needs                                 |
-| ----: | --------------------------- | ----------------------- | ------------------------------------- |
-|     1 | Ranked, collapsible catalog | Desktop window          | Nothing                               |
-|     2 | Ranked search               | Desktop window, CLI     | Phase 1, for tie-breaking by tier     |
-|     3 | Follow and hide             | Server, desktop, portal | Phase 1                               |
-|     4 | Better signals              | Server, desktop         | Phase 1; follower counts need Phase 3 |
-|     5 | Portal                      | Portal                  | The phase each part mirrors           |
+What Part 1 gives up by stopping there:
+
+- Follows, hides, and collapse state live on one PC. A second PC and the portal don't see them.
+- Cards inside a group are ordered by company-wide active users, not by what the person's teammates use.
+- The CLI and the portal search the way they do today.
 
 ## 3. What exists today
 
@@ -103,94 +117,89 @@ Other readings at 1,000 skills: typing a three-letter query settles in 0.24 s (0
 2. **The cost is mounting every card.** At 1,000 skills a weak PC waits 3.5 seconds for first paint and the page is 193 screens long. At 3,000 it waits 10 seconds.
 3. **Collapsing and paging fix both without a virtual list.** With about 135 cards mounted, first paint is under a second on a weak PC whether 33 or 301 headers are shown.
 4. **135 expanded cards is still 20-odd screens.** That is why an expanded group shows its first 12 cards and a **Show all** link ([5.2](#52-behavior)).
-5. **"Expand all" would rebuild the slow path**, so there is only **Collapse all**.
-6. **Cache the usage counts before adding per-person signals.** 5,000 PCs syncing every 15 minutes is about 5.6 index requests a second, each spending about 145 ms on counts that are the same for everyone ([8.2](#82-server)).
+5. **"Expand all" would rebuild the slow path**, so there isn't one.
+6. **Cache the usage counts before adding per-person signals.** 5,000 PCs syncing every 15 minutes is about 5.6 index requests a second, each spending about 145 ms on counts that are the same for everyone. That is server work, so it waits in [10.2](#102-server).
 
-### 4.4 Re-measure at work
+### 4.4 What to check at work
 
-These numbers come from Chrome on a fast Linux machine with no network latency. Before Phase 1, and again at each checkpoint, check on a real work PC or VDI session:
+These numbers come from Chrome on a fast Linux machine with no network latency. The one number worth taking at work is the last item of the [checklist](#8-finish-docs-and-one-checklist): how long the finished Part 1 takes to show its first card on a real PC.
 
-- Time from window open to the first card, and whether scrolling stutters, with the production catalog and with a seeded 1,000-skill marketplace if a test environment allows one.
-- First sync time over the real network. 300 archive requests run 4–8 at a time (`parallel.rs`), so expect roughly `300 × round-trip ÷ 6`.
-- `GET /api/index` p95 from the server's own logs once real heartbeats exist.
+## Part 1: build now
 
-If first paint after Phase 1 is still over 1.5 seconds on a weak PC, report it rather than reaching for a virtual list.
+Sections 5 to 8. One desktop release; only the window changes.
 
-## 5. Phase 1: ranked, collapsible catalog
+## 5. Catalog order and collapsing
 
-Desktop window only. No Rust, server, or portal change.
-
-### 5.1 Vocabulary
+### 5.1 Vocabulary and tiers
 
 - **Space:** a marketplace namespace. The window calls it a source (`SourceState`); its id is `sourceId`.
 - **Group:** one space's section in the catalog (`SourceGroup` upstream).
 - **Tier:** why a space sits where it does. Lower tiers come first.
 
-| Tier | A space is in this tier when                                 | Signal (upstream names)                                   |
-| ---: | ------------------------------------------------------------ | --------------------------------------------------------- |
-|    0 | The person follows it (Phase 3), or it is one of their teams | `identity.follows.followed`, `identity.teams[].namespace` |
-|    1 | Something in it was shared with them                         | any `item.marketplace.sharedWithYou`                      |
-|    2 | It is the official space                                     | `sourceId === "official"`                                 |
-|    3 | It is their own space                                        | `identity.namespace`                                      |
-|    4 | They have something installed from it                        | any item whose status counts as installed                 |
-|    5 | Everything else                                              |                                                           |
+| Tier | A space is in this tier when                       | Signal (upstream names)                                                                                   |
+| ---: | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+|    0 | The person follows it, or it is one of their teams | the saved `followed` list ([section 7](#7-follow-and-hide-kept-on-this-pc)), `identity.teams[].namespace` |
+|    1 | Something in it was shared with them               | any `item.marketplace.sharedWithYou`                                                                      |
+|    2 | It is the official space                           | `sourceId === "official"`                                                                                 |
+|    3 | It is their own space                              | `identity.namespace`                                                                                      |
+|    4 | They have something installed from it              | any item whose status counts as installed                                                                 |
+|    5 | Everything else                                    |                                                                                                           |
+|    6 | The person hid it                                  | the saved `hidden` list                                                                                   |
 
-The first matching row wins. Tiers are computed from all of a space's items, never from a filtered subset. A source that isn't a marketplace space (`item.marketplace === null`) can only be tier 4 or 5.
+Hidden is checked first; after that the first matching row wins. Tiers are computed from all of a space's items, never from a filtered subset. A source that isn't a marketplace space (`item.marketplace === null`) can only be tier 4, 5, or 6.
 
 ### 5.2 Behavior
 
-**Order of groups.** Always by tier. Tiers 0–4 are ordered by space name within the tier. Tier 5 is ordered by its most-used skill's active users, highest first, then by name. The Sort menu no longer reorders groups.
+**Order of groups.** Always by tier. Tiers 0–4 and 6 are ordered by space name within the tier. Tier 5 is ordered by its most-used skill's active users, highest first, then by name. The Sort menu no longer reorders groups.
 
 **Order of cards in a group.** Cards that need attention come first (`updateAvailable`, `partiallyInstalled`, `modified`, `missing`, `removed`). The rest follow the Sort menu: **Most used** (active users, then name) or **By name**. The default becomes **Most used**.
 
 **Collapsing.**
 
-- Every group and the Bundles section can be collapsed from its header.
-- A group starts expanded when it is tier 0. If the person has no tier 0 space, the first group in the order starts expanded, so a new person sees skills, not a list of headers. Every other group starts collapsed. Bundles start expanded.
+- Every group can be collapsed from its header.
+- A group starts expanded when it is tier 0. If the person has no tier 0 space, the first group in the order starts expanded, so a new person sees skills, not a list of headers. Every other group starts collapsed.
 - Once a person toggles a group, their choice wins over the default and is remembered on that PC.
-- A collapsed group mounts no cards. This is the performance fix; don't hide cards with CSS.
-- The header always shows the space's name, its freshness badge, and a count line such as `34 skills · 3 installed`. It adds an amber badge for updates (`1 update`) and a blue one for shares (`2 shared with you`) when there are any, so a collapsed group still says when it needs a look. A group never expands on its own.
-- The space's description and its whole-space buttons (**Share…**, **Install all**, **Replace all**, **Uninstall all**) show only while the group is expanded.
-- A **Collapse all** button sits beside the Show and Sort menus. It collapses every group on the page and saves that. There is no "Expand all".
+- A collapsed group creates no cards. This is the performance fix; don't hide cards with CSS.
+- The header shows the space's name, its freshness badge, a count line such as `34 skills · 3 installed`, and an amber badge such as `1 update` when there are any. A group never expands on its own.
+- The space's description and its buttons (**Share…**, **Install all**, **Replace all**, **Uninstall all**, and the two from [section 7](#7-follow-and-hide-kept-on-this-pc)) show only while the group is expanded.
 
 **Long groups.** An expanded group shows its first 12 cards in order, then **Show all N**. Showing all is not remembered.
 
-**The long tail.** Tier 5 shows its first 30 groups, then **Show more spaces (N more)**, 30 at a time. Not remembered.
+**The long tail.** Tiers 5 and 6 together show their first 30 groups, then **Show more spaces (N more)**, 30 at a time. Not remembered.
 
-**Bundles.** The section lists bundles from tier 0–4 spaces and any bundle shared with the person, ordered by tier and then name, followed by **Show all N bundles** when there are others.
+**Bundles.** Unchanged: the Bundles section stays above the groups as it is today.
 
 **Filters.**
 
 - Show = Everything, Official, or Teams: grouped as above, restricted to that lane.
 - Show = Installed, Updates, or Shared with you, and the "changed on this computer" filter: every group with a match is forced open with all its matches, and the tail is not paged. These sets are small.
-- While a search query is typed: until Phase 2 lands, treat it like the previous bullet.
 - Whole-space buttons stay hidden while any filter or query is active, as today (`filtering`).
 
-**Links and notices that scroll to a card.** `reveal(id)` must now also set Show to Everything and make the target reachable: its group is rendered even if it is beyond the paged tail or hidden (Phase 3), expanded even if collapsed, and showing all its cards. Hold this as one transient value (the space being revealed) that lasts until the next reveal or filter change. Don't write it to the saved preferences. A link to a bundle forces the Bundles section open and unpaged the same way.
+**Links and notices that scroll to a card.** `reveal(id)` must now also set Show to Everything and make the target reachable: its group is rendered even if it is beyond the paged tail, expanded even if collapsed, and showing all its cards. Hold this as one transient value (the space being revealed) that lasts until the next reveal or filter change. Don't write it to the saved preferences.
 
 **Remembered on this PC.** One `localStorage` entry, `agent-plugins.catalog.v1`:
 
 ```json
-{ "show": "all", "sort": "used", "groups": { "data-team": false, "official": true }, "bundles": true }
+{ "groups": { "data-team": false, "official": true }, "followed": ["ops"], "hidden": ["noisy"] }
 ```
 
-`groups` holds only spaces the person toggled, keyed by `sourceId`. Parse it with Zod and fall back to defaults on any error, including `localStorage` throwing. Collapse state is per PC on purpose; follows (Phase 3) are what roam.
+`groups` holds only spaces the person toggled, keyed by `sourceId`. Parse the entry with Zod and fall back to defaults on any error, including `localStorage` throwing. Remove the entry when the person resets the app (after `reset_app` succeeds in `resetApp`). The window uses no browser storage today, so the first item on the checklist confirms it survives a restart.
 
 ### 5.3 The `feed` module
 
 New file `src/lib/feed.ts` with `src/lib/feed.test.ts`. Pure functions, no React, no storage.
 
 ```ts
-export type SpaceTier = 0 | 1 | 2 | 3 | 4 | 5;
+export type SpaceTier = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 export type Follows = Readonly<{ followed: readonly string[]; hidden: readonly string[] }>;
 export type RankedSpace = Readonly<{ source: SourceState; tier: SpaceTier }>;
-export type GroupSummary = Readonly<{ total: number; installed: number; updates: number; shared: number }>;
+export type GroupSummary = Readonly<{ total: number; installed: number; updates: number }>;
 
 /** Why a space sits where it does. `items` are all of the space's items, unfiltered. */
-export function spaceTier(source: SourceState, items: readonly CatalogItem[], identity: AppIdentity | null, follows: Follows | null): SpaceTier;
+export function spaceTier(source: SourceState, items: readonly CatalogItem[], identity: AppIdentity | null, follows: Follows): SpaceTier;
 
-/** Every space in page order. Hidden spaces (Phase 3) are left out. */
-export function rankSpaces(sources: readonly SourceState[], itemsBySource: ReadonlyMap<string, readonly CatalogItem[]>, identity: AppIdentity | null, follows: Follows | null): readonly RankedSpace[];
+/** Every space in page order. */
+export function rankSpaces(sources: readonly SourceState[], itemsBySource: ReadonlyMap<string, readonly CatalogItem[]>, identity: AppIdentity | null, follows: Follows): readonly RankedSpace[];
 
 /** The spaces that start expanded: tier 0, or the first space when there is no tier 0. */
 export function defaultExpanded(ranked: readonly RankedSpace[]): ReadonlySet<string>;
@@ -202,7 +211,7 @@ export function compareCards(sort: "used" | "name"): (left: CatalogItem, right: 
 export function groupSummary(items: readonly CatalogItem[]): GroupSummary;
 ```
 
-`lib/marketplace.ts` already has a private `isInstalled(status)`; export it and use it for tier 4 and for `installed`. `updates` counts `updateAvailable` and `partiallyInstalled`. Until Phase 3, pass `null` for `follows`.
+`lib/marketplace.ts` already has a private `isInstalled(status)`; export it and use it for tier 4 and for `installed`. `updates` counts `updateAvailable` and `partiallyInstalled`.
 
 Tests, at minimum:
 
@@ -210,9 +219,11 @@ Tests, at minimum:
 | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | Spaces `zeta` (a team of mine), `official`, `me` (my space), `alpha` (nothing of mine), `beta` (one installed) | `zeta`, `official`, `me`, `beta`, `alpha`            |
 | `alpha` holds a skill shared with me                                                                           | `alpha` moves to second                              |
+| I follow `alpha`                                                                                               | `alpha` is tier 0, beside `zeta`, in name order      |
+| I hide `zeta`, my team                                                                                         | `zeta` is last                                       |
 | Two tier 5 spaces, most-used skill at 3 and 40 active users                                                    | The 40 comes first; equal counts fall back to name   |
 | A space is both my team and has a share                                                                        | Tier 0                                               |
-| `identity` is `null` (signed out or offline with no saved identity)                                            | Official first, installed-from next, the rest by use |
+| `identity` is `null` (signed out, or offline with no saved identity)                                           | Official first, installed-from next, the rest by use |
 | No tier 0 space                                                                                                | `defaultExpanded` is the first ranked space only     |
 | Cards: one `updateAvailable` with 0 users, one `available` with 50                                             | The update comes first under both sorts              |
 | A non-marketplace source with an installed item                                                                | Tier 4                                               |
@@ -224,32 +235,15 @@ Upstream file by file; map to the fork's equivalents.
 - **`src/App.tsx`**
   - Keep the unfiltered `itemsBySource` for tiers and headers, and derive the filtered one from it.
   - Replace `visibleSources` with `rankSpaces(...)`, then apply the filter and tail-paging rules.
-  - Load and save the preferences entry. `catalogFilter` and `catalogSort` start from it.
+  - Load and save the preferences entry. `catalogSort` starts at `"used"`.
   - `reveal`: add the Show reset and the transient revealed space.
   - Pass each group whether it is expanded, its `GroupSummary`, and a toggle callback. Keep callbacks stable (`useStableCallback`) so memoized cards don't re-render.
-- **`src/components/SourceGroup.tsx`**: make the header a native `<details>`/`<summary>` and render the body only while open. `Bundles.tsx` already does exactly this for "Show its skills"; copy that pattern. Buttons must sit outside `<summary>`. The section keeps its DOM id (`cardDomId(source.sourceId)`), because links scroll to it.
-- **`src/components/Bundles.tsx`** (`BundleGroup`): the same collapse, plus the ordering and **Show all N bundles**.
-- **`src/components/CatalogToolbar.tsx`**: the **Collapse all** button.
+- **`src/components/SourceGroup.tsx`**: make the header a native `<details>`/`<summary>` and render the body only while open. `Bundles.tsx` already does exactly this for "Show its skills"; copy that pattern. Buttons must sit outside `<summary>`. The section keeps its DOM id (`cardDomId(source.sourceId)`), because links scroll to it. Add the 12-card limit and **Show all N**.
 - **`src/App.css`**: header styles for the collapsed state.
 
 In a different UI framework, the collapse control must be operable from the keyboard, expose its expanded state to assistive technology, and not create its content while collapsed.
 
-### 5.5 Docs
-
-Update `docs/app-reference.md`: the "Show and sort menus" row, a new "Groups" subsection covering order, collapse, **Show all**, and **Show more spaces**, and the `agent-plugins://open/...` row (it now expands the group). Update `docs/codebase-map.md` with `lib/feed.ts`.
-
-### 5.6 Checkpoint
-
-- The gates pass.
-- With a signed-in person who is in one team: that team's group is first and expanded, Official is next and collapsed, and their own space follows.
-- Collapse a group, restart the app: it is still collapsed.
-- An `agent-plugins://open/<namespace>/<id>` link to a skill in a collapsed tier 5 space beyond the first 30 scrolls to the card.
-- Show → Installed lists every installed skill without expanding anything by hand.
-- On the seeded or production catalog, a weak PC reaches first paint in under 1.5 seconds. Record the number.
-
-## 6. Phase 2: search
-
-Desktop window and CLI. No server change.
+## 6. Search
 
 ### 6.1 Behavior in the window
 
@@ -266,8 +260,6 @@ Other rules:
 - The Show menu still narrows what is searched.
 - The count beside the box reads `12 matches`, or `1 match and 6 close`.
 - With no match and no close match, keep today's empty state (`noMatchesText`).
-- Clicking a tag on a card puts that tag in the search box. Make the tag a real button.
-- **Ctrl+F** and **Ctrl+K** focus the search box and select its text. Call `preventDefault()`, because WebView2 otherwise opens its own find bar on Ctrl+F. **Esc** in the box clears it. Ignore the shortcut while a dialog is open.
 
 ### 6.2 Ranking rules
 
@@ -314,7 +306,7 @@ export function searchItems(docs: readonly SearchDoc[], query: string): SearchRe
 
 Build `searchDocs` in a `useMemo` keyed on the items. Scoring 3,000 docs per keystroke is then a few milliseconds.
 
-**Test table.** Use these six skills in every implementation's tests (window, CLI, portal), with every space in the same tier unless a row says otherwise:
+**Test table.** Use these six skills, with every space in the same tier unless a row says otherwise. The Part 2 ports to the CLI and the portal reuse the same table.
 
 | Key | Name             | Id                          | Tags              | Publisher | Description                                        | Active users |
 | --- | ---------------- | --------------------------- | ----------------- | --------- | -------------------------------------------------- | -----------: |
@@ -342,42 +334,43 @@ Build `searchDocs` in a `useMemo` keyed on the items. Scoring 3,000 docs per key
 
 ### 6.4 Window changes
 
-- **`src/App.tsx`**: when the deferred query is non-empty, render the flat results instead of the groups. `matchCount` and `noMatches` come from `SearchResults`. Remove `matchesQuery`. Add the keyboard listener.
-- **`src/components/ItemCard.tsx`**: tags become buttons that call a stable `onTag` from `CardExtrasContext`.
+- **`src/App.tsx`**: when the deferred query is non-empty, render the flat results instead of the groups. `matchCount` and `noMatches` come from `SearchResults`. Remove `matchesQuery`.
 - **`src/lib/marketplace.ts`**: `matchesAllWords` stays for bundles and space rows, but normalize both sides with `normalize`.
 
-### 6.5 CLI
-
-`agent-plugins search` (`cli.rs`, `search` and `matches_all_words`) gets the same normalization, stem, points, and order. It has no tiers, so ties go to active users and then id. Close matches print after the matches under a `close matches:` line, and `--json` gains a `close` array beside `packages` and `bundles`. Port the test table as a Rust test.
-
-Then update `docs/cli-reference.md` (`search`) and the Search section of `marketplace/skills/marketplace/SKILL.md`, which still says every word must appear. That skill is published in the `official` space, so publish the new version at work once the CLI ships. Agents send multi-word, plain-language queries, so close matches matter most here.
-
-### 6.6 Docs
-
-`docs/app-reference.md`: the "Search box" row and a "Search results" subsection with the rules in 6.1 and a plain-words version of 6.2.
-
-### 6.7 Checkpoint
-
-- The gates pass, including the test table in TypeScript and in Rust.
-- Typing `reviewing` finds a skill named "PR Review".
-- Typing two words where only one exists anywhere shows **Close matches**.
-- Ctrl+F focuses the box and no browser find bar appears on Windows.
-- A skill in a collapsed, paged tier 5 space is found by search.
-
-## 7. Phase 3: follow and hide
-
-Server, desktop, and portal. Deploy the server before releasing the desktop build ([section 10](#10-compatibility-and-rollout)).
-
-### 7.1 Behavior
+## 7. Follow and hide, kept on this PC
 
 - **Follow** a space: it becomes tier 0, so it sits with the person's teams and starts expanded.
-- **Hide** a space: it leaves the grouped catalog and the Bundles section. It is still searched, its installed skills still appear under Show → Installed and Updates, and a link to something in it still opens. A line at the bottom of the catalog, `3 hidden spaces`, opens a list with **Show again** on each.
-- Any space can be followed or hidden, including Official, a team the person is in, and their own. Hide wins over team membership.
-- Controls live in the group header, visible whether or not the group is expanded: **Follow** (which reads **Following** once set, and clears on a second click) and **Hide**. A team the person belongs to shows only **Hide**. Space rows in search results show **Follow** too.
-- A change shows at once and is confirmed by the next sync. When the marketplace can't be reached, the change is undone and the usual offline or error notice appears.
-- When the server doesn't report follows (an older server, or signed out), the controls don't render.
+- **Hide** a space: it becomes tier 6, so it goes to the very bottom, collapsed, behind the paged tail. Nothing else changes for it: it is still searched, its installed skills still appear under Show → Installed and Updates, and links into it still open.
+- Any space can be followed or hidden, including Official, a team the person is in, and their own. Hide wins over everything.
+- Two buttons join the group's other buttons, shown while the group is expanded: **Follow**, which reads **Following** once set and clears on a second click, and **Hide**, which reads **Show again** on a hidden space. A team the person belongs to shows only **Hide**, since it is already on top. Following a space un-hides it, and hiding un-follows it.
+- Both lists live in the `localStorage` entry from [5.2](#52-behavior). They apply at once and need no connection.
 
-### 7.2 Server
+In **`src/App.tsx`**, two handlers update the lists, save the entry, and pass the lists to `rankSpaces` and `spaceTier`. There is nothing to add outside the window. [Section 9](#9-follows-on-the-server) is how these lists later move to the person's account.
+
+## 8. Finish: docs and one checklist
+
+**Docs.** Update `docs/app-reference.md`: the "Search box" and "Show and sort menus" rows, the `agent-plugins://open/...` row (it now expands the group), and a short "Groups and search results" subsection covering the order, collapsing, **Show all**, **Show more spaces**, **Follow**, **Hide**, and close matches. Add `lib/feed.ts` and `lib/search.ts` to `docs/codebase-map.md`.
+
+**Checklist.** Run it once, on the installer built from the finished Part 1:
+
+1. The window's typecheck, ESLint, unit tests (including both test tables), Prettier, and build pass.
+2. Collapse a group, restart the app: it is still collapsed.
+3. Signed in as someone in one team: that team's group is first and expanded, Official is next and collapsed, and their own space follows.
+4. An `agent-plugins://open/<namespace>/<id>` link to a skill in a collapsed space beyond the first 30 scrolls to the card.
+5. Show → Installed lists every installed skill without expanding anything by hand.
+6. Typing a word form such as `reviewing` finds a skill named with `review`, and two words of which only one exists anywhere show **Close matches**.
+7. Follow a space from the tail: it moves to the top. Hide a team: it moves to the bottom. Both survive a restart.
+8. Note how long the window takes to show its first card on a real work PC. If it is over 1.5 seconds, report it rather than reaching for a virtual list.
+
+## Part 2: later, only when Jacob asks
+
+Sections 9 to 14. Each is independent of the others unless it says otherwise, and each needs more than the window. The detail is kept so the work can start without re-planning.
+
+## 9. Follows on the server
+
+Moves the two lists from the PC to the person's account, so a second PC and the portal agree. What following and hiding do does not change. Touches the server, the Rust core, the window, and the portal; deploy the server first ([section 14](#14-compatibility-and-rollout)).
+
+### 9.1 Server
 
 **Entity** (`Data/Entities.cs`, `MarketplaceDbContext`):
 
@@ -393,7 +386,7 @@ public sealed class Follow
 
 Key `(Account, Namespace)`, an index on `Namespace`, `Account` max 256, `Namespace` max 16, `State` with `HasConversion<string>()` like the other enums. Add the migration with the repo's `dotnet ef` tool (`dotnet tool restore`, then `dotnet ef migrations add AddFollows --project server/src/Marketplace.Api`).
 
-**The account key.** Upstream compares accounts case-insensitively (`Account.ToLower() == identity.Account.ToLower()` in the heartbeat and event queries). Store `identity.Account` lower-cased and look it up lower-cased. **Your fork's sign-in differs:** use whatever your fork treats as the stable key for one person, the same value it stores on `Heartbeat.Account`, so [8.2](#82-server) can join the two.
+**The account key.** Upstream compares accounts case-insensitively (`Account.ToLower() == identity.Account.ToLower()` in the heartbeat and event queries). Store `identity.Account` lower-cased and look it up lower-cased. **Your fork's sign-in differs:** use whatever your fork treats as the stable key for one person, the same value it stores on `Heartbeat.Account`, so [10.2](#102-server) can join the two. If the fork's sign-in can present one person under two spellings and no existing function reconciles them, ASK before writing the migration.
 
 **Endpoints**, in the authenticated group of `MarketplaceEndpoints.cs`:
 
@@ -416,7 +409,7 @@ Two existing filters need a look:
 
 **Also:** regenerate `server/openapi.json` the way CI's drift check does, and add a "Follows" section and the new `/api/me` field to `docs/marketplace-api.md`.
 
-### 7.3 Desktop
+### 9.2 Desktop
 
 - **`src-tauri/src/marketplace.rs`**: a `Follows { followed: Vec<String>, hidden: Vec<String> }` struct, and on `Me` an `Option<Follows>` with `#[serde(default)]`. `None` means the server didn't say.
 - **`src-tauri/src/app_state.rs`**: the same optional field on `MarketplaceIdentity`. `project.rs` copies it across where it builds the identity. The identity is already cached to disk (`write_identity_cache`), so the order survives being offline.
@@ -437,52 +430,48 @@ Two existing filters need a look:
 
 - **`src/ipc/schemas.ts`**: `identitySchema` gains `follows`, an object of two string arrays, `.nullable().default(null)`.
 - **Fixture**: add follows to the Rust fixture state, then regenerate `src/ipc/fixtures/app-state.json` (`UPDATE_FIXTURES=1 cargo test --manifest-path src-tauri/Cargo.toml app_state_fixture`, then Prettier).
-- **Window**: pass `identity.follows` to `rankSpaces` and `spaceTier` (they already take it). Add the header controls and the hidden-spaces line. On a click, update `state.identity.follows` optimistically, call `set_follow`, then `synchronize()`; on failure put the old value back and show the error through the existing path.
-- **Tests**: extend `feed.test.ts`: a followed tier 5 space becomes tier 0; a hidden team is left out of `rankSpaces`; `follows: null` behaves like empty lists.
+- **Window**: when `identity.follows` is not null, it replaces the saved lists as the source for `rankSpaces`. A click updates it optimistically, calls `set_follow`, then `synchronize()`; on failure put the old value back and show the error through the existing path. When it is null (an older server, or signed out), keep using the saved lists as in Part 1.
+- **Moving the saved lists**: the first time `identity.follows` is present and the saved lists aren't empty, send each entry with `set_follow`, then clear the saved lists. A person keeps what they set up in Part 1.
 
 No CLI command for follows.
 
-### 7.4 Portal
+### 9.3 Portal
 
-- `meSchema` gains `follows`. Note that upstream's `meSchema` and `indexPackageSchema` are `z.strictObject`, so the portal must ship in the same release as the server change.
+- `meSchema` gains `follows`. Upstream's `meSchema` and `indexPackageSchema` are `z.strictObject`, so the portal must ship in the same release as the server change.
 - `Api.setFollow(namespace, state | null)`.
 - **Follow** and **Hide** on the team page and on the Browse header shown for one space (`?space=`).
 - Browse leaves hidden spaces out of its default list. A search, the Installed filter, or `?space=` for that space still shows them.
 
-### 7.5 Docs
+### 9.4 Checkpoint
 
-`docs/app-reference.md` (a "Follow and hide" subsection) and `docs/marketplace-api.md`. If your fork keeps a list of database migrations or deployment steps, add the `AddFollows` migration to it.
+- The fork's gates pass, including the new server test and the OpenAPI drift check.
+- Follow a space on one PC: after a sync on a second PC and a reload of the portal it is on top there too.
+- A person who followed spaces under Part 1 still has them after updating.
+- Point the new desktop build at a server without this section: Follow and Hide still work from the saved lists, with no errors.
 
-### 7.6 Checkpoint
+## 10. Better signals
 
-- The gates pass, including the new server test and the OpenAPI drift check.
-- Follow a tier 5 space on one PC: it moves to the top there, and after a sync on a second PC and a reload of the portal it is on top there too.
-- Hide a team: it leaves the catalog, its installed skills still appear under Installed, and **Show again** brings it back.
-- Point the new desktop build at a server without Phase 3: no Follow or Hide controls, no errors.
+Server and Rust. Independent of section 9 except for follower counts.
 
-## 8. Phase 4: better signals
-
-Server and desktop. Small, and independent of Phase 3 except for follower counts.
-
-### 8.1 New fields
+### 10.1 New fields
 
 | Field                             | Meaning                                                                                          | Used for                                                                 |
 | --------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
 | `teamUsers` on each index package | How many other members of the caller's teams have it installed, by heartbeat in the last 30 days | Card order within a group, search ties, tier 5 order, a line on the card |
 | `recentInstalls` on each package  | Distinct accounts that installed it in the last 30 days                                          | The portal's "Most used" shelf, so it shows what is rising               |
 | `createdAt` passed to the desktop | When the package was first published. The index already sends it; the desktop drops it.          | "New" on cards                                                           |
-| `followers` per space             | How many people follow it (Phase 3)                                                              | Tier 5 order                                                             |
+| `followers` per space             | How many people follow it (section 9)                                                            | Tier 5 order                                                             |
 
-### 8.2 Server
+### 10.2 Server
 
 - **`IndexPackage`** (`CatalogService.cs`): append `int TeamUsers` and `int RecentInstalls`. **`IndexDocument`**: append `IReadOnlyDictionary<string, int> Followers`, holding only spaces with at least one.
 - **`EventsService.CountsAsync`**: also return recent installs, from the same `Events` rows filtered to the last 30 days (`AppWindow`).
 - **Team users.** Collect the member entries of the caller's teams (`TeamMembers` where the namespace is one of `identity.Teams`). Team entries can be written several ways (`CORP\jane`, `jane@corp`, `jane`), so match them to heartbeat accounts with `IdentityResolver.EntryMatches`, the way membership itself is decided, not with string equality. In your fork, use whatever function decides team membership. Leave the caller out. Count distinct matched accounts per installed package.
-- **Cache the usage data.** Register `IMemoryCache` and keep, for a configurable `Events:CountsCacheSeconds` (default 60), both the `CountsAsync` result and the list of `(Account, Installed)` heartbeat rows inside the window. Both are the same for every caller; only the team filter is per person. This removes roughly 145 ms of the 200 ms measured in [4.2](#42-sync-and-the-server). Don't invalidate on write: heartbeats arrive as often as index requests, so that would empty the cache constantly. Set the setting to 0 in the integration tests, which assert counts right after posting events.
+- **Cache the usage data.** Register `IMemoryCache` and keep, for a configurable `Events:CountsCacheSeconds` (default 60), both the `CountsAsync` result and the list of `(Account, Installed)` heartbeat rows inside the window. Both are the same for every caller; only the team filter is per person. This removes roughly 145 ms of the 200 ms measured in [4.2](#42-sync-and-the-server). Don't invalidate on write: heartbeats arrive as often as index requests, so that would empty the cache constantly. Set the setting to 0 in the integration tests, which assert counts right after posting events. The cache is worth doing on its own if the index request shows up as slow before the rest of this section is wanted.
 - **Publish warning.** Where `PublishService` builds `Warnings`, add one when the package has no tags: `No tags. Add a few topic words so people can find this by topic.` It appears in dry runs and publishes.
 - **Tests**: `teamUsers` counts a teammate's install and not the caller's or a stranger's; an entry written as a bare username matches; `recentInstalls` ignores an install older than 30 days; the tag warning appears. Regenerate `openapi.json`; update `docs/marketplace-api.md` (`GET /api/index`).
 
-### 8.3 Desktop
+### 10.3 Desktop
 
 - **Rust**: `IndexPackage` and `MarketplaceMeta` gain `team_users`, `recent_installs`, and `created_at`, all `#[serde(default)]`; `MarketplaceMeta::from_index` copies them. `Index` gains `followers`; `project.rs` puts a `followers` count on each `SourceState`. Regenerate the fixture.
 - **Schemas**: matching fields with defaults (`0`, `0`, `null`, `0`).
@@ -493,43 +482,63 @@ Server and desktop. Small, and independent of Phase 3 except for follower counts
 - **Card line**: when `teamUsers` is above 0, add `3 on your teams` to the line that already shows installs and active users.
 - **Tests**: extend `feed.test.ts` and the search table's tie cases.
 
-### 8.4 Checkpoint
+### 10.4 Checkpoint
 
-- The gates pass.
+- The fork's gates pass.
 - Two test accounts in one team: one installs a tier 5 skill and syncs; within the cache window the other sees `1 on your teams` on it, and it leads its group.
-- `GET /api/index` p95 in the server's logs is lower than before the phase. Record both numbers.
+- `GET /api/index` p95 in the server's logs is lower than before. Record both numbers.
 
-## 9. Phase 5: portal
+## 11. CLI search
 
-The portal was rebuilt in your fork, so this phase is behavior only.
+`agent-plugins search` (`cli.rs`, `search` and `matches_all_words`) gets the normalization, stem, points, and order from [6.2](#62-ranking-rules). It has no tiers, so ties go to active users and then id. Close matches print after the matches under a `close matches:` line, and `--json` gains a `close` array beside `packages` and `bundles`. Port the test table as a Rust test.
+
+Then update `docs/cli-reference.md` (`search`) and the Search section of `marketplace/skills/marketplace/SKILL.md`, which still says every word must appear. That skill is published in the `official` space, so publish the new version once the CLI ships. Agents send multi-word, plain-language queries, so close matches matter most here.
+
+## 12. Portal
+
+The portal was rebuilt in your fork, so this section is behavior only.
 
 1. **Search**: port `normalize`, `stem`, the points, and the order from [6.2](#62-ranking-rules), with the test table. Show close matches under their own heading.
-2. **Browse order**: the default sort keeps its "Most used" label but orders by the caller's own spaces first (tier 0 and 1), then team users, then active users. Hidden spaces are left out as in [7.4](#74-portal).
-3. **Home shelves**: keep "Shared with you". Add "From your teams" (skills from tier 0 spaces, newest first, at most six, omitted when empty). "Most used" orders by `recentInstalls`, then active users.
-4. **Follow and Hide**: from [7.4](#74-portal), if not already shipped with Phase 3.
+2. **Browse order**: the default sort keeps its "Most used" label but orders by the caller's own spaces first (tier 0 and 1), then team users if section 10 has shipped, then active users.
+3. **Home shelves**: keep "Shared with you". Add "From your teams" (skills from tier 0 spaces, newest first, at most six, omitted when empty). "Most used" orders by `recentInstalls` if section 10 has shipped, then active users.
+4. **Follow and Hide**: [9.3](#93-portal).
 
-Tiers need the caller's teams and follows (`/api/me`) and each package's namespace, all of which the portal already loads.
+Tiers need the caller's teams (`/api/me`) and each package's namespace, both of which the portal already loads.
 
-**Checkpoint:** the fork's portal gates pass; a member of a team sees that team's skills first on Browse and in "From your teams"; the search table passes.
+## 13. Small items left out of Part 1
 
-## 10. Compatibility and rollout
+All of these are window-only and small. They were left out because each one adds a rule to build and a thing to check, not because they are hard.
+
+| Item                                            | What it would do                                                                                                                                                                 |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bundle ordering                                 | Collapse the Bundles section; list bundles from the person's own spaces first, then **Show all N bundles**. Worth doing once the section is long enough to push the groups down. |
+| **Collapse all**                                | One button beside the Show and Sort menus that collapses every group and saves that.                                                                                             |
+| Clickable tags                                  | Clicking a tag on a card puts it in the search box. The tag becomes a real button, called through `CardExtrasContext` so memoized cards don't re-render.                         |
+| Ctrl+F and Ctrl+K                               | Focus the search box and select its text; Esc clears it. Call `preventDefault()`, because WebView2 otherwise opens its own find bar on Ctrl+F.                                   |
+| Remembered Show and Sort                        | Save both in the preferences entry. `reveal` already resets Show, so a link still lands.                                                                                         |
+| A "shared with you" badge on a collapsed header | A blue count beside the update badge. Tier 1 already lifts those spaces.                                                                                                         |
+
+## 14. Compatibility and rollout
+
+Part 1 changes only the window, so it has no ordering constraints: old and new desktop builds work against any server.
+
+For Part 2:
 
 | Combination             | Result                                                                                                                                             |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Old desktop, new server | Works. The Rust structs ignore unknown JSON fields (confirm your fork has no `deny_unknown_fields` on `Me` or the index types).                    |
-| New desktop, old server | Works. Follows are `None`, so the controls don't render; new counts default to 0.                                                                  |
+| New desktop, old server | Works. Follows fall back to the saved lists; new counts default to 0.                                                                              |
 | Portal and server       | Ship together. Strict schemas reject unknown fields, so a portal tab left open across a deploy can fail its next `/api/me` until it is reloaded.   |
-| Phases 1 and 2          | Desktop only; release whenever they pass.                                                                                                          |
-| Phase 3                 | Run the migration and deploy the server and portal first, then release the desktop build.                                                          |
-| Phase 4                 | Server first. The index's bytes change more often once `teamUsers` is in it, so desktops re-download it more; it is 45 KB gzipped at 1,000 skills. |
+| Section 9               | Run the migration and deploy the server and portal first, then release the desktop build.                                                          |
+| Section 10              | Server first. The index's bytes change more often once `teamUsers` is in it, so desktops re-download it more; it is 45 KB gzipped at 1,000 skills. |
 
 Nothing here needs a minimum client version bump.
 
-## 11. Not doing
+## 15. Not doing
 
 | Left out                                        | Why                                                                                                                           | Revisit when                                                             |
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| A virtual list                                  | Collapsing and paging bound the mounted cards; measured in [4.1](#41-the-window)                                              | First paint stays over 1.5 s on a weak PC after Phase 1                  |
+| A virtual list                                  | Collapsing and paging bound the cards on the page; measured in [4.1](#41-the-window)                                          | First paint stays over 1.5 s on a weak PC after Part 1                   |
 | Syncing only followed spaces                    | 300 spaces sync in about 2 seconds; changing subscription touches install and removal paths                                   | First sync over the real network takes more than about 20 seconds        |
 | Per-skill favorites                             | Installing a skill is the favorite; follows cover "the spaces I care about"                                                   | People ask to bookmark without installing                                |
 | A fuzzy or typo-tolerant library, or embeddings | Stems, partial matches, and normalization cover word forms; the agent-side `marketplace` skill covers plain-language requests | People report misses that are spelling mistakes                          |
@@ -537,44 +546,41 @@ Nothing here needs a minimum client version bump.
 | A category taxonomy                             | Tags exist and are searchable                                                                                                 | Tags fragment so far that topic browsing fails                           |
 | Tags for skills published from CI               | Upstream's repository publish has no way to set tags; they come only from the portal and the CLI                              | Teams that publish from CI want tags; read them from `SKILL.md` metadata |
 | A CLI command for follows                       | Nobody asked                                                                                                                  | Someone scripts their setup                                              |
-| "Expand all"                                    | It mounts every card, which is the slow path this plan removes                                                                | Never, unless a virtual list lands                                       |
+| "Expand all"                                    | It creates every card, which is the slow path this plan removes                                                               | Never, unless a virtual list lands                                       |
 | Recording what people search for                | It would show vocabulary gaps, but it logs what people type                                                                   | Jacob decides the privacy trade is worth it                              |
 
-## 12. Open questions
+## 16. Open questions
 
 None of these block. Use the default, say so in the commit message, and Jacob can change it afterward.
 
-| Question (ASK)                                               | Default in this plan                   |
-| ------------------------------------------------------------ | -------------------------------------- |
-| How many cards an expanded group shows before **Show all**   | 12                                     |
-| How many tier 5 groups show before **Show more spaces**      | 30                                     |
-| Should the Show menu's choice be remembered across launches? | Yes, with Sort and the collapse state  |
-| Wording of the controls                                      | Follow / Following / Hide / Show again |
-| How long a skill counts as new                               | 14 days                                |
-| May a person hide Official?                                  | Yes                                    |
-| The usage cache's lifetime                                   | 60 seconds                             |
+| Question (ASK)                                             | Default in this plan                   |
+| ---------------------------------------------------------- | -------------------------------------- |
+| How many cards an expanded group shows before **Show all** | 12                                     |
+| How many tail groups show before **Show more spaces**      | 30                                     |
+| Wording of the controls                                    | Follow / Following / Hide / Show again |
+| May a person hide Official?                                | Yes                                    |
 
-One question does block Phase 3 if the answer isn't obvious in your fork: **which value is the stable key for one person** across the follows table, heartbeats, and team entries ([7.2](#72-server)). If the fork's sign-in can present the same person under two spellings and there is no existing function that reconciles them, ASK before writing the migration.
+Part 2 has its own defaults where it needs them: 14 days for "New", 60 seconds for the usage cache.
 
 ## Appendix A: symbol map
 
-Upstream locations at `db77bc5`.
+Upstream locations at `db77bc5`. Part 1 needs only the first table.
 
 **Desktop window**
 
-| File                                | Symbols                                                                                                                                                                                                                                                            |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `src/App.tsx`                       | `App`; state `query`, `deferredQuery`, `catalogFilter`, `catalogSort`, `driftOnly`, `revealing`; memos `itemsBySource`, `visibleBundles`, `visibleSources`; `filtering`; `reveal`; `matchesQuery`; `matchesFilter`; `usersOf`; `withUnchangedItems`; `synchronize` |
-| `src/components/SourceGroup.tsx`    | `SourceGroup`, `FreshnessBadge`                                                                                                                                                                                                                                    |
-| `src/components/Bundles.tsx`        | `BundleGroup` (its `<details>` with content rendered only while open is the collapse pattern to copy)                                                                                                                                                              |
-| `src/components/ItemCard.tsx`       | `ItemCard` (memoized), the tag badges, `MarketplaceBadges`, `CardExtrasContext`                                                                                                                                                                                    |
-| `src/components/CatalogToolbar.tsx` | `CatalogToolbar`, `CatalogFilters`                                                                                                                                                                                                                                 |
-| `src/lib/marketplace.ts`            | `matchesAllWords`, `isInstalled` (private), `spaceLabel`, `ownsSpace`, `cardDomId`, `bundleSummary`                                                                                                                                                                |
-| `src/lib/connectivity.ts`           | `noMatchesText`, `catalogBody`                                                                                                                                                                                                                                     |
-| `src/lib/status.ts`                 | `reviewSourceRemoval`, whose prompt says a listed source comes back                                                                                                                                                                                                |
-| `src/ipc/schemas.ts`                | `identitySchema`, `marketplaceMetaSchema`, `itemSchema`, `sourceSchema`, `appStateSchema`                                                                                                                                                                          |
-| `src/ipc/client.ts`                 | `IpcCommand`, `invokeParsed`                                                                                                                                                                                                                                       |
-| `src/ipc/fixtures/app-state.json`   | Generated by the Rust test `app_state_fixture_matches_the_checked_in_contract`                                                                                                                                                                                     |
+| File                                | Symbols                                                                                                                                                                                                                                                                        |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/App.tsx`                       | `App`; state `query`, `deferredQuery`, `catalogFilter`, `catalogSort`, `driftOnly`, `revealing`; memos `itemsBySource`, `visibleBundles`, `visibleSources`; `filtering`; `reveal`; `matchesQuery`; `matchesFilter`; `usersOf`; `withUnchangedItems`; `synchronize`; `resetApp` |
+| `src/components/SourceGroup.tsx`    | `SourceGroup`, `FreshnessBadge`                                                                                                                                                                                                                                                |
+| `src/components/Bundles.tsx`        | `BundleGroup` (its `<details>` with content rendered only while open is the collapse pattern to copy)                                                                                                                                                                          |
+| `src/components/ItemCard.tsx`       | `ItemCard` (memoized), the tag badges, `MarketplaceBadges`, `CardExtrasContext`                                                                                                                                                                                                |
+| `src/components/CatalogToolbar.tsx` | `CatalogToolbar`, `CatalogFilters`                                                                                                                                                                                                                                             |
+| `src/lib/marketplace.ts`            | `matchesAllWords`, `isInstalled` (private), `spaceLabel`, `ownsSpace`, `cardDomId`, `bundleSummary`                                                                                                                                                                            |
+| `src/lib/connectivity.ts`           | `noMatchesText`, `catalogBody`                                                                                                                                                                                                                                                 |
+| `src/lib/status.ts`                 | `reviewSourceRemoval`, whose prompt says a listed source comes back                                                                                                                                                                                                            |
+| `src/ipc/schemas.ts`                | `identitySchema`, `marketplaceMetaSchema`, `itemSchema`, `sourceSchema`, `appStateSchema`                                                                                                                                                                                      |
+| `src/ipc/client.ts`                 | `IpcCommand`, `invokeParsed`                                                                                                                                                                                                                                                   |
+| `src/ipc/fixtures/app-state.json`   | Generated by the Rust test `app_state_fixture_matches_the_checked_in_contract`                                                                                                                                                                                                 |
 
 **Desktop Rust**
 
