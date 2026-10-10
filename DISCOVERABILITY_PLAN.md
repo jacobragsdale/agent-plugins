@@ -13,7 +13,7 @@ Nothing in this plan is implemented upstream. Upstream holds only this document 
 
 1. **Find code by symbol, not by line.** Your fork differs from upstream: the portal was rebuilt on the internal UI framework, sign-in uses the internal system, and there are fixes around connectivity and installing. Every reference here names a file and a symbol as they are upstream. [Appendix A](#appendix-a-symbol-map) lists them all. If a symbol is missing in the fork, find the code with the same job and write the mapping in your progress notes before you change anything.
 2. **Behavior is the spec; markup is not.** Where this plan shows React or Angular, build the same behavior with the fork's components. The two pure modules, [`feed`](#53-the-feed-module) and [`search`](#63-the-search-module), are specified as functions with test tables. Port those exactly, tests included.
-3. **One phase per pull request.** Each phase ends with a **Checkpoint**. Don't start the next phase until it passes.
+3. **Commit straight to `main`, one phase at a time.** No branches and no pull requests; Jacob decided this. A phase can be several commits, but every commit must leave `main` working, so run the gates before each push. Each phase ends with a **Checkpoint**. Don't start the next phase until it passes.
 4. **No user-facing label for the ranking.** No "For you", "Recommended", or "Suggested" anywhere. The order is simply better; Jacob decided this.
 5. **No new dependencies.** No fuzzy-search library, no virtual-list library, no state library. Everything here is a few plain functions.
 6. **Leave install, sync, and planning code alone.** This work touches how the catalog is presented, one small server table, a few index fields, and the CLI's search order. If you find yourself editing `sync.rs`, `items.rs`, `planner.rs`, or the executor, stop and re-read the phase.
@@ -542,7 +542,7 @@ Nothing here needs a minimum client version bump.
 
 ## 12. Open questions
 
-None of these block. Use the default, note it in the pull request, and Jacob can change it in review.
+None of these block. Use the default, say so in the commit message, and Jacob can change it afterward.
 
 | Question (ASK)                                               | Default in this plan                   |
 | ------------------------------------------------------------ | -------------------------------------- |
